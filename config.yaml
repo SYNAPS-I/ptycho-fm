@@ -1,0 +1,74 @@
+# PtychoViT Training Configuration
+
+# Data Configuration
+data:
+  # Option 1: Specify a list of specific files to use
+  # datafiles:
+  #   - '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/eagle/ptychodus_dp.hdf5'
+    # Add more files as needed:
+    # - '/path/to/another_sample_dp.hdf5'
+
+  # Option 2: Specify a directory - will auto-discover all paired files
+  # (comment out 'datafiles' above and uncomment this to use)
+  data_path: '/scratch/aileenluo/ptycho-vit/data'
+
+  # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
+  # If not specified or file not found, will use default normalization value
+  normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
+
+  train_split: 0.9
+  val_split: 0.1
+  random_seed: 8
+
+# Training Configuration
+training:
+  batch_size: 32
+  learning_rate: 1.0e-5
+  epochs: 21
+  ngpus: 2
+  loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
+  validation_plot_freq: 5  # Plot validation results every N epochs
+  debug: true  # Enable debug checks (e.g., verify train/val split integrity)
+
+# Model Architecture
+model:
+  # Vision Transformer Encoder
+  encoder:
+    img_size: 512
+    patch_size: 16
+    in_channels: 1
+    embed_dim: 192
+    depth: 12
+    num_heads: 3
+    mlp_ratio: 4.0
+    use_cls_token: false
+
+  # Amplitude Decoder
+  amp_decoder:
+    embed_dim: 192
+    out_channels: 1
+    hidden_dims: [128, 64, 32, 16]
+    activation: 'sigmoid'
+
+  # Phase Decoder
+  ph_decoder:
+    embed_dim: 192
+    out_channels: 1
+    hidden_dims: [128, 64, 32, 16]
+    activation: 'tanh'
+
+# Paths
+paths:
+  model_save_path: '/scratch/aileenluo/ptycho-vit/models'
+
+# WandB Configuration
+wandb:
+  enabled: true
+  entity: 'SYNAPS-I'
+  project: 'PtychoViT'
+  dataset_name: 'eagle + cameraman'
+  notes: 'config.yaml, DDP, custom data loading'
+
+# Trainer Configuration
+trainer:
+  run_num: 70
