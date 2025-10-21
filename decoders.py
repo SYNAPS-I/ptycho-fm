@@ -31,7 +31,7 @@ class Decoder(nn.Module):
                     ),
                     nn.BatchNorm2d(hidden_dim),
                     nn.ReLU(inplace=True),
-                    nn.ConvTranspose2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                    nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
                     nn.BatchNorm2d(hidden_dim),
                     nn.ReLU(inplace=True)
                 )
@@ -39,7 +39,7 @@ class Decoder(nn.Module):
             in_dim = hidden_dim
 
         # Final output layer
-        self.final_conv = nn.ConvTranspose2d(in_dim, out_channels, kernel_size=3, padding=1)
+        self.final_conv = nn.Conv2d(in_dim, out_channels, kernel_size=3, stride=1, padding=1)
         # Activation (determines whether amplitude or phase is predicted)
         if activation == "sigmoid":
             self.activation = nn.Sigmoid()

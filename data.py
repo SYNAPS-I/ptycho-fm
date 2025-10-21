@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 import h5py
+import pickle
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -11,56 +12,128 @@ from typing import Optional, Tuple
 class PtychographyDataset(Dataset):
     """
     PyTorch Dataset for ptychography data.
-    
+
     For HDF5 files: Expects paired files in the same directory:
     - *_dp.hdf5: Contains diffraction patterns
     - *_para.hdf5: Contains probe positions, object amplitude/phase, and probe information
-    
+
     Args:
         file_path (str): Path to data file or corresponding parameters file(*_dp.hdf5 or *_para.hdf5)
         patch_size (int): Size of patches to extract from the full object in pixels
         object_pixel_size (float): Object pixel size (simulated or reconstructed) in meters
         scale (float): Factor by which to scale all diffraction intensity to
-        cache_object (bool): 
+        cache_object (bool): Whether to cache object data in memory
+        normalization_dict_path (str): Path to .pkl file containing dict of {object_name: normalization_factor}
     """
-    
+
     def __init__(
         self,
         file_path: str,
         patch_size: int = 512,
         object_pixel_size: float = 6.82e-9,
-        scale: float = 102400., # 320**2 to match BCDI
-        cache_object: bool = True
+        scale: float = 100000., 
+        cache_object: bool = True,
+        normalization_dict_path: Optional[str] = None
     ):
         self.file_path = Path(file_path)
         self.patch_size = patch_size
         self.object_pixel_size = object_pixel_size
         self.scale = scale
         self.cache_object = cache_object
-        
+        self.normalization_dict_path = normalization_dict_path
+
         # Initialize cache variables
         self._cached_object = None
         self._cached_probe_positions = None
         self._cached_probe = None
-        
+
+        # Initialize persistent file handle for diffraction patterns (opened lazily on first access)
+        self._dp_file_handle = None
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
-        
+
         # Determine file type and find paired files for HDF5
         if self.file_path.suffix.lower() == '.hdf5':
             self._find_hdf5_pair()
         else:
             raise ValueError(f"Unsupported file format: {self.file_path.suffix}. Only Ptychodus format .hdf5 is supported.")
-        
+
         # Load data and get dimensions
         self._load_file_info()
-        self.object_name = os.path.basename(os.path.dirname(self.file_path))
-        print(f"Object: {self.object_name}")
-        if self.object_name == 'eagle':
-            self.normalization = 116376.83
-        
+
+        # Extract object name from file path
+        # Assumes format: .../object_name/object_name_dp.hdf5
+        self.object_name = self.dp_file.stem[:-3]  # Remove '_dp' suffix
+
+        # Load normalization factor
+        self._load_normalization()
+
         print(f"Loaded paired HDF5 files: {self.dp_file.name} and {self.para_file.name} with {self.num_patterns} patterns")
-            
+        print(f"Object: {self.object_name}, Normalization: {self.normalization}")
+
+    def _get_dp_file_handle(self):
+        """
+        Get persistent handle to diffraction patterns file.
+
+        Opens the file on first access and keeps it open for performance.
+        File is closed when:
+        - close() is called explicitly
+        - Dataset object is destroyed (__del__)
+        - Worker process terminates (for DataLoader workers)
+        """
+        if self._dp_file_handle is None:
+            self._dp_file_handle = h5py.File(self.dp_file, 'r')
+        return self._dp_file_handle
+
+    def close(self):
+        """Close file handle if open. Safe to call multiple times."""
+        if self._dp_file_handle is not None:
+            self._dp_file_handle.close()
+            self._dp_file_handle = None
+
+    def __del__(self):
+        """Cleanup: close file handle when dataset is destroyed."""
+        self.close()
+
+    def _load_normalization(self):
+        """
+        Load normalization factor from pickle file or use default.
+
+        If normalization_dict_path is provided, loads the dictionary and looks up
+        the normalization factor using self.object_name as the key.
+        Falls back to a default value if key not found or file not provided.
+        """
+        default_normalization = 100000.0  # Default fallback value
+
+        if self.normalization_dict_path is not None:
+            try:
+                with open(self.normalization_dict_path, 'rb') as f:
+                    normalization_dict = pickle.load(f)
+
+                if not isinstance(normalization_dict, dict):
+                    raise ValueError(f"Normalization file must contain a dictionary, got {type(normalization_dict)}")
+
+                # Look up normalization factor using object name
+                if self.object_name in normalization_dict:
+                    self.normalization = normalization_dict[self.object_name]
+                else:
+                    print(f"Warning: Object '{self.object_name}' not found in normalization dictionary. "
+                          f"Using default: {default_normalization}")
+                    self.normalization = default_normalization
+
+            except FileNotFoundError:
+                print(f"Warning: Normalization file not found at {self.normalization_dict_path}. "
+                      f"Using default: {default_normalization}")
+                self.normalization = default_normalization
+            except Exception as e:
+                print(f"Warning: Error loading normalization file: {e}. "
+                      f"Using default: {default_normalization}")
+                self.normalization = default_normalization
+        else:
+            # No normalization dict provided, use default
+            self.normalization = default_normalization
+
     def _find_hdf5_pair(self):
         """Find the paired HDF5 files (*_dp.hdf5 and *_para.hdf5)."""
         file_stem = self.file_path.stem
@@ -181,10 +254,10 @@ class PtychographyDataset(Dataset):
         """Load specific pattern from paired HDF5 files with efficient caching."""
         # Cache object data on first access
         self._cache_object_data()
-        
-        # Load diffraction pattern from _dp file  
-        with h5py.File(self.dp_file, 'r') as dp_file:
-            diffraction_pattern = dp_file['dp'][pattern_idx]
+
+        # Load diffraction pattern from persistent file handle
+        dp_file = self._get_dp_file_handle()
+        diffraction_pattern = dp_file['dp'][pattern_idx]
         diffraction_pattern = self.normalize(diffraction_pattern)
         # Add noise by sampling from a Poisson distribution
         diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern).astype(np.float32)
@@ -402,6 +475,6 @@ def create_positions(object_shape, probe_lateral_shape, target_overlap=0.8, fwhm
     x = np.arange(margin[1], object_shape[1] - margin[1] - 1, spacing)
 
     y, x = np.meshgrid(y, x)
-    positions = np.stack([y.reshape(-1), x.reshape(-1)], axis=1) 
+    positions = np.stack([y.reshape(-1), x.reshape(-1)], axis=1)
     positions = positions - positions.mean(0) # Center is (0, 0)
     return torch.from_numpy(positions)
