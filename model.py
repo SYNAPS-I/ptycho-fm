@@ -42,19 +42,23 @@ class PtychoViT(nn.Module):
             depth=config['encoder']['depth'],
             num_heads=config['encoder']['num_heads'],
             mlp_ratio=config['encoder']['mlp_ratio'],
+            dropout=config['encoder'].get('dropout', 0.1),
+            attn_dropout=config['encoder'].get('attn_dropout', 0.0),
             use_cls_token=config['encoder']['use_cls_token']
         )
         self.amp_decoder = Decoder(
             embed_dim=config['amp_decoder']['embed_dim'],
             out_channels=config['amp_decoder']['out_channels'],
             hidden_dims=config['amp_decoder']['hidden_dims'],
-            activation=config['amp_decoder']['activation']
+            activation=config['amp_decoder']['activation'],
+            dropout=config['amp_decoder'].get('dropout', 0.0)
         )
         self.ph_decoder = Decoder(
             embed_dim=config['ph_decoder']['embed_dim'],
             out_channels=config['ph_decoder']['out_channels'],
             hidden_dims=config['ph_decoder']['hidden_dims'],
-            activation=config['ph_decoder']['activation']
+            activation=config['ph_decoder']['activation'],
+            dropout=config['ph_decoder'].get('dropout', 0.0)
         )
     
     def forward(self, x, probe, normalization, scale):  
