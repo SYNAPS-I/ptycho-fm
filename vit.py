@@ -258,26 +258,3 @@ def create_vit_large(img_size=512, in_channels=1, use_cls_token=False):
         mlp_ratio=4.0,
         use_cls_token=use_cls_token
     )
-
-
-if __name__ == "__main__":
-    # Test the model
-    model = create_vit_base(img_size=512, in_channels=1)
-    x = torch.randn(2, 1, 512, 512)  # (batch_size, channels, height, width)
-    output = model(x)
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {output.shape}")
-    print(f"Output is spatial feature map with shape (batch, embed_dim, H, W)")
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # The output can now be fed into CNN decoders
-    print("\nExample: feeding into a CNN decoder")
-    decoder = nn.Sequential(
-        nn.ConvTranspose2d(768, 384, kernel_size=2, stride=2),
-        nn.ReLU(),
-        nn.ConvTranspose2d(384, 192, kernel_size=2, stride=2),
-        nn.ReLU(),
-        nn.ConvTranspose2d(192, 1, kernel_size=2, stride=2),
-    )
-    decoded = decoder(output)
-    print(f"Decoded output shape: {decoded.shape}")

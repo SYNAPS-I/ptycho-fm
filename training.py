@@ -46,19 +46,20 @@ class Trainer(object):
             # Save the state_dict for a non-parallel model
             torch.save(self.model.state_dict(), os.path.join(run_path, name + '.pth'))
 
-    def generate_state_dict(self, epoch_num, metrics, optimizer, scheduler=None):
+    def generate_state_dict(self, epoch_num, metrics, optimizer, wandb_run_id=None, scheduler=None):
         """Returns a dictionary of the state_dicts of all states but not the model."""
         state = {
             'current_epoch': epoch_num + 1,
             'loss_tracker': metrics,
-            'optimizer_state_dict': optimizer.state_dict(), 
-            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+            'wandb_run_id': wandb_run_id
         }
         return state
 
-    def save_model_and_states_checkpoint(self, epoch_num, metrics, config_path='config.yaml', optimizer=None, scheduler=None):
+    def save_model_and_states_checkpoint(self, epoch_num, metrics, config_path='config.yaml', optimizer=None, wandb_run_id=None, scheduler=None):
         """Save a checkpoint state that can be loaded to continue training."""
-        state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, scheduler)
+        state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
         state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         self.update_saved_model('checkpoint_model')
         torch.save(state_dict, os.path.join(state_path, 'checkpoint.state'))
@@ -80,7 +81,8 @@ class Trainer(object):
         optimizer.load_state_dict(state_dict['optimizer_state_dict'])
         if state_dict['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(state_dict['scheduler_state_dict'])
-        return current_epoch, metrics, optimizer, scheduler
+        wandb_run_id = state_dict.get('wandb_run_id', None)
+        return current_epoch, metrics, optimizer, wandb_run_id, scheduler
 
     def generate_plot(self, in_dp, out_dp, gt_amp, pred_amp, gt_ph, pred_ph, filename):
         f, ax = plt.subplots(nrows=2, ncols=3)

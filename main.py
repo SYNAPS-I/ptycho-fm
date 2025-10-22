@@ -169,21 +169,9 @@ optimizer = optim.Adam(model.parameters(), lr=LR)
 metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'validation_loss': [],
            'val_amp_loss': [], 'val_ph_loss': [], 'best_val_loss': np.inf}
 
-# Initialize wandb only on main process
-if is_main_process and config['wandb']['enabled']:
-    wandb.login()
-    run = wandb.init(
-        entity=config['wandb']['entity'],
-        project=config['wandb']['project'],
-        config={
-            "learning_rate": LR,
-            "batch_size": BATCH_SIZE,
-            "dataset": config['wandb']['dataset_name'],
-            "epochs": EPOCHS,
-            "notes": config['wandb']['notes'],
-            "model_config": config['model']
-        }
-    )
+# Track starting epoch for checkpoint resumption
+start_epoch = 0
+wandb_run_id = None
 
 trainer = Trainer(
     model,
@@ -196,10 +184,73 @@ trainer = Trainer(
     wandb_enabled=config['wandb']['enabled']
 )
 
+# Resume from checkpoint if requested
+if config['training'].get('resume_from_checkpoint', False):
+    if is_main_process:
+        print('\nResuming from checkpoint...', flush=True)
+
+    # Load model weights
+    checkpoint_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+    model_checkpoint = os.path.join(checkpoint_path, 'checkpoint_model.pth')
+
+    if os.path.exists(model_checkpoint):
+        if NGPUS > 1:
+            model.module.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
+        else:
+            model.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
+
+        # Load optimizer, metrics, and wandb run ID
+        start_epoch, metrics, optimizer, wandb_run_id, _ = trainer.load_state_checkpoint(optimizer, scheduler=None)
+
+        # Use manually specified run ID if checkpoint doesn't have one (for old checkpoints)
+        if wandb_run_id is None and config['wandb'].get('resume_run_id') is not None:
+            wandb_run_id = config['wandb']['resume_run_id']
+            if is_main_process:
+                print(f'Using manually specified wandb run ID: {wandb_run_id}', flush=True)
+
+        if is_main_process:
+            print(f'Loaded checkpoint from epoch {start_epoch - 1}', flush=True)
+            print(f'Resuming training from epoch {start_epoch}', flush=True)
+            if wandb_run_id:
+                print(f'Will resume wandb run: {wandb_run_id}', flush=True)
+            else:
+                print('No wandb run ID found - will create new wandb run', flush=True)
+    else:
+        raise FileNotFoundError(f"Checkpoint not found at {model_checkpoint}")
+
+# Initialize wandb only on main process
+if is_main_process and config['wandb']['enabled']:
+    wandb.login()
+    if wandb_run_id is not None:
+        # Resume existing wandb run
+        run = wandb.init(
+            entity=config['wandb']['entity'],
+            project=config['wandb']['project'],
+            id=wandb_run_id,
+            resume='must'
+        )
+        print(f'Resumed wandb run: {wandb_run_id}', flush=True)
+    else:
+        # Create new wandb run
+        run = wandb.init(
+            entity=config['wandb']['entity'],
+            project=config['wandb']['project'],
+            config={
+                "learning_rate": LR,
+                "batch_size": BATCH_SIZE,
+                "dataset": config['wandb']['dataset_name'],
+                "epochs": EPOCHS,
+                "notes": config['wandb']['notes'],
+                "model_config": config['model']
+            }
+        )
+        wandb_run_id = run.id
+        print(f'Created new wandb run: {wandb_run_id}', flush=True)
+
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
 
-for epoch in range(EPOCHS):
+for epoch in range(start_epoch, EPOCHS):
     # Set epoch for DistributedSampler (for proper shuffling)
     if NGPUS > 1:
         train_sampler.set_epoch(epoch)
@@ -220,7 +271,7 @@ for epoch in range(EPOCHS):
 
 # Save final checkpoint only on main process
 if is_main_process:
-    trainer.save_model_and_states_checkpoint(epoch, metrics, 'config.yaml', optimizer, scheduler=None)
+    trainer.save_model_and_states_checkpoint(epoch, metrics, 'config.yaml', optimizer, wandb_run_id, scheduler=None)
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
     with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
