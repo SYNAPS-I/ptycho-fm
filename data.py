@@ -47,9 +47,6 @@ class PtychographyDataset(Dataset):
         self._cached_probe_positions = None
         self._cached_probe = None
 
-        # Initialize persistent file handle for diffraction patterns (opened lazily on first access)
-        self._dp_file_handle = None
-
         if not self.file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -68,33 +65,6 @@ class PtychographyDataset(Dataset):
 
         # Load normalization factor
         self._load_normalization()
-
-        print(f"Loaded paired HDF5 files: {self.dp_file.name} and {self.para_file.name} with {self.num_patterns} patterns")
-        print(f"Object: {self.object_name}, Normalization: {self.normalization}")
-
-    def _get_dp_file_handle(self):
-        """
-        Get persistent handle to diffraction patterns file.
-
-        Opens the file on first access and keeps it open for performance.
-        File is closed when:
-        - close() is called explicitly
-        - Dataset object is destroyed (__del__)
-        - Worker process terminates (for DataLoader workers)
-        """
-        if self._dp_file_handle is None:
-            self._dp_file_handle = h5py.File(self.dp_file, 'r')
-        return self._dp_file_handle
-
-    def close(self):
-        """Close file handle if open. Safe to call multiple times."""
-        if self._dp_file_handle is not None:
-            self._dp_file_handle.close()
-            self._dp_file_handle = None
-
-    def __del__(self):
-        """Cleanup: close file handle when dataset is destroyed."""
-        self.close()
 
     def _load_normalization(self):
         """
@@ -119,16 +89,16 @@ class PtychographyDataset(Dataset):
                     self.normalization = normalization_dict[self.object_name]
                 else:
                     print(f"Warning: Object '{self.object_name}' not found in normalization dictionary. "
-                          f"Using default: {default_normalization}")
+                          f"Using default: {default_normalization}", flush=True)
                     self.normalization = default_normalization
 
             except FileNotFoundError:
                 print(f"Warning: Normalization file not found at {self.normalization_dict_path}. "
-                      f"Using default: {default_normalization}")
+                      f"Using default: {default_normalization}", flush=True)
                 self.normalization = default_normalization
             except Exception as e:
                 print(f"Warning: Error loading normalization file: {e}. "
-                      f"Using default: {default_normalization}")
+                      f"Using default: {default_normalization}", flush=True)
                 self.normalization = default_normalization
         else:
             # No normalization dict provided, use default
@@ -255,13 +225,13 @@ class PtychographyDataset(Dataset):
         # Cache object data on first access
         self._cache_object_data()
 
-        # Load diffraction pattern from persistent file handle
-        dp_file = self._get_dp_file_handle()
-        diffraction_pattern = dp_file['dp'][pattern_idx]
-        diffraction_pattern = self.normalize(diffraction_pattern)
-        # Add noise by sampling from a Poisson distribution
-        diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern).astype(np.float32)
-        diffraction_amp = np.sqrt(diffraction_pattern)
+        # Load diffraction pattern - open and close file for each access
+        with h5py.File(self.dp_file, 'r') as dp_file:
+            diffraction_pattern = dp_file['dp'][pattern_idx]
+            diffraction_pattern = self.normalize(diffraction_pattern)
+            # Add noise by sampling from a Poisson distribution
+            diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern).astype(np.float32)
+            diffraction_amp = np.sqrt(diffraction_pattern)
         
         # Get probe position from cache
         probe_position = self._cached_probe_positions[pattern_idx]
@@ -292,6 +262,123 @@ class PtychographyDataset(Dataset):
 
     def normalize(self, image: np.ndarray) -> np.ndarray:
         return (image / self.normalization) * self.scale
+
+
+class CombinedDataset(Dataset):
+    """
+    PyTorch Dataset for multiple ptychography datasets.
+
+    Handles multiple pairs of .hdf5 files and provides a unified interface.
+    Works with PyTorch DataLoader and DistributedSampler for DDP training.
+
+    Args:
+        file_paths: Either:
+                   - List of paths to data files (*_dp.hdf5 or *_para.hdf5), OR
+                   - Single directory path to scan for paired files
+        **dataset_kwargs: Additional arguments passed to PtychographyDataset
+    """
+
+    @staticmethod
+    def find_paired_files(directory):
+        """
+        Scan directory and find all objects that have paired *_dp.hdf5 and *_para.hdf5 files.
+
+        Returns only ONE file per object (the _dp.hdf5 file).
+        PtychographyDataset will automatically find and open the paired _para.hdf5 file.
+
+        Args:
+            directory: Path to directory to scan
+
+        Returns:
+            list: List of paths to _dp.hdf5 files ONLY (one per object, not both files)
+        """
+        directory = Path(directory)
+        if not directory.is_dir():
+            raise ValueError(f"Not a directory: {directory}")
+
+        # Find all _dp.hdf5 files
+        dp_files = list(directory.glob('*_dp.hdf5'))
+
+        # Verify each has a matching _para.hdf5 file
+        paired_files = []
+        for dp_file in sorted(dp_files):
+            # Extract object name
+            object_name = dp_file.stem[:-3]  # Remove '_dp' suffix
+            para_file = directory / f"{object_name}_para.hdf5"
+
+            if para_file.exists():
+                paired_files.append(dp_file)
+            else:
+                print(f"Warning: Skipping {dp_file.name} - no matching {para_file.name}", flush=True)
+
+        if len(paired_files) == 0:
+            raise ValueError(f"No paired HDF5 files found in {directory}")
+
+        print(f"Found {len(paired_files)} paired dataset(s) in {directory}", flush=True)
+        for f in paired_files:
+            object_name = f.stem[:-3]
+            print(f"  - {object_name}", flush=True)
+
+        return paired_files
+
+    def __init__(self, file_paths, **dataset_kwargs):
+        # Auto-detect if file_paths is a directory or a list
+        if isinstance(file_paths, (str, Path)):
+            file_path = Path(file_paths)
+            if file_path.is_dir():
+                # Scan directory for paired files
+                self.file_paths = self.find_paired_files(file_path)
+            else:
+                # Single file provided as string
+                self.file_paths = [file_path]
+        else:
+            # List of files provided
+            self.file_paths = [Path(f) for f in file_paths]
+
+        self.dataset_kwargs = dataset_kwargs
+
+        # Create a dataset for each file and track indices
+        self.datasets = []
+        self.file_info = []
+        total_patterns = 0
+
+        for file_path in self.file_paths:
+            dataset = PtychographyDataset(str(file_path), **dataset_kwargs)
+            num_patterns = len(dataset)
+
+            self.datasets.append(dataset)
+            self.file_info.append({
+                'path': file_path,
+                'num_patterns': num_patterns,
+                'start_idx': total_patterns,
+                'end_idx': total_patterns + num_patterns
+            })
+            total_patterns += num_patterns
+
+        self.total_patterns = total_patterns
+
+        print(f"CombinedDataset: {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
+
+    def __len__(self) -> int:
+        return self.total_patterns
+
+    def __getitem__(self, idx: int):
+        """
+        Get a sample by global index.
+
+        Maps the global index to the appropriate file and local index.
+        """
+        if idx >= self.total_patterns:
+            raise IndexError(f"Index {idx} out of range for dataset with {self.total_patterns} patterns")
+
+        # Find which file this index belongs to
+        for i, file_info in enumerate(self.file_info):
+            if file_info['start_idx'] <= idx < file_info['end_idx']:
+                # Convert global index to local index within file
+                local_idx = idx - file_info['start_idx']
+                return self.datasets[i][local_idx]
+
+        raise IndexError(f"Index {idx} not found in any dataset")
 
 
 def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, int]) -> Tensor:

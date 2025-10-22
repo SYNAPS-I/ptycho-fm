@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,9 +10,11 @@ import torch.distributed as dist
 import pickle
 import yaml
 
-from dataloader import CombinedDataset
+from data import CombinedDataset
 from model import PtychoViT
 from training import Trainer
+from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 
 import wandb
 
@@ -42,7 +44,7 @@ if NGPUS > 1:
     # Set CUDA device for this process before any distributed operations
     torch.cuda.set_device(local_rank)
     # Keep this print for all ranks - useful for debugging DDP setup
-    print(f"Rank: {rank}, Local Rank: {local_rank}")
+    print(f"Rank: {rank}, Local Rank: {local_rank}", flush=True)
     DEVICE = torch.device(f"cuda:{local_rank}")
 else:
     rank = 0
@@ -50,7 +52,7 @@ else:
     is_main_process = True
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Create CombinedDataset with DDP support
+# Create CombinedDataset
 # Support both 'datafiles' (list) and 'data_path' (directory)
 if 'datafiles' in config['data'] and config['data']['datafiles'] is not None:
     data_source = config['data']['datafiles']
@@ -59,35 +61,81 @@ elif 'data_path' in config['data']:
 else:
     raise ValueError("Config must specify either 'datafiles' (list) or 'data_path' (directory)")
 
-combined_dataset = CombinedDataset(
+# Create full dataset
+full_dataset = CombinedDataset(
     file_paths=data_source,
-    train_split=config['data']['train_split'],
-    batch_size=BATCH_SIZE,
-    rank=rank,
-    world_size=world_size,
-    shuffle=True,
-    random_seed=config['data']['random_seed'],
     normalization_dict_path=config['data'].get('normalization_dict_path')
+)
+
+# Split into train and validation
+train_split = config['data']['train_split']
+total_size = len(full_dataset)
+train_size = int(total_size * train_split)
+val_size = total_size - train_size
+
+# Use random_split with a generator for reproducibility
+generator = torch.Generator().manual_seed(config['data']['random_seed'])
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+
+# Create DistributedSampler if using DDP
+if NGPUS > 1:
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=config['data']['random_seed'])
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=config['data']['random_seed'])
+else:
+    train_sampler = None
+    val_sampler = None
+
+# Create DataLoaders
+dataloader_kwargs = {
+    'batch_size': BATCH_SIZE,
+    'num_workers': config['data'].get('num_workers', 0),
+    'pin_memory': config['data'].get('pin_memory', True),
+}
+
+# Add prefetch_factor and persistent_workers only if num_workers > 0
+if dataloader_kwargs['num_workers'] > 0:
+    dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+    dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+train_loader = DataLoader(
+    train_dataset,
+    sampler=train_sampler,
+    shuffle=(train_sampler is None),  # Only shuffle if not using sampler
+    **dataloader_kwargs
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    sampler=val_sampler,
+    shuffle=False,
+    **dataloader_kwargs
 )
 
 # Print configuration only on main process
 if is_main_process:
-    print("=" * 50)
-    print("Training Configuration")
-    print("=" * 50)
-    print(f"Batch size: {BATCH_SIZE} | Learning rate: {LR}")
-    print(f"Epochs: {EPOCHS} | GPUs: {NGPUS}")
-    print(f"Loss function: {config['training']['loss_function']}")
+    print("=" * 50, flush=True)
+    print("Training Configuration", flush=True)
+    print("=" * 50, flush=True)
+    print(f"Batch size: {BATCH_SIZE} | Learning rate: {LR}", flush=True)
+    print(f"Epochs: {EPOCHS} | GPUs: {NGPUS}", flush=True)
+    print(f"Loss function: {config['training']['loss_function']}", flush=True)
     if isinstance(data_source, list):
-        print(f"Data source: List of {len(data_source)} file(s)")
+        print(f"Data source: List of {len(data_source)} file(s)", flush=True)
     else:
-        print(f"Data source: {data_source}")
-    print(f"Number of files: {len(combined_dataset.file_paths)}")
-    print(f"Total batches/epoch (train): {combined_dataset.get_num_batches('train')}")
-    print(f"Total batches/epoch (val): {combined_dataset.get_num_batches('val')}")
-    print(f"Device: {DEVICE}")
-    print(f"Model save path: {MODEL_SAVE_PATH}")
-    print("=" * 50)
+        print(f"Data source: {data_source}", flush=True)
+    print(f"Number of files: {len(full_dataset.file_paths)}", flush=True)
+    print(f"Total patterns: {total_size} | Train: {train_size} | Val: {val_size}", flush=True)
+    print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
+    print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
+    print(f"\nDataLoader Settings:", flush=True)
+    print(f"  num_workers: {dataloader_kwargs['num_workers']}", flush=True)
+    print(f"  pin_memory: {dataloader_kwargs['pin_memory']}", flush=True)
+    if dataloader_kwargs['num_workers'] > 0:
+        print(f"  prefetch_factor: {dataloader_kwargs.get('prefetch_factor', 'N/A')}", flush=True)
+        print(f"  persistent_workers: {dataloader_kwargs.get('persistent_workers', 'N/A')}", flush=True)
+    print(f"\nDevice: {DEVICE}", flush=True)
+    print(f"Model save path: {MODEL_SAVE_PATH}", flush=True)
+    print("=" * 50, flush=True)
 
 # Model setup with config
 model = PtychoViT(config=config['model'])
@@ -142,40 +190,40 @@ trainer = Trainer(
     DEVICE,
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
-    use_ddp=(NGPUS > 1)
+    use_ddp=(NGPUS > 1),
+    wandb_enabled=config['wandb']['enabled']
 )
 
 if is_main_process:
-    print('\nStarting Training...\n')
+    print('\nStarting Training...\n', flush=True)
 
 for epoch in range(EPOCHS):
-    # Verify split integrity if debug mode is enabled
-    debug_mode = config['training'].get('debug', False)
-    if debug_mode and is_main_process:
-        combined_dataset.verify_split_integrity()
-        print(f"[DEBUG] Epoch {epoch}: Train/val split integrity verified")
+    # Set epoch for DistributedSampler (for proper shuffling)
+    if NGPUS > 1:
+        train_sampler.set_epoch(epoch)
+        val_sampler.set_epoch(epoch)
 
     # Training loop
     model.train()
-    train_batches = combined_dataset.iterate_batches(split='train', epoch=epoch, debug=debug_mode)
-    trainer.train(train_batches, criterion, optimizer, metrics)
+    trainer.train(train_loader, criterion, optimizer, metrics)
 
     # Validation loop
     model.eval()
-    val_batches = combined_dataset.iterate_batches(split='val', epoch=epoch, debug=debug_mode)
     plot = (epoch % config['training']['validation_plot_freq'] == 0)
-    trainer.validate(val_batches, criterion, optimizer, metrics, plot=plot)
+    trainer.validate(val_loader, criterion, optimizer, metrics, plot=plot)
 
     if is_main_process:
         print('Epoch: %d | Train Loss: %.4f | Val. Loss: %.4f'
-              %(epoch, metrics['training_loss'][-1], metrics['validation_loss'][-1]))
+              %(epoch, metrics['training_loss'][-1], metrics['validation_loss'][-1]), flush=True)
 
 # Save final checkpoint only on main process
 if is_main_process:
     trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, scheduler=None)
     with open(os.path.join(MODEL_SAVE_PATH, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
-    print('\nFinished Training!')
+    print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
+    # Upload config.yaml to wandb for reproducibility
+    wandb.save('config.yaml')
     wandb.finish()

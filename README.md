@@ -19,7 +19,7 @@ The model consists of three main components:
 - **Distributed training**: PyTorch DDP (DistributedDataParallel) support for multi-GPU training
 - **Flexible configuration**: YAML-based config file for all hyperparameters and architecture settings
 - **Multi-dataset support**: Load and train on multiple HDF5 files simultaneously with automatic discovery
-- **Efficient data loading**: Custom dataloader with file-level batching and persistent file handles
+- **Efficient data loading**: PyTorch DataLoader with DistributedSampler for DDP training
 - **Configurable architecture**: All model layers and dimensions controllable via config
 - **Multiple loss functions**: Support for SmoothL1, MSE, L1, and PoissonNLL losses
 - **Physics-informed**: Enforces ptychographic forward model in training loop
@@ -32,8 +32,7 @@ ptycho-vit/
 ├── vit.py           # Vision Transformer encoder implementation
 ├── decoders.py      # CNN decoder for upsampling to full resolution
 ├── model.py         # PtychoViT model combining encoder, decoders, and physics
-├── data.py          # PtychographyDataset for single HDF5 file pairs
-├── dataloader.py    # CombinedDataset for multi-file loading with DDP support
+├── data.py          # PtychographyDataset and CombinedDataset for data loading
 ├── training.py      # Trainer class with train/validation loops
 ├── main.py          # Main training script with DDP initialization
 ├── config.yaml      # Configuration file for all training parameters
@@ -81,8 +80,18 @@ All training parameters are configured in `config.yaml`:
 - `data_path`: Directory containing paired HDF5 files (auto-discovers all files)
 - `datafiles`: Alternatively, specify explicit list of files
 - `normalization_dict_path`: Path to pickle file with per-object normalization factors
-- `train_split` / `val_split`: Train/validation split ratio
+- `train_split`: Train/validation split ratio (e.g., 0.9 for 90% train, 10% validation)
 - `random_seed`: Seed for reproducible splits
+
+**DataLoader Settings:**
+- `num_workers`: Number of worker processes for data loading (0 = main process only)
+  - Recommended: 2-4 for CPU data loading, 0 for fast storage or small datasets
+- `prefetch_factor`: Batches to prefetch per worker (only if num_workers > 0)
+  - Recommended: 2-10, increase if GPU is waiting for data
+- `pin_memory`: Use pinned memory for faster CPU-to-GPU transfer
+  - Recommended: true for GPU training
+- `persistent_workers`: Keep workers alive between epochs (only if num_workers > 0)
+  - Recommended: true to avoid worker startup overhead
 
 **Training Configuration:**
 - `batch_size`: Samples per batch per GPU
@@ -129,11 +138,12 @@ All parameters can be modified in `config.yaml`.
 ## Training Details
 
 ### Data Loading
-- **File-level batching**: Opens one file at a time, processes all patterns, then closes
-- **DDP partitioning**: Patterns distributed across GPUs automatically
-- **Two-level shuffling**: File order and patterns within files shuffled per epoch
+- **PyTorch DataLoader**: Standard PyTorch data loading with configurable num_workers
+- **DistributedSampler**: Automatic data partitioning across GPUs for DDP training
+- **On-demand file access**: HDF5 files opened and closed per sample access for thread safety
 - **Fixed splits**: Train/val split determined once and preserved across epochs
 - **Normalization support**: Per-object normalization factors from pickle dictionary
+- **Multi-file support**: CombinedDataset transparently handles multiple HDF5 file pairs
 
 ### Training Loop
 - **Loss calculation**: Compares predicted diffraction amplitude to ground truth
@@ -145,8 +155,10 @@ All parameters can be modified in `config.yaml`.
 ### Distributed Training
 - PyTorch DDP for efficient multi-GPU training
 - Gradient synchronization across all GPUs
+- **DistributedSampler**: Automatically partitions data across ranks and handles shuffling
 - Only rank 0 process logs to WandB and saves checkpoints
 - All ranks process data in parallel
+- DataLoader automatically handles batch count equalization across ranks
 
 ## Model Architecture Details
 
@@ -173,18 +185,17 @@ The model outputs predicted diffraction amplitude, reconstructed amplitude, and 
 
 ### PtychographyDataset (data.py)
 - Handles single paired HDF5 file
-- Persistent file handle for diffraction patterns
+- Opens and closes file on each __getitem__ call for thread safety
 - Caches object and probe data for efficient access
 - Extracts patches using Fourier shift for sub-pixel accuracy
 - Applies Poisson noise to diffraction patterns
 
-### CombinedDataset (dataloader.py)
-- Manages multiple PtychographyDataset instances
+### CombinedDataset (data.py)
+- PyTorch Dataset for multiple HDF5 file pairs
 - Auto-discovers paired files from directory
-- Creates fixed train/val split
-- DDP-aware: partitions data across ranks
-- File-by-file iteration with immediate cleanup
-- Provides batch metadata for progress tracking
+- Manages multiple PtychographyDataset instances
+- Provides unified indexing across all files
+- Works seamlessly with PyTorch DataLoader and DistributedSampler
 
 ## Experiment Tracking
 

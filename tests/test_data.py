@@ -5,12 +5,12 @@ import shutil
 from pathlib import Path
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, random_split
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data import PtychographyDataset
-from dataloader import CombinedDataset
+from data import PtychographyDataset, CombinedDataset
 from tests.test_utils import create_dummy_hdf5_pair, cleanup_test_files
 
 
@@ -49,16 +49,13 @@ def test_ptychography_dataset():
         # Probe shape is (8, 128, 128, 2) - batch dimension added during collation
         assert probe.shape == (8, 128, 128, 2), f"Wrong probe shape: {probe.shape}"
 
-        # Test file handle cleanup
-        dataset.close()
-
         print("✓ PtychographyDataset test passed!\n")
 
 
-def test_combined_dataset_single_rank():
-    """Test CombinedDataset with single rank (no DDP)."""
+def test_combined_dataset_basic():
+    """Test CombinedDataset basic functionality."""
     print("\n" + "="*70)
-    print("TEST: CombinedDataset Single Rank")
+    print("TEST: CombinedDataset Basic Functionality")
     print("="*70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -69,167 +66,158 @@ def test_combined_dataset_single_rank():
         total_expected = n1 + n2 + n3
 
         # Create CombinedDataset from directory
-        combined = CombinedDataset(
-            file_paths=tmpdir,
-            train_split=0.8,
-            batch_size=4,
-            rank=0,
-            world_size=1,
-            shuffle=True,
-            random_seed=42
-        )
+        combined = CombinedDataset(file_paths=tmpdir)
 
-        print(f"Total patterns: {combined.total_patterns}")
+        print(f"Total patterns: {len(combined)}")
         print(f"Expected total: {total_expected}")
-        print(f"Train size: {combined.train_size}")
-        print(f"Val size: {combined.val_size}")
         print(f"Num files: {len(combined.file_paths)}")
 
-        assert combined.total_patterns == total_expected, \
-            f"Expected {total_expected} patterns, got {combined.total_patterns}"
-        expected_train = int(total_expected * 0.8)
-        expected_val = total_expected - expected_train
-        assert combined.train_size == expected_train, \
-            f"Expected {expected_train} train patterns, got {combined.train_size}"
-        assert combined.val_size == expected_val, \
-            f"Expected {expected_val} val patterns, got {combined.val_size}"
+        assert len(combined) == total_expected, \
+            f"Expected {total_expected} patterns, got {len(combined)}"
 
-        # Verify split integrity
-        combined.verify_split_integrity()
-        print("✓ Split integrity verified")
+        # Test indexing
+        print("\nTesting dataset indexing:")
+        sample = combined[0]
+        diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = sample
 
-        # Test train batches
-        print("\nIterating through train batches:")
-        train_batch_count = 0
-        for batch, metadata in combined.iterate_batches(split='train', epoch=0):
-            train_batch_count += 1
+        print(f"Sample 0 shapes:")
+        print(f"  diff_amp: {diff_amp.shape}")
+        print(f"  amp_patch: {amp_patch.shape}")
+        print(f"  ph_patch: {ph_patch.shape}")
+        print(f"  probe: {probe.shape}")
+        print(f"  probe_pos: {probe_pos.shape}")
+
+        # Test with DataLoader
+        batch_size = 4
+        dataloader = DataLoader(combined, batch_size=batch_size, shuffle=True)
+
+        print(f"\nTesting with DataLoader (batch_size={batch_size}):")
+        batch_count = 0
+        total_samples = 0
+        for batch in dataloader:
+            batch_count += 1
             diff_amps, amp_patches, ph_patches, probes, probe_pos, norms, scales = batch
-            print(f"  Train batch {train_batch_count}: {diff_amps.shape[0]} samples "
-                  f"from file {metadata['file_num']}/{metadata['total_files']} "
-                  f"({metadata['file_name']})")
+            total_samples += diff_amps.shape[0]
+            if batch_count <= 2:  # Print first 2 batches
+                print(f"  Batch {batch_count}: {diff_amps.shape[0]} samples")
 
-        print(f"Total train batches: {train_batch_count}")
-        expected_train_batches = combined.train_size // combined.batch_size
-        # Allow for ±1 batch difference due to incomplete batches being dropped
-        assert abs(train_batch_count - expected_train_batches) <= 1, \
-            f"Expected ~{expected_train_batches} train batches, got {train_batch_count}"
+        print(f"Total batches: {batch_count}")
+        print(f"Total samples loaded: {total_samples}")
+        assert total_samples == total_expected, \
+            f"Expected {total_expected} samples, got {total_samples}"
 
-        # Test val batches
-        print("\nIterating through validation batches:")
-        val_batch_count = 0
-        for batch, metadata in combined.iterate_batches(split='val', epoch=0):
-            val_batch_count += 1
-            diff_amps, amp_patches, ph_patches, probes, probe_pos, norms, scales = batch
-            print(f"  Val batch {val_batch_count}: {diff_amps.shape[0]} samples "
-                  f"from file {metadata['file_num']}/{metadata['total_files']} "
-                  f"({metadata['file_name']})")
-
-        print(f"Total val batches: {val_batch_count}")
-        expected_val_batches = combined.val_size // combined.batch_size
-        # Allow for ±1 batch difference due to incomplete batches being dropped
-        assert abs(val_batch_count - expected_val_batches) <= 1, \
-            f"Expected ~{expected_val_batches} val batches, got {val_batch_count}"
-
-        print("✓ CombinedDataset single rank test passed!\n")
+        print("✓ CombinedDataset basic test passed!\n")
 
 
-def test_combined_dataset_multi_file_iteration():
-    """Test that CombinedDataset properly iterates through multiple files."""
+def test_combined_dataset_with_train_val_split():
+    """Test CombinedDataset with train/val split using PyTorch random_split."""
     print("\n" + "="*70)
-    print("TEST: CombinedDataset Multi-File Iteration")
+    print("TEST: CombinedDataset with Train/Val Split")
     print("="*70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create 5 small datasets
-        num_files = 5
+        # Create multiple datasets
+        num_files = 3
         pattern_counts = []
         for i in range(num_files):
             _, _, n = create_dummy_hdf5_pair(tmpdir, f'object_{i}')
             pattern_counts.append(n)
 
-        combined = CombinedDataset(
-            file_paths=tmpdir,
-            train_split=0.9,
-            batch_size=4,
-            rank=0,
-            world_size=1,
-            shuffle=False,  # Disable shuffle for predictable testing
-            random_seed=42
-        )
+        combined = CombinedDataset(file_paths=tmpdir)
 
         total_patterns = sum(pattern_counts)
-        print(f"Total patterns: {combined.total_patterns} (expected {total_patterns})")
+        print(f"Total patterns: {len(combined)} (expected {total_patterns})")
         print(f"Pattern counts per file: {pattern_counts}")
-        assert combined.total_patterns == total_patterns
+        assert len(combined) == total_patterns
 
-        # Track which files were processed
-        files_processed = set()
-        total_samples_seen = 0
+        # Split into train/val using PyTorch
+        train_split = 0.8
+        train_size = int(total_patterns * train_split)
+        val_size = total_patterns - train_size
 
-        print("\nIterating through train batches:")
-        for batch, metadata in combined.iterate_batches(split='train', epoch=0):
-            files_processed.add(metadata['file_name'])
-            batch_size = batch[0].shape[0]
-            total_samples_seen += batch_size
-            print(f"  File {metadata['file_num']}/{metadata['total_files']}: "
-                  f"{metadata['file_name']}, "
-                  f"batch {metadata['batch_in_file']}/{metadata['total_batches_in_file']}, "
-                  f"batch_size={batch_size}")
+        generator = torch.Generator().manual_seed(42)
+        train_dataset, val_dataset = random_split(combined, [train_size, val_size], generator=generator)
 
-        print(f"\nFiles processed: {len(files_processed)}")
-        print(f"Total samples seen: {total_samples_seen}")
-        print(f"Expected samples: {combined.train_size}")
+        print(f"\nTrain size: {len(train_dataset)}")
+        print(f"Val size: {len(val_dataset)}")
 
-        assert total_samples_seen == combined.train_size, \
-            f"Mismatch: saw {total_samples_seen} samples, expected {combined.train_size}"
+        assert len(train_dataset) == train_size, f"Expected {train_size} train samples"
+        assert len(val_dataset) == val_size, f"Expected {val_size} val samples"
 
-        print("✓ Multi-file iteration test passed!\n")
+        # Test DataLoader with splits
+        batch_size = 4
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        # Iterate through train data
+        train_samples = 0
+        for batch in train_loader:
+            train_samples += batch[0].shape[0]
+
+        # Iterate through val data
+        val_samples = 0
+        for batch in val_loader:
+            val_samples += batch[0].shape[0]
+
+        print(f"Train samples loaded: {train_samples}")
+        print(f"Val samples loaded: {val_samples}")
+
+        assert train_samples == train_size, f"Expected {train_size} train samples, got {train_samples}"
+        assert val_samples == val_size, f"Expected {val_size} val samples, got {val_samples}"
+
+        print("✓ Train/val split test passed!\n")
 
 
-def test_split_consistency_across_epochs():
-    """Test that train/val split remains consistent across epochs."""
+def test_dataloader_consistency_across_epochs():
+    """Test that DataLoader with same seed produces consistent data across epochs."""
     print("\n" + "="*70)
-    print("TEST: Split Consistency Across Epochs")
+    print("TEST: DataLoader Consistency Across Epochs")
     print("="*70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create dummy data
         _, _, num_patterns = create_dummy_hdf5_pair(tmpdir, 'object_1')
 
-        combined = CombinedDataset(
-            file_paths=tmpdir,
-            train_split=0.8,
-            batch_size=4,
-            rank=0,
-            world_size=1,
-            shuffle=True,
-            random_seed=42
-        )
+        combined = CombinedDataset(file_paths=tmpdir)
 
-        # Collect indices seen in epoch 0
-        epoch_0_train_samples = []
-        for batch, _ in combined.iterate_batches(split='train', epoch=0):
-            epoch_0_train_samples.append(batch[0])
-        epoch_0_train_samples = torch.cat(epoch_0_train_samples, dim=0)
+        # Split into train/val
+        train_split = 0.8
+        train_size = int(num_patterns * train_split)
+        val_size = num_patterns - train_size
 
-        # Collect indices seen in epoch 1
-        epoch_1_train_samples = []
-        for batch, _ in combined.iterate_batches(split='train', epoch=1):
-            epoch_1_train_samples.append(batch[0])
-        epoch_1_train_samples = torch.cat(epoch_1_train_samples, dim=0)
+        # Use same seed for both splits
+        generator = torch.Generator().manual_seed(42)
+        train_dataset, val_dataset = random_split(combined, [train_size, val_size], generator=generator)
 
-        print(f"Epoch 0 train samples: {epoch_0_train_samples.shape[0]}")
-        print(f"Epoch 1 train samples: {epoch_1_train_samples.shape[0]}")
+        print(f"Total patterns: {num_patterns}")
+        print(f"Train size: {len(train_dataset)}")
+        print(f"Val size: {len(val_dataset)}")
 
-        # The number of samples should be the same
-        assert epoch_0_train_samples.shape[0] == epoch_1_train_samples.shape[0], \
-            "Different number of samples across epochs!"
+        # Create DataLoader for "epoch 0"
+        train_loader_epoch_0 = DataLoader(train_dataset, batch_size=4, shuffle=False)
 
-        # Verify split integrity
-        combined.verify_split_integrity()
-        print("✓ Split remains consistent across epochs")
+        # Collect all samples from epoch 0
+        epoch_0_samples = 0
+        for batch in train_loader_epoch_0:
+            epoch_0_samples += batch[0].shape[0]
 
-        print("✓ Split consistency test passed!\n")
+        # Create DataLoader for "epoch 1" (same dataset)
+        train_loader_epoch_1 = DataLoader(train_dataset, batch_size=4, shuffle=False)
+
+        # Collect all samples from epoch 1
+        epoch_1_samples = 0
+        for batch in train_loader_epoch_1:
+            epoch_1_samples += batch[0].shape[0]
+
+        print(f"Epoch 0 samples: {epoch_0_samples}")
+        print(f"Epoch 1 samples: {epoch_1_samples}")
+
+        # Both epochs should see the same number of samples (split is deterministic)
+        assert epoch_0_samples == epoch_1_samples == train_size, \
+            f"Inconsistent sample counts: epoch0={epoch_0_samples}, epoch1={epoch_1_samples}, expected={train_size}"
+
+        print("✓ DataLoader produces consistent data across epochs")
+        print("✓ DataLoader consistency test passed!\n")
 
 
 def test_combined_dataset_with_list_of_files():
@@ -245,27 +233,29 @@ def test_combined_dataset_with_list_of_files():
 
         # Create CombinedDataset with explicit file list
         file_list = [str(dp_file_1), str(dp_file_2)]
-        combined = CombinedDataset(
-            file_paths=file_list,
-            train_split=0.8,
-            batch_size=4,
-            rank=0,
-            world_size=1,
-            shuffle=True,
-            random_seed=42
-        )
+        combined = CombinedDataset(file_paths=file_list)
 
         total_expected = n1 + n2
-        print(f"Total patterns: {combined.total_patterns}")
-        assert combined.total_patterns == total_expected, \
-            f"Expected {total_expected} patterns, got {combined.total_patterns}"
+        print(f"Total patterns: {len(combined)}")
+        print(f"Expected: {total_expected}")
+        assert len(combined) == total_expected, \
+            f"Expected {total_expected} patterns, got {len(combined)}"
+
+        # Test with DataLoader
+        batch_size = 4
+        dataloader = DataLoader(combined, batch_size=batch_size, shuffle=True)
 
         batch_count = 0
-        for batch, metadata in combined.iterate_batches(split='train', epoch=0):
+        total_samples = 0
+        for batch in dataloader:
             batch_count += 1
+            total_samples += batch[0].shape[0]
 
-        print(f"Train batches: {batch_count}")
+        print(f"Total batches: {batch_count}")
+        print(f"Total samples: {total_samples}")
         assert batch_count > 0, "No batches generated!"
+        assert total_samples == total_expected, \
+            f"Expected {total_expected} samples, got {total_samples}"
 
         print("✓ List of files test passed!\n")
 
@@ -278,9 +268,9 @@ def run_all_tests():
 
     try:
         test_ptychography_dataset()
-        test_combined_dataset_single_rank()
-        test_combined_dataset_multi_file_iteration()
-        test_split_consistency_across_epochs()
+        test_combined_dataset_basic()
+        test_combined_dataset_with_train_val_split()
+        test_dataloader_consistency_across_epochs()
         test_combined_dataset_with_list_of_files()
 
         print("\n" + "#"*70)

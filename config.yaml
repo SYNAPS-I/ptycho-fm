@@ -16,19 +16,23 @@ data:
   # If not specified or file not found, will use default normalization value
   normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
 
-  train_split: 0.9
-  val_split: 0.1
+  train_split: 0.9  # Fraction of data for training (remainder used for validation)
   random_seed: 8
+
+  # DataLoader Configuration
+  num_workers: 2
+  prefetch_factor: 10
+  pin_memory: true
+  persistent_workers: false
 
 # Training Configuration
 training:
-  batch_size: 32
-  learning_rate: 1.0e-5
-  epochs: 21
-  ngpus: 2
-  loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
+  batch_size: 64
+  learning_rate: 1.0e-4
+  epochs: 81
+  ngpus: 4
+  loss_function: 'poisson_nll'  # Options: smooth_l1, mse, l1, poisson_nll
   validation_plot_freq: 5  # Plot validation results every N epochs
-  debug: true  # Enable debug checks (e.g., verify train/val split integrity)
 
 # Model Architecture
 model:
@@ -67,8 +71,8 @@ wandb:
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
   dataset_name: 'eagle + cameraman'
-  notes: 'config.yaml, DDP, custom data loading'
+  notes: 'DDP w/distributed sampler, poisson_nll'
 
 # Trainer Configuration
 trainer:
-  run_num: 70
+  run_num: 71
