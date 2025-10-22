@@ -80,11 +80,7 @@ class Trainer(object):
         optimizer.load_state_dict(state_dict['optimizer_state_dict'])
         if state_dict['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(state_dict['scheduler_state_dict'])
-        # Return path to saved config if it exists
-        config_path = os.path.join(checkpoint_path, 'config.yaml')
-        if not os.path.exists(config_path):
-            config_path = None
-        return current_epoch, metrics, optimizer, scheduler, config_path
+        return current_epoch, metrics, optimizer, scheduler
 
     def generate_plot(self, in_dp, out_dp, gt_amp, pred_amp, gt_ph, pred_ph, filename):
         f, ax = plt.subplots(nrows=2, ncols=3)
@@ -126,7 +122,8 @@ class Trainer(object):
         ax[1, 2].set_title('Predicted Phase')
 
         plt.tight_layout()
-        f.savefig(os.path.join(self.model_save_path, filename), bbox_inches='tight', transparent=True)
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
     def train(self, dataloader, criterion, optimizer, metrics):
         """
@@ -188,18 +185,18 @@ class Trainer(object):
         metrics['train_amp_loss'].append(avg_amp_loss)
         metrics['train_ph_loss'].append(avg_ph_loss)
 
-    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, scheduler=None):
+    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None):
         """
         Validation loop.
 
         Args:
             dataloader: PyTorch DataLoader yielding batches of
                        (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
+            epoch: Current epoch number for plot naming
         """
         val_loss = 0.0
         val_amp_loss = 0.0
         val_ph_loss = 0.0
-        plot_counter = 0
 
         # Variables for plotting (save last batch)
         last_input_diff = None
@@ -270,11 +267,11 @@ class Trainer(object):
             output_amp = last_output_amp.squeeze().detach().cpu().numpy()[0]
             input_ph = last_ph_patch[0, 0]
             output_ph = last_output_ph.squeeze().detach().cpu().numpy()[0]
-            filename = 'plot' + str(plot_counter) + '.png'
+            filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff, output_diff, input_amp, output_amp, input_ph, output_ph, filename)
             if self.wandb_enabled:
-                wandb.log({"val_plot": wandb.Image(os.path.join(self.model_save_path, filename), caption="Training progress")})
-            plot_counter += 1
+                run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+                wandb.log({"val_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Epoch {epoch}")})
 
         if scheduler:
             scheduler.step(avg_val_loss)
