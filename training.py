@@ -1,4 +1,5 @@
 import os
+import shutil
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -9,9 +10,10 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 import wandb
 
 class Trainer(object):
-    def __init__(self, model, run_num, device, model_save_path, is_main_process=True, use_ddp=False, wandb_enabled=True):
+    def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, wandb_enabled=True):
         super().__init__()
         self.model = model
+        self.mode = mode
         self.run_num = run_num
         self.device = device
         self.model_save_path = model_save_path
@@ -54,20 +56,23 @@ class Trainer(object):
         }
         return state
 
-    def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer, scheduler=None):
+    def save_model_and_states_checkpoint(self, epoch_num, metrics, config_path='config.yaml', optimizer=None, scheduler=None):
         """Save a checkpoint state that can be loaded to continue training."""
         state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, scheduler)
         state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         self.update_saved_model('checkpoint_model')
         torch.save(state_dict, os.path.join(state_path, 'checkpoint.state'))
+        # Save a copy of the config file for reproducibility
+        if os.path.exists(config_path):
+            shutil.copy(config_path, os.path.join(state_path, 'config.yaml'))
 
     def load_state_checkpoint(self, optimizer, scheduler=None):
         """Load everything but the model."""
         checkpoint_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
-        try: 
+        try:
             os.path.exists(checkpoint_fname)
-        except: 
+        except:
             raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
         state_dict = torch.load(checkpoint_fname)
         current_epoch = state_dict['current_epoch']
@@ -75,7 +80,11 @@ class Trainer(object):
         optimizer.load_state_dict(state_dict['optimizer_state_dict'])
         if state_dict['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(state_dict['scheduler_state_dict'])
-        return current_epoch, metrics, optimizer, scheduler
+        # Return path to saved config if it exists
+        config_path = os.path.join(checkpoint_path, 'config.yaml')
+        if not os.path.exists(config_path):
+            config_path = None
+        return current_epoch, metrics, optimizer, scheduler, config_path
 
     def generate_plot(self, in_dp, out_dp, gt_amp, pred_amp, gt_ph, pred_ph, filename):
         f, ax = plt.subplots(nrows=2, ncols=3)
@@ -142,7 +151,10 @@ class Trainer(object):
 
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
-            loss = criterion(output_diff, input_diff)
+            if self.mode == 'supervised':
+                loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
+            else:
+                loss = criterion(output_diff, input_diff)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -210,7 +222,10 @@ class Trainer(object):
 
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
-                loss = criterion(output_diff, input_diff)
+                if self.mode == 'supervised':
+                    loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
+                else:
+                    loss = criterion(output_diff, input_diff)
                 val_loss += loss.detach().item()
 
                 loss_amp = criterion(output_amp.detach().cpu(), amp_patch)

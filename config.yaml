@@ -17,21 +17,22 @@ data:
   normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
 
   train_split: 0.9  # Fraction of data for training (remainder used for validation)
-  random_seed: 8
+  random_seed: 13
 
   # DataLoader Configuration
-  num_workers: 2
+  num_workers: 4
   prefetch_factor: 10
   pin_memory: true
   persistent_workers: false
 
 # Training Configuration
 training:
+  mode: 'supervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
   learning_rate: 1.0e-4
-  epochs: 81
-  ngpus: 4
-  loss_function: 'poisson_nll'  # Options: smooth_l1, mse, l1, poisson_nll
+  epochs: 31
+  ngpus: 2
+  loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
   validation_plot_freq: 5  # Plot validation results every N epochs
 
 # Model Architecture
@@ -71,8 +72,8 @@ wandb:
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
   dataset_name: 'eagle + cameraman'
-  notes: 'DDP w/distributed sampler, poisson_nll'
+  notes: 'Test supervised training'
 
 # Trainer Configuration
 trainer:
-  run_num: 71
+  run_num: 72

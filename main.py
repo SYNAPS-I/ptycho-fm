@@ -1,5 +1,5 @@
 import os
-#os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,7 +13,7 @@ import yaml
 from data import CombinedDataset
 from model import PtychoViT
 from training import Trainer
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 import wandb
@@ -28,6 +28,7 @@ def load_config(config_path='config.yaml'):
 config = load_config()
 
 # Training parameters
+MODE = config['training']['mode']
 NGPUS = config['training']['ngpus']
 BATCH_SIZE = config['training']['batch_size']
 LR = config['training']['learning_rate']
@@ -186,6 +187,7 @@ if is_main_process and config['wandb']['enabled']:
 
 trainer = Trainer(
     model,
+    MODE,
     config['trainer']['run_num'],
     DEVICE,
     MODEL_SAVE_PATH,
@@ -218,12 +220,19 @@ for epoch in range(EPOCHS):
 
 # Save final checkpoint only on main process
 if is_main_process:
-    trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, scheduler=None)
+    trainer.save_model_and_states_checkpoint(epoch, metrics, 'config.yaml', optimizer, scheduler=None)
     with open(os.path.join(MODEL_SAVE_PATH, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
     print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
     # Upload config.yaml to wandb for reproducibility
-    wandb.save('config.yaml')
-    wandb.finish()
+    # Create a temporary copy to avoid modifying the original config file
+    import shutil
+    config_copy_path = os.path.join(MODEL_SAVE_PATH, 'config_copy.yaml')
+    shutil.copy('config.yaml', config_copy_path)
+    wandb.save(config_copy_path)
+    # Delete the copy after wandb saves it
+    if os.path.exists(config_copy_path):
+        os.remove(config_copy_path)
+    wandb.finish() 
