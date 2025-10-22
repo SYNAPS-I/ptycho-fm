@@ -9,7 +9,7 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 import wandb
 
 class Trainer(object):
-    def __init__(self, model, run_num, device, model_save_path, is_main_process=True, use_ddp=False):
+    def __init__(self, model, run_num, device, model_save_path, is_main_process=True, use_ddp=False, wandb_enabled=True):
         super().__init__()
         self.model = model
         self.run_num = run_num
@@ -17,6 +17,7 @@ class Trainer(object):
         self.model_save_path = model_save_path
         self.is_main_process = is_main_process
         self.use_ddp = use_ddp
+        self.wandb_enabled = wandb_enabled
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -118,29 +119,22 @@ class Trainer(object):
         plt.tight_layout()
         f.savefig(os.path.join(self.model_save_path, filename), bbox_inches='tight', transparent=True)
 
-    def train(self, batch_iterator, criterion, optimizer, metrics):
+    def train(self, dataloader, criterion, optimizer, metrics):
         """
         Training loop.
 
         Args:
-            batch_iterator: Iterator yielding (batch, file_metadata) tuples where
-                           batch = (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
-                           file_metadata = dict with file progress info
+            dataloader: PyTorch DataLoader yielding batches of
+                       (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
         """
         running_loss = 0.0
         running_amp_loss = 0.0
         running_ph_loss = 0.0
-        current_file = None
 
-        for i, (batch, file_meta) in enumerate(batch_iterator):
+        for batch in dataloader:
             # Unpack batch
-            diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = batch
+            diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
 
-            # Display file progress on new file
-            if self.is_main_process and file_meta['file_num'] != current_file:
-                current_file = file_meta['file_num']
-                print(f"\n  Processing file {file_meta['file_num']}/{file_meta['total_files']}: "
-                      f"{file_meta['file_name']} ({file_meta['total_patterns']} patterns)")
             input_diff = diff_amp.to(self.device)
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
             input_norm = norm.to(self.device)
@@ -161,14 +155,11 @@ class Trainer(object):
             running_amp_loss += loss_amp.item()
             running_ph_loss += loss_ph.item()
 
-        # Calculate average losses for this rank
-        avg_train_loss = running_loss / (i + 1)
-        avg_amp_loss = running_amp_loss / (i + 1)
-        avg_ph_loss = running_ph_loss / (i + 1)
-
-        # Ensure all ranks finish iterating before synchronizing losses
-        if self.use_ddp and dist.is_initialized():
-            dist.barrier()
+        # Calculate average losses (use len(dataloader) for batch count)
+        num_batches = len(dataloader)
+        avg_train_loss = running_loss / num_batches
+        avg_amp_loss = running_amp_loss / num_batches
+        avg_ph_loss = running_ph_loss / num_batches
 
         # Synchronize losses across all ranks for DDP
         avg_train_loss = self.synchronize_loss(avg_train_loss)
@@ -176,7 +167,7 @@ class Trainer(object):
         avg_ph_loss = self.synchronize_loss(avg_ph_loss)
 
         # Log and save metrics (synchronized values)
-        if self.is_main_process:
+        if self.is_main_process and self.wandb_enabled:
             wandb.log({"train_loss": avg_train_loss})
             wandb.log({"train_amp_loss": avg_amp_loss})
             wandb.log({"train_ph_loss": avg_ph_loss})
@@ -185,20 +176,18 @@ class Trainer(object):
         metrics['train_amp_loss'].append(avg_amp_loss)
         metrics['train_ph_loss'].append(avg_ph_loss)
 
-    def validate(self, batch_iterator, criterion, optimizer, metrics, plot=False, scheduler=None):
+    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, scheduler=None):
         """
         Validation loop.
 
         Args:
-            batch_iterator: Iterator yielding (batch, file_metadata) tuples where
-                           batch = (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
-                           file_metadata = dict with file progress info
+            dataloader: PyTorch DataLoader yielding batches of
+                       (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
         """
         val_loss = 0.0
         val_amp_loss = 0.0
         val_ph_loss = 0.0
         plot_counter = 0
-        current_file = None
 
         # Variables for plotting (save last batch)
         last_input_diff = None
@@ -208,18 +197,12 @@ class Trainer(object):
         last_ph_patch = None
         last_output_ph = None
 
-        # CRITICAL: Use no_grad() to prevent DDP gradient synchronization during validation
-        # Without this, DDP can deadlock when different ranks process different numbers of batches
+        # Use no_grad() to prevent gradient computation during validation
         with torch.no_grad():
-            for j, (batch, file_meta) in enumerate(batch_iterator):
+            for batch in dataloader:
                 # Unpack batch
-                diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = batch
+                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
 
-                # Display file progress on new file
-                if self.is_main_process and file_meta['file_num'] != current_file:
-                    current_file = file_meta['file_num']
-                    print(f"\n  Validating file {file_meta['file_num']}/{file_meta['total_files']}: "
-                          f"{file_meta['file_name']} ({file_meta['total_patterns']} patterns)")
                 input_diff = diff_amp.to(self.device)
                 input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
                 input_norm = norm.to(self.device)
@@ -244,14 +227,11 @@ class Trainer(object):
                     last_ph_patch = ph_patch
                     last_output_ph = output_ph
 
-        # Calculate average losses for this rank
-        avg_val_loss = val_loss / (j + 1)
-        avg_val_amp_loss = val_amp_loss / (j + 1)
-        avg_val_ph_loss = val_ph_loss / (j + 1)
-
-        # Ensure all ranks finish iterating before synchronizing losses
-        if self.use_ddp and dist.is_initialized():
-            dist.barrier()
+        # Calculate average losses (use len(dataloader) for batch count)
+        num_batches = len(dataloader)
+        avg_val_loss = val_loss / num_batches
+        avg_val_amp_loss = val_amp_loss / num_batches
+        avg_val_ph_loss = val_ph_loss / num_batches
 
         # Synchronize losses across all ranks for DDP
         avg_val_loss = self.synchronize_loss(avg_val_loss)
@@ -259,7 +239,7 @@ class Trainer(object):
         avg_val_ph_loss = self.synchronize_loss(avg_val_ph_loss)
 
         # Log and save metrics (synchronized values)
-        if self.is_main_process:
+        if self.is_main_process and self.wandb_enabled:
             wandb.log({"val_loss": avg_val_loss})
             wandb.log({"val_amp_loss": avg_val_amp_loss})
             wandb.log({"val_ph_loss": avg_val_ph_loss})
@@ -277,13 +257,14 @@ class Trainer(object):
             output_ph = last_output_ph.squeeze().detach().cpu().numpy()[0]
             filename = 'plot' + str(plot_counter) + '.png'
             self.generate_plot(input_diff, output_diff, input_amp, output_amp, input_ph, output_ph, filename)
-            wandb.log({"val_plot": wandb.Image(os.path.join(self.model_save_path, filename), caption="Training progress")})
+            if self.wandb_enabled:
+                wandb.log({"val_plot": wandb.Image(os.path.join(self.model_save_path, filename), caption="Training progress")})
             plot_counter += 1
 
         if scheduler:
             scheduler.step(avg_val_loss)
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
-            if self.is_main_process:
+            if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})
 
         # Check if this is the best model (use synchronized validation loss)
@@ -291,7 +272,7 @@ class Trainer(object):
         if avg_val_loss < metrics['best_val_loss']:
             if self.is_main_process:
                 print("Saving improved model after Val. Loss improved from %.4f to %.5f"
-                      % (metrics['best_val_loss'], avg_val_loss))
+                      % (metrics['best_val_loss'], avg_val_loss), flush=True)
                 self.update_saved_model('best_model')
             # Update best_val_loss on all ranks so they stay in sync
             metrics['best_val_loss'] = avg_val_loss
