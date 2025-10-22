@@ -212,7 +212,7 @@ for epoch in range(EPOCHS):
     # Validation loop
     model.eval()
     plot = (epoch % config['training']['validation_plot_freq'] == 0)
-    trainer.validate(val_loader, criterion, optimizer, metrics, plot=plot)
+    trainer.validate(val_loader, criterion, optimizer, metrics, plot=plot, epoch=epoch)
 
     if is_main_process:
         print('Epoch: %d | Train Loss: %.4f | Val. Loss: %.4f'
@@ -221,7 +221,8 @@ for epoch in range(EPOCHS):
 # Save final checkpoint only on main process
 if is_main_process:
     trainer.save_model_and_states_checkpoint(epoch, metrics, 'config.yaml', optimizer, scheduler=None)
-    with open(os.path.join(MODEL_SAVE_PATH, 'metrics.pickle'), 'wb') as file:
+    run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+    with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
     print('\nFinished Training!', flush=True)
 
