@@ -71,7 +71,7 @@ class PtychoViT(nn.Module):
         scale = scale.view(scale.shape[0], 1, 1)
         probe_intensity = (probe_intensity / normalization) * scale
         # Subtract probe contribution to total intensity
-        x = x - probe_intensity.float().unsqueeze(1)
+        x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
         x = self.encoder(x)
         amp = self.amp_decoder(x).squeeze(1)

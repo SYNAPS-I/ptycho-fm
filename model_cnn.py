@@ -232,7 +232,7 @@ class PtychoCNN(nn.Module):
         #probe_intensity = (probe_intensity / normalization) * scale
 
         # Subtract probe contribution to total intensity
-        #x = x - probe_intensity.float().unsqueeze(1)
+        #x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
         # CNN Encoder
         x = self.encoder(x)
