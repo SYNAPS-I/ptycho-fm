@@ -17,7 +17,7 @@ data:
   normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
 
   train_split: 0.9  # Fraction of data for training (remainder used for validation)
-  random_seed: 13
+  random_seed: 7
 
   # DataLoader Configuration
   num_workers: 4
@@ -30,15 +30,18 @@ training:
   mode: 'supervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
   learning_rate: 1.0e-4
-  epochs: 51  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 21  # Total epochs to train for (not additional epochs when resuming)
   ngpus: 2
   loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
   validation_plot_freq: 5  # Plot validation results every N epochs
-  resume_from_checkpoint: true  # Set to true to resume training from checkpoint
+  resume_from_checkpoint: false  # Set to true to resume training from checkpoint
 
 # Model Architecture
 model:
-  # Vision Transformer Encoder
+  # Model type selection: 'vit' or 'cnn'
+  model_type: 'cnn'  # Options: 'vit' (Vision Transformer), 'cnn' (Convolutional Neural Network)
+
+  # Vision Transformer Encoder (used when model_type='vit')
   encoder:
     img_size: 512
     patch_size: 16
@@ -57,7 +60,7 @@ model:
     out_channels: 1
     hidden_dims: [128, 64, 32, 16]
     activation: 'sigmoid'
-    dropout: 0.0  # Dropout after each conv block
+    dropout: 0.1  # Dropout after each conv block
 
   # Phase Decoder
   ph_decoder:
@@ -65,7 +68,30 @@ model:
     out_channels: 1
     hidden_dims: [128, 64, 32, 16]
     activation: 'tanh'
-    dropout: 0.0  # Dropout after each conv block
+    dropout: 0.1  # Dropout after each conv block
+
+  # CNN Model Configuration (used when model_type='cnn')
+  cnn:
+    encoder:
+      in_channels: 1
+      base_channels: 32  # Reduced from 64 for smaller model
+      latent_dim: 256    # Reduced from 512 for smaller model
+      use_batchnorm: true
+      dropout: 0.1  # Dropout for encoder conv layers
+    amp_decoder:
+      base_channels: 32  # Reduced from 64 for smaller model
+      latent_dim: 256    # Reduced from 512 for smaller model
+      out_channels: 1
+      use_batchnorm: true
+      output_activation: 'sigmoid'
+      dropout: 0.1  # Dropout for amplitude decoder conv layers
+    ph_decoder:
+      base_channels: 32  # Reduced from 64 for smaller model
+      latent_dim: 256    # Reduced from 512 for smaller model
+      out_channels: 1
+      use_batchnorm: true
+      output_activation: 'tanh'
+      dropout: 0.1  # Dropout for phase decoder conv layers
 
 # Paths
 paths:
@@ -77,9 +103,9 @@ wandb:
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
   dataset_name: 'eagle + cameraman'
-  notes: 'Test supervised training'
-  resume_run_id: '34t3lfwf' # Optional: manually specify wandb run ID to resume otherwise null 
+  notes: 'Supervised, CNN, full intensity'
+  resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 72
+  run_num: 78

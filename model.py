@@ -61,13 +61,21 @@ class PtychoViT(nn.Module):
             dropout=config['ph_decoder'].get('dropout', 0.0)
         )
     
-    def forward(self, x, probe, normalization, scale):  
+    def forward(self, x, probe, normalization, scale): 
+        # FFT probe
+        probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
+        probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
+        probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0] 
+        # Normalization
+        normalization = normalization.view(normalization.shape[0], 1, 1)
+        scale = scale.view(scale.shape[0], 1, 1)
+        probe_intensity = (probe_intensity / normalization) * scale
+        # Subtract probe contribution to total intensity
+        x = x - probe_intensity.float().unsqueeze(1)
+
         x = self.encoder(x)
         amp = self.amp_decoder(x).squeeze(1)
         ph = self.ph_decoder(x).squeeze(1) * math.pi
-        #print('Probe info before fix: ', probe.shape, probe.dtype)
-        probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
-        #print('Probe info after fix: ', probe.shape, probe.dtype)
 
         # Complex object and diffraction
         complex_object = torch.complex(amp * torch.cos(ph), amp * torch.sin(ph))
@@ -76,8 +84,6 @@ class PtychoViT(nn.Module):
         intensity = (Psi.abs()**2).sum(2)[:, 0] # sum over incoherent modes, select first OPR mode, final shape (B, H, W)
 
         # Normalization
-        normalization = normalization.view(normalization.shape[0], 1, 1)
-        scale = scale.view(scale.shape[0], 1, 1)
         intensity = (intensity.float() / normalization) * scale
 
         pred_diff_amp = torch.sqrt(intensity)

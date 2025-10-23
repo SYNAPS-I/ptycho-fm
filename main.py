@@ -12,6 +12,7 @@ import yaml
 
 from data import CombinedDataset
 from model import PtychoViT
+from model_cnn import PtychoCNN
 from training import Trainer
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
@@ -139,9 +140,18 @@ if is_main_process:
     print("=" * 50, flush=True)
 
 # Model setup with config
-model = PtychoViT(config=config['model'])
-if is_main_process:
+model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
+if model_type == 'vit':
+    model = PtychoViT(config=config['model'])
     img_size = config['model']['encoder']['img_size']
+elif model_type == 'cnn':
+    model = PtychoCNN(config=config['model']['cnn'])
+    img_size = 512  # CNN models are fixed at 512x512
+else:
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit' or 'cnn'")
+
+if is_main_process:
+    print(f"Using model type: {model_type.upper()}", flush=True)
     dummy_data = torch.randn((1, 1, img_size, img_size))
     dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
     summary(model, input_data={'x': dummy_data, 'probe': dummy_probe,
@@ -241,6 +251,7 @@ if is_main_process and config['wandb']['enabled']:
                 "dataset": config['wandb']['dataset_name'],
                 "epochs": EPOCHS,
                 "notes": config['wandb']['notes'],
+                "model_type": model_type,
                 "model_config": config['model']
             }
         )
@@ -283,7 +294,9 @@ if is_main_process and config['wandb']['enabled']:
     import shutil
     config_copy_path = os.path.join(MODEL_SAVE_PATH, 'config_copy.yaml')
     shutil.copy('config.yaml', config_copy_path)
-    wandb.save(config_copy_path)
+    artifact = wandb.Artifact(name="config", type="file")
+    artifact.add_file(local_path="./config_copy.yaml", name="training_config")
+    artifact.save()
     # Delete the copy after wandb saves it
     if os.path.exists(config_copy_path):
         os.remove(config_copy_path)

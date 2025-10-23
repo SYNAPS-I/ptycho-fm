@@ -125,6 +125,8 @@ class Trainer(object):
 
         plt.tight_layout()
         run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        if not os.path.isdir(run_path):
+            os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
     def train(self, dataloader, criterion, optimizer, metrics):
