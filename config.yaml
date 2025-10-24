@@ -3,14 +3,16 @@
 # Data Configuration
 data:
   # Option 1: Specify a list of specific files to use
-  # datafiles:
-  #   - '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/eagle/ptychodus_dp.hdf5'
+  datafiles:
+     - '/scratch/aileenluo/ptycho-vit/data/eagle256_dp.hdf5'
     # Add more files as needed:
-    # - '/path/to/another_sample_dp.hdf5'
+     - '/scratch/aileenluo/ptycho-vit/data/cameraman256_dp.hdf5'
 
   # Option 2: Specify a directory - will auto-discover all paired files
   # (comment out 'datafiles' above and uncomment this to use)
-  data_path: '/scratch/aileenluo/ptycho-vit/data'
+  # data_path: '/scratch/aileenluo/ptycho-vit/data'
+  image_size: 256
+  scale: 1000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
@@ -28,9 +30,9 @@ data:
 # Training Configuration
 training:
   mode: 'supervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 64
-  learning_rate: 1.0e-4
-  epochs: 21  # Total epochs to train for (not additional epochs when resuming)
+  batch_size: 128
+  learning_rate: 5.0e-4
+  epochs: 81  # Total epochs to train for (not additional epochs when resuming)
   ngpus: 2
   loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
   validation_plot_freq: 5  # Plot validation results every N epochs
@@ -38,8 +40,8 @@ training:
 
 # Model Architecture
 model:
-  # Model type selection: 'vit' or 'cnn'
-  model_type: 'cnn'  # Options: 'vit' (Vision Transformer), 'cnn' (Convolutional Neural Network)
+  # Model type selection: 'vit', 'cnn', or 'cnn256'
+  model_type: 'cnn256'  # Options: 'vit' (Vision Transformer), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256)
 
   # Vision Transformer Encoder (used when model_type='vit')
   encoder:
@@ -70,11 +72,11 @@ model:
     activation: 'tanh'
     dropout: 0.1  # Dropout after each conv block
 
-  # CNN Model Configuration (used when model_type='cnn')
+  # CNN Model Configuration for 512x512 images (used when model_type='cnn')
   cnn:
     encoder:
       in_channels: 1
-      base_channels: 32  # Reduced from 64 for smaller model
+      base_channels: 32  # Reduced from 64 for smaller model (7.5M params)
       latent_dim: 256    # Reduced from 512 for smaller model
       use_batchnorm: true
       dropout: 0.1  # Dropout for encoder conv layers
@@ -93,19 +95,42 @@ model:
       output_activation: 'tanh'
       dropout: 0.1  # Dropout for phase decoder conv layers
 
+  # CNN Model Configuration for 256x256 images (used when model_type='cnn256')
+  cnn256:
+    encoder:
+      in_channels: 1
+      base_channels: 32  # Small model for 256x256 images (~3M params)
+      latent_dim: 256    # Bottleneck dimension at 16x16
+      use_batchnorm: true
+      dropout: 0.1  # Dropout for encoder conv layers
+    amp_decoder:
+      base_channels: 32
+      latent_dim: 256
+      out_channels: 1
+      use_batchnorm: true
+      output_activation: 'sigmoid'
+      dropout: 0.1  # Dropout for amplitude decoder conv layers
+    ph_decoder:
+      base_channels: 32
+      latent_dim: 256
+      out_channels: 1
+      use_batchnorm: true
+      output_activation: 'tanh'
+      dropout: 0.1  # Dropout for phase decoder conv layers
+
 # Paths
 paths:
   model_save_path: '/scratch/aileenluo/ptycho-vit/models'
 
 # WandB Configuration
 wandb:
-  enabled: true
+  enabled: false
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
   dataset_name: 'eagle + cameraman'
-  notes: 'Supervised, CNN, full intensity'
+  notes: 'Supervised, CNN, 256x256, -I_P'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 78
+  run_num: 82
