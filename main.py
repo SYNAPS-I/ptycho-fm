@@ -12,7 +12,7 @@ import yaml
 
 from data import CombinedDataset
 from model import PtychoViT
-from model_cnn import PtychoCNN
+from model_cnn import PtychoCNN, PtychoCNN256
 from training import Trainer
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
@@ -66,6 +66,8 @@ else:
 # Create full dataset
 full_dataset = CombinedDataset(
     file_paths=data_source,
+    patch_size=config['data']['image_size'],
+    scale = config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path')
 )
 
@@ -118,6 +120,7 @@ if is_main_process:
     print("=" * 50, flush=True)
     print("Training Configuration", flush=True)
     print("=" * 50, flush=True)
+    print(f"Mode: {MODE}")
     print(f"Batch size: {BATCH_SIZE} | Learning rate: {LR}", flush=True)
     print(f"Epochs: {EPOCHS} | GPUs: {NGPUS}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
@@ -147,8 +150,11 @@ if model_type == 'vit':
 elif model_type == 'cnn':
     model = PtychoCNN(config=config['model']['cnn'])
     img_size = 512  # CNN models are fixed at 512x512
+elif model_type == 'cnn256':
+    model = PtychoCNN256(config=config['model']['cnn256'])
+    img_size = 256  # CNN256 models are fixed at 256x256
 else:
-    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit' or 'cnn'")
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', or 'cnn256'")
 
 if is_main_process:
     print(f"Using model type: {model_type.upper()}", flush=True)
@@ -160,7 +166,7 @@ if is_main_process:
 # Move model to device and wrap with DDP
 model = model.to(DEVICE)
 if NGPUS > 1:
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[local_rank%NGPUS])
 
 # Loss and optimizer
 if config['training']['loss_function'] == 'smooth_l1':
@@ -292,10 +298,10 @@ if is_main_process and config['wandb']['enabled']:
     # Upload config.yaml to wandb for reproducibility
     # Create a temporary copy to avoid modifying the original config file
     import shutil
-    config_copy_path = os.path.join(MODEL_SAVE_PATH, 'config_copy.yaml')
+    config_copy_path = './config_copy.yaml'
     shutil.copy('config.yaml', config_copy_path)
     artifact = wandb.Artifact(name="config", type="file")
-    artifact.add_file(local_path="./config_copy.yaml", name="training_config")
+    artifact.add_file(local_path="config_copy.yaml", name="training_config")
     artifact.save()
     # Delete the copy after wandb saves it
     if os.path.exists(config_copy_path):
