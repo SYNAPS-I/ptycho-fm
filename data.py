@@ -20,7 +20,6 @@ class PtychographyDataset(Dataset):
     Args:
         file_path (str): Path to data file or corresponding parameters file(*_dp.hdf5 or *_para.hdf5)
         patch_size (int): Size of patches to extract from the full object in pixels
-        object_pixel_size (float): Object pixel size (simulated or reconstructed) in meters
         scale (float): Factor by which to scale all diffraction intensity to
         cache_object (bool): Whether to cache object data in memory
         normalization_dict_path (str): Path to .pkl file containing dict of {object_name: normalization_factor}
@@ -30,14 +29,12 @@ class PtychographyDataset(Dataset):
         self,
         file_path: str,
         patch_size: int = 512,
-        object_pixel_size: float = 6.82e-9,
         scale: float = 100000., 
         cache_object: bool = True,
         normalization_dict_path: Optional[str] = None
     ):
         self.file_path = Path(file_path)
         self.patch_size = patch_size
-        self.object_pixel_size = object_pixel_size
         self.scale = scale
         self.cache_object = cache_object
         self.normalization_dict_path = normalization_dict_path
@@ -211,7 +208,11 @@ class PtychographyDataset(Dataset):
                     self._cached_probe = probe_data[...]
 
         # Cache probe positions (small)
-        self._cached_probe_positions = create_positions(self.object_shape, self.pattern_shape)
+        if self.patch_size == 512:
+            fwhm = 98
+        elif self.patch_size == 256:
+            fwhm = 49
+        self._cached_probe_positions = create_positions(self.object_shape, self.pattern_shape, target_overlap=0.8, fwhm=fwhm)
         # Validate that there are the same number of probe positions as diffraction patterns
         if self._cached_probe_positions.shape[0] != self.num_patterns:
             raise ValueError(f"Mismatch in number of patterns: {self.num_patterns} diffraction patterns vs {self._cached_probe_positions.shape[0]} probe positions")

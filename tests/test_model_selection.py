@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import yaml
 from model import PtychoViT
-from model_cnn import PtychoCNN
+from model_cnn import PtychoCNN, PtychoCNN256
 
 
 def load_config(config_path='../config.yaml'):
@@ -38,6 +38,9 @@ def test_model_initialization(model_type):
     elif model_type == 'cnn':
         model = PtychoCNN(config=config['model']['cnn'])
         img_size = 512
+    elif model_type == 'cnn256':
+        model = PtychoCNN256(config=config['model']['cnn256'])
+        img_size = 256
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -88,11 +91,18 @@ if __name__ == "__main__":
         print(f"✗ CNN model test failed: {e}")
         success = False
 
+    # Test CNN256 model
+    try:
+        test_model_initialization('cnn256')
+    except Exception as e:
+        print(f"✗ CNN256 model test failed: {e}")
+        success = False
+
     print("\n" + "="*60)
     if success:
         print("✓ All tests passed!")
-        print("\nYou can now select between ViT and CNN models by setting")
-        print("'model_type' in config.yaml to either 'vit' or 'cnn'")
+        print("\nYou can now select between models by setting 'model_type'")
+        print("in config.yaml to 'vit', 'cnn' (512x512), or 'cnn256' (256x256)")
     else:
         print("✗ Some tests failed")
     print("="*60 + "\n")
