@@ -264,10 +264,27 @@ if is_main_process and config['wandb']['enabled']:
         wandb_run_id = run.id
         print(f'Created new wandb run: {wandb_run_id}', flush=True)
 
+    # Upload config.yaml to wandb as artifact at the start of training
+    import shutil
+    config_copy_path = './config_copy.yaml'
+    shutil.copy('config.yaml', config_copy_path)
+    artifact = wandb.Artifact(name="config", type="file")
+    artifact.add_file(local_path="config_copy.yaml", name="training_config")
+    artifact.save()
+    # Delete the copy after wandb saves it
+    if os.path.exists(config_copy_path):
+        os.remove(config_copy_path)
+    print(f'Uploaded config to wandb as artifact', flush=True)
+
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
 
 for epoch in range(start_epoch, EPOCHS):
+    # Save config to run path at epoch 0
+    if epoch == 0 and is_main_process:
+        trainer.save_config('config.yaml')
+        print('Saved config to run path', flush=True)
+
     # Set epoch for DistributedSampler (for proper shuffling)
     if NGPUS > 1:
         train_sampler.set_epoch(epoch)
@@ -288,22 +305,11 @@ for epoch in range(start_epoch, EPOCHS):
 
 # Save final checkpoint only on main process
 if is_main_process:
-    trainer.save_model_and_states_checkpoint(epoch, metrics, 'config.yaml', optimizer, wandb_run_id, scheduler=None)
+    trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
     with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
     print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
-    # Upload config.yaml to wandb for reproducibility
-    # Create a temporary copy to avoid modifying the original config file
-    import shutil
-    config_copy_path = './config_copy.yaml'
-    shutil.copy('config.yaml', config_copy_path)
-    artifact = wandb.Artifact(name="config", type="file")
-    artifact.add_file(local_path="config_copy.yaml", name="training_config")
-    artifact.save()
-    # Delete the copy after wandb saves it
-    if os.path.exists(config_copy_path):
-        os.remove(config_copy_path)
     wandb.finish() 

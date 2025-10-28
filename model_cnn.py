@@ -56,80 +56,103 @@ class TransposeConvBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    """Symmetric CNN Encoder for 512x512 images."""
-    def __init__(self, in_channels=1, base_channels=64, latent_dim=512, use_batchnorm=True, dropout=0.0):
+    """CNN Encoder for 512x512 images with configurable depth.
+
+    Args:
+        in_channels: Number of input channels (default: 1)
+        base_channels: Base number of channels, doubles at each stage (default: 64)
+        latent_dim: Output channels at bottleneck (default: 512)
+        use_batchnorm: Whether to use batch normalization (default: True)
+        dropout: Dropout rate (default: 0.0)
+        num_stages: Number of downsampling stages (default: 5)
+            - 5 stages: 512 -> 16 (spatial size)
+            - 6 stages: 512 -> 8
+            - 7 stages: 512 -> 4
+    """
+    def __init__(self, in_channels=1, base_channels=64, latent_dim=512, use_batchnorm=True, dropout=0.0, num_stages=5):
         super().__init__()
 
-        # Encoder: 512 -> 256 -> 128 -> 64 -> 32 -> 16
-        self.enc1 = nn.Sequential(
-            ConvBlock(in_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 512 -> 256
-        )
+        self.num_stages = num_stages
+        self.stages = nn.ModuleList()
 
-        self.enc2 = nn.Sequential(
-            ConvBlock(base_channels, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels*2, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 256 -> 128
-        )
+        # Calculate channel progression
+        in_ch = in_channels
+        for i in range(num_stages):
+            # For all stages except the last, double channels (with a cap)
+            if i < num_stages - 1:
+                out_ch = min(base_channels * (2 ** i), latent_dim)
+            else:
+                # Last stage outputs latent_dim
+                out_ch = latent_dim
 
-        self.enc3 = nn.Sequential(
-            ConvBlock(base_channels*2, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels*4, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 128 -> 64
-        )
-
-        self.enc4 = nn.Sequential(
-            ConvBlock(base_channels*4, base_channels*8, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels*8, base_channels*8, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 64 -> 32
-        )
-
-        self.enc5 = nn.Sequential(
-            ConvBlock(base_channels*8, latent_dim, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(latent_dim, latent_dim, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 32 -> 16
-        )
+            # Create stage with two conv blocks and pooling
+            stage = nn.Sequential(
+                ConvBlock(in_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                ConvBlock(out_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                nn.MaxPool2d(2, 2)
+            )
+            self.stages.append(stage)
+            in_ch = out_ch
 
     def forward(self, x):
-        x1 = self.enc1(x)    # 256
-        x2 = self.enc2(x1)   # 128
-        x3 = self.enc3(x2)   # 64
-        x4 = self.enc4(x3)   # 32
-        x5 = self.enc5(x4)   # 16
-        return x5
+        for stage in self.stages:
+            x = stage(x)
+        return x
 
 
 class Decoder(nn.Module):
-    """Symmetric CNN Decoder for 512x512 images."""
-    def __init__(self, latent_dim=512, base_channels=64, out_channels=1, use_batchnorm=True, output_activation=None, dropout=0.0):
+    """CNN Decoder for 512x512 images with configurable depth.
+
+    Mirrors encoder structure: Encoder has Conv2d, Conv2d, MaxPool2d per stage,
+    Decoder has ConvTranspose2d, ConvTranspose2d, Upsample(bilinear) per stage.
+
+    Args:
+        latent_dim: Input channels from bottleneck (default: 512)
+        base_channels: Base number of channels for final layer (default: 64)
+        out_channels: Number of output channels (default: 1)
+        use_batchnorm: Whether to use batch normalization (default: True)
+        output_activation: Output activation function (default: None)
+        dropout: Dropout rate (default: 0.0)
+        num_stages: Number of upsampling stages, should match encoder (default: 5)
+            - 5 stages: 16 -> 512 (spatial size)
+            - 6 stages: 8 -> 512
+            - 7 stages: 4 -> 512
+    """
+    def __init__(self, latent_dim=512, base_channels=64, out_channels=1, use_batchnorm=True, output_activation=None, dropout=0.0, num_stages=5):
         super().__init__()
 
-        # Decoder: 16 -> 32 -> 64 -> 128 -> 256 -> 512
-        self.dec1 = nn.Sequential(
-            TransposeConvBlock(latent_dim, base_channels*8, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 16 -> 32
-            ConvBlock(base_channels*8, base_channels*8, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        self.num_stages = num_stages
+        self.stages = nn.ModuleList()
 
-        self.dec2 = nn.Sequential(
-            TransposeConvBlock(base_channels*8, base_channels*4, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 32 -> 64
-            ConvBlock(base_channels*4, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        # Calculate channel progression (reverse of encoder)
+        # Build channel list that mirrors encoder
+        encoder_channels = []
+        for i in range(num_stages):
+            if i < num_stages - 1:
+                ch = min(base_channels * (2 ** i), latent_dim)
+            else:
+                ch = latent_dim
+            encoder_channels.append(ch)
 
-        self.dec3 = nn.Sequential(
-            TransposeConvBlock(base_channels*4, base_channels*2, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 64 -> 128
-            ConvBlock(base_channels*2, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        # Reverse for decoder: start from latent_dim, go back to base_channels
+        in_ch = latent_dim
+        for i in range(num_stages):
+            # Determine output channels for this stage
+            if i < num_stages - 1:
+                # Not the last stage - use the channel from encoder in reverse
+                out_ch = encoder_channels[num_stages - 2 - i]
+            else:
+                # Last stage outputs base_channels
+                out_ch = base_channels
 
-        self.dec4 = nn.Sequential(
-            TransposeConvBlock(base_channels*2, base_channels, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 128 -> 256
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
-
-        self.dec5 = nn.Sequential(
-            TransposeConvBlock(base_channels, base_channels, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 256 -> 512
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+            # Create stage with two ConvTranspose2d (mirroring two Conv2d) and bilinear upsample (undoing MaxPool2d)
+            stage = nn.Sequential(
+                TransposeConvBlock(in_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                TransposeConvBlock(out_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            )
+            self.stages.append(stage)
+            in_ch = out_ch
 
         # Final output layer
         self.output = nn.Conv2d(base_channels, out_channels, kernel_size=1, stride=1, padding=0)
@@ -145,79 +168,111 @@ class Decoder(nn.Module):
             raise ValueError(f"Unsupported output activation: {output_activation}")
 
     def forward(self, x):
-        x = self.dec1(x)    # 32
-        x = self.dec2(x)    # 64
-        x = self.dec3(x)    # 128
-        x = self.dec4(x)    # 256
-        x = self.dec5(x)    # 512
+        for stage in self.stages:
+            x = stage(x)
         x = self.output(x)
         x = self.output_activation(x)
         return x
 
 
 class Encoder256(nn.Module):
-    """CNN Encoder for 256x256 images (4 stages instead of 5)."""
-    def __init__(self, in_channels=1, base_channels=64, latent_dim=512, use_batchnorm=True, dropout=0.0):
+    """CNN Encoder for 256x256 images with configurable depth.
+
+    Args:
+        in_channels: Number of input channels (default: 1)
+        base_channels: Base number of channels, doubles at each stage (default: 64)
+        latent_dim: Output channels at bottleneck (default: 512)
+        use_batchnorm: Whether to use batch normalization (default: True)
+        dropout: Dropout rate (default: 0.0)
+        num_stages: Number of downsampling stages (default: 4)
+            - 4 stages: 256 -> 16 (spatial size)
+            - 5 stages: 256 -> 8
+            - 6 stages: 256 -> 4
+    """
+    def __init__(self, in_channels=1, base_channels=64, latent_dim=512, use_batchnorm=True, dropout=0.0, num_stages=4):
         super().__init__()
 
-        # Encoder: 256 -> 128 -> 64 -> 32 -> 16
-        self.enc1 = nn.Sequential(
-            ConvBlock(in_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 256 -> 128
-        )
+        self.num_stages = num_stages
+        self.stages = nn.ModuleList()
 
-        self.enc2 = nn.Sequential(
-            ConvBlock(base_channels, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels*2, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 128 -> 64
-        )
+        # Calculate channel progression
+        in_ch = in_channels
+        for i in range(num_stages):
+            # For all stages except the last, double channels (with a cap)
+            if i < num_stages - 1:
+                out_ch = min(base_channels * (2 ** i), latent_dim)
+            else:
+                # Last stage outputs latent_dim
+                out_ch = latent_dim
 
-        self.enc3 = nn.Sequential(
-            ConvBlock(base_channels*2, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(base_channels*4, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 64 -> 32
-        )
-
-        self.enc4 = nn.Sequential(
-            ConvBlock(base_channels*4, latent_dim, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            ConvBlock(latent_dim, latent_dim, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
-            nn.MaxPool2d(2, 2)  # 32 -> 16
-        )
+            # Create stage with two conv blocks and pooling
+            stage = nn.Sequential(
+                ConvBlock(in_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                ConvBlock(out_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                nn.MaxPool2d(2, 2)
+            )
+            self.stages.append(stage)
+            in_ch = out_ch
 
     def forward(self, x):
-        x1 = self.enc1(x)    # 128
-        x2 = self.enc2(x1)   # 64
-        x3 = self.enc3(x2)   # 32
-        x4 = self.enc4(x3)   # 16
-        return x4
+        for stage in self.stages:
+            x = stage(x)
+        return x
 
 
 class Decoder256(nn.Module):
-    """CNN Decoder for 256x256 images (4 stages instead of 5)."""
-    def __init__(self, latent_dim=512, base_channels=64, out_channels=1, use_batchnorm=True, output_activation=None, dropout=0.0):
+    """CNN Decoder for 256x256 images with configurable depth.
+
+    Mirrors encoder structure: Encoder has Conv2d, Conv2d, MaxPool2d per stage,
+    Decoder has ConvTranspose2d, ConvTranspose2d, Upsample(bilinear) per stage.
+
+    Args:
+        latent_dim: Input channels from bottleneck (default: 512)
+        base_channels: Base number of channels for final layer (default: 64)
+        out_channels: Number of output channels (default: 1)
+        use_batchnorm: Whether to use batch normalization (default: True)
+        output_activation: Output activation function (default: None)
+        dropout: Dropout rate (default: 0.0)
+        num_stages: Number of upsampling stages, should match encoder (default: 4)
+            - 4 stages: 16 -> 256 (spatial size)
+            - 5 stages: 8 -> 256
+            - 6 stages: 4 -> 256
+    """
+    def __init__(self, latent_dim=512, base_channels=64, out_channels=1, use_batchnorm=True, output_activation=None, dropout=0.0, num_stages=4):
         super().__init__()
 
-        # Decoder: 16 -> 32 -> 64 -> 128 -> 256
-        self.dec1 = nn.Sequential(
-            TransposeConvBlock(latent_dim, base_channels*4, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 16 -> 32
-            ConvBlock(base_channels*4, base_channels*4, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        self.num_stages = num_stages
+        self.stages = nn.ModuleList()
 
-        self.dec2 = nn.Sequential(
-            TransposeConvBlock(base_channels*4, base_channels*2, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 32 -> 64
-            ConvBlock(base_channels*2, base_channels*2, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        # Calculate channel progression (reverse of encoder)
+        # Build channel list that mirrors encoder
+        encoder_channels = []
+        for i in range(num_stages):
+            if i < num_stages - 1:
+                ch = min(base_channels * (2 ** i), latent_dim)
+            else:
+                ch = latent_dim
+            encoder_channels.append(ch)
 
-        self.dec3 = nn.Sequential(
-            TransposeConvBlock(base_channels*2, base_channels, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 64 -> 128
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+        # Reverse for decoder: start from latent_dim, go back to base_channels
+        in_ch = latent_dim
+        for i in range(num_stages):
+            # Determine output channels for this stage
+            if i < num_stages - 1:
+                # Not the last stage - use the channel from encoder in reverse
+                out_ch = encoder_channels[num_stages - 2 - i]
+            else:
+                # Last stage outputs base_channels
+                out_ch = base_channels
 
-        self.dec4 = nn.Sequential(
-            TransposeConvBlock(base_channels, base_channels, kernel_size=4, stride=2, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),  # 128 -> 256
-            ConvBlock(base_channels, base_channels, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout)
-        )
+            # Create stage with two ConvTranspose2d (mirroring two Conv2d) and bilinear upsample (undoing MaxPool2d)
+            stage = nn.Sequential(
+                TransposeConvBlock(in_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                TransposeConvBlock(out_ch, out_ch, kernel_size=3, stride=1, padding=1, use_batchnorm=use_batchnorm, dropout=dropout),
+                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            )
+            self.stages.append(stage)
+            in_ch = out_ch
 
         # Final output layer
         self.output = nn.Conv2d(base_channels, out_channels, kernel_size=1, stride=1, padding=0)
@@ -233,10 +288,8 @@ class Decoder256(nn.Module):
             raise ValueError(f"Unsupported output activation: {output_activation}")
 
     def forward(self, x):
-        x = self.dec1(x)    # 32
-        x = self.dec2(x)    # 64
-        x = self.dec3(x)    # 128
-        x = self.dec4(x)    # 256
+        for stage in self.stages:
+            x = stage(x)
         x = self.output(x)
         x = self.output_activation(x)
         return x
@@ -259,7 +312,8 @@ class PtychoCNN256(nn.Module):
                     'base_channels': 64,
                     'latent_dim': 512,
                     'use_batchnorm': True,
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 4
                 },
                 'amp_decoder': {
                     'base_channels': 64,
@@ -267,7 +321,8 @@ class PtychoCNN256(nn.Module):
                     'out_channels': 1,
                     'use_batchnorm': True,
                     'output_activation': 'sigmoid',
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 4
                 },
                 'ph_decoder': {
                     'base_channels': 64,
@@ -275,37 +330,41 @@ class PtychoCNN256(nn.Module):
                     'out_channels': 1,
                     'use_batchnorm': True,
                     'output_activation': 'tanh',
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 4
                 }
             }
 
-        # CNN Encoder (256x256 -> 16x16)
+        # CNN Encoder (256x256 -> configurable bottleneck)
         self.encoder = Encoder256(
             in_channels=config['encoder']['in_channels'],
             base_channels=config['encoder']['base_channels'],
             latent_dim=config['encoder']['latent_dim'],
             use_batchnorm=config['encoder']['use_batchnorm'],
-            dropout=config['encoder'].get('dropout', 0.0)
+            dropout=config['encoder'].get('dropout', 0.0),
+            num_stages=config['encoder'].get('num_stages', 4)
         )
 
-        # Amplitude Decoder (16x16 -> 256x256)
+        # Amplitude Decoder (configurable bottleneck -> 256x256)
         self.amp_decoder = Decoder256(
             latent_dim=config['amp_decoder']['latent_dim'],
             base_channels=config['amp_decoder']['base_channels'],
             out_channels=config['amp_decoder']['out_channels'],
             use_batchnorm=config['amp_decoder']['use_batchnorm'],
             output_activation=config['amp_decoder']['output_activation'],
-            dropout=config['amp_decoder'].get('dropout', 0.0)
+            dropout=config['amp_decoder'].get('dropout', 0.0),
+            num_stages=config['amp_decoder'].get('num_stages', 4)
         )
 
-        # Phase Decoder (16x16 -> 256x256)
+        # Phase Decoder (configurable bottleneck -> 256x256)
         self.ph_decoder = Decoder256(
             latent_dim=config['ph_decoder']['latent_dim'],
             base_channels=config['ph_decoder']['base_channels'],
             out_channels=config['ph_decoder']['out_channels'],
             use_batchnorm=config['ph_decoder']['use_batchnorm'],
             output_activation=config['ph_decoder']['output_activation'],
-            dropout=config['ph_decoder'].get('dropout', 0.0)
+            dropout=config['ph_decoder'].get('dropout', 0.0),
+            num_stages=config['ph_decoder'].get('num_stages', 4)
         )
 
     def forward(self, x, probe, normalization, scale):
@@ -359,7 +418,8 @@ class PtychoCNN(nn.Module):
                     'base_channels': 64,
                     'latent_dim': 512,
                     'use_batchnorm': True,
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 5
                 },
                 'amp_decoder': {
                     'base_channels': 64,
@@ -367,7 +427,8 @@ class PtychoCNN(nn.Module):
                     'out_channels': 1,
                     'use_batchnorm': True,
                     'output_activation': 'sigmoid',
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 5
                 },
                 'ph_decoder': {
                     'base_channels': 64,
@@ -375,7 +436,8 @@ class PtychoCNN(nn.Module):
                     'out_channels': 1,
                     'use_batchnorm': True,
                     'output_activation': 'tanh',
-                    'dropout': 0.0
+                    'dropout': 0.0,
+                    'num_stages': 5
                 }
             }
 
@@ -385,7 +447,8 @@ class PtychoCNN(nn.Module):
             base_channels=config['encoder']['base_channels'],
             latent_dim=config['encoder']['latent_dim'],
             use_batchnorm=config['encoder']['use_batchnorm'],
-            dropout=config['encoder'].get('dropout', 0.0)
+            dropout=config['encoder'].get('dropout', 0.0),
+            num_stages=config['encoder'].get('num_stages', 5)
         )
 
         # Amplitude Decoder
@@ -395,7 +458,8 @@ class PtychoCNN(nn.Module):
             out_channels=config['amp_decoder']['out_channels'],
             use_batchnorm=config['amp_decoder']['use_batchnorm'],
             output_activation=config['amp_decoder']['output_activation'],
-            dropout=config['amp_decoder'].get('dropout', 0.0)
+            dropout=config['amp_decoder'].get('dropout', 0.0),
+            num_stages=config['amp_decoder'].get('num_stages', 5)
         )
 
         # Phase Decoder
@@ -405,7 +469,8 @@ class PtychoCNN(nn.Module):
             out_channels=config['ph_decoder']['out_channels'],
             use_batchnorm=config['ph_decoder']['use_batchnorm'],
             output_activation=config['ph_decoder']['output_activation'],
-            dropout=config['ph_decoder'].get('dropout', 0.0)
+            dropout=config['ph_decoder'].get('dropout', 0.0),
+            num_stages=config['ph_decoder'].get('num_stages', 5)
         )
 
     def forward(self, x, probe, normalization, scale):

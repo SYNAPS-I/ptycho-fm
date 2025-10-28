@@ -46,6 +46,14 @@ class Trainer(object):
             # Save the state_dict for a non-parallel model
             torch.save(self.model.state_dict(), os.path.join(run_path, name + '.pth'))
 
+    def save_config(self, config_path='config.yaml'):
+        """Save a copy of the config file to the run path for reproducibility."""
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        if not os.path.isdir(run_path):
+            os.makedirs(run_path, exist_ok=True)
+        if os.path.exists(config_path):
+            shutil.copy(config_path, os.path.join(run_path, 'config.yaml'))
+
     def generate_state_dict(self, epoch_num, metrics, optimizer, wandb_run_id=None, scheduler=None):
         """Returns a dictionary of the state_dicts of all states but not the model."""
         state = {
@@ -57,15 +65,12 @@ class Trainer(object):
         }
         return state
 
-    def save_model_and_states_checkpoint(self, epoch_num, metrics, config_path='config.yaml', optimizer=None, wandb_run_id=None, scheduler=None):
+    def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer=None, wandb_run_id=None, scheduler=None):
         """Save a checkpoint state that can be loaded to continue training."""
         state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
         state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         self.update_saved_model('checkpoint_model')
         torch.save(state_dict, os.path.join(state_path, 'checkpoint.state'))
-        # Save a copy of the config file for reproducibility
-        if os.path.exists(config_path):
-            shutil.copy(config_path, os.path.join(state_path, 'config.yaml'))
 
     def load_state_checkpoint(self, optimizer, scheduler=None):
         """Load everything but the model."""
