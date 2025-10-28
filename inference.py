@@ -5,11 +5,13 @@ import torch
 from torch.utils.data import DataLoader, random_split
 import yaml
 
-from data import CombinedDataset
+from data import PtychographyDataset, CombinedDataset
 from model import PtychoViT
+from model_cnn import PtychoCNN, PtychoCNN256
 
 # NEED TO SET YOUR OWN CONFIG AND RESULTS SAVING (BOTTOM OF SCRIPT) PATHS
-config_path = '/scratch/aileenluo/ptycho-vit/models/run76/config.yaml'
+config_path = '/scratch/aileenluo/ptycho-vit/models/run88/config.yaml'
+inference_mode = 'test_only' # Anything else defaults to whatever data used during training (BIG)
 
 def load_config(path):
     """Load configuration from YAML file."""
@@ -20,28 +22,45 @@ def load_config(path):
 config = load_config(config_path)
 
 # Data
-if 'datafiles' in config['data'] and config['data']['datafiles'] is not None:
-    data_source = config['data']['datafiles']
-elif 'data_path' in config['data']:
-    data_source = config['data']['data_path']
+if inference_mode == 'test_only': 
+    #data_source = '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/horse256/horse256_dp.hdf5'
+    #data_source = '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/coins256/coins256_dp.hdf5'
+    #data_source = '/scratch/aileenluo/ptycho-vit/data/cameraman256_dp.hdf5'
+    data_source = '/scratch/aileenluo/ptycho-vit/data/brick256_dp.hdf5'
 else:
-    raise ValueError("Config must specify either 'datafiles' (list) or 'data_path' (directory)")
+    if 'datafiles' in config['data'] and config['data']['datafiles'] is not None:
+        data_source = config['data']['datafiles']
+    elif 'data_path' in config['data']:
+        data_source = config['data']['data_path']
+    else:
+        raise ValueError("Config must specify either 'datafiles' (list) or 'data_path' (directory)")
 
-# Create full dataset
-full_dataset = CombinedDataset(
-    file_paths=data_source,
-    normalization_dict_path=config['data'].get('normalization_dict_path')
-)
+# Create dataset
+if inference_mode == 'test_only':
+    test_dataset = PtychographyDataset(
+        data_source,
+        config['data']['image_size'],
+        config['data']['scale'], 
+        config['data'].get('normalization_dict_path')
+    )
 
-# Split into train and validation
-train_split = config['data']['train_split']
-total_size = len(full_dataset)
-train_size = int(total_size * train_split)
-val_size = total_size - train_size
+else: 
+    full_dataset = CombinedDataset(
+        file_paths=data_source,
+        patch_size=config['data']['image_size'],
+        scale=config['data']['scale'], 
+        normalization_dict_path=config['data'].get('normalization_dict_path')
+    )
 
-# Use random_split with a generator for reproducibility
-generator = torch.Generator().manual_seed(config['data']['random_seed'])
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+    # Split into train and validation
+    train_split = config['data']['train_split']
+    total_size = len(full_dataset)
+    train_size = int(total_size * train_split)
+    val_size = total_size - train_size
+
+    # Use random_split with a generator for reproducibility
+    generator = torch.Generator().manual_seed(config['data']['random_seed'])
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
 BATCH_SIZE = 512
 dataloader_kwargs = {
@@ -55,27 +74,46 @@ if dataloader_kwargs['num_workers'] > 0:
     dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
     dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
 
-train_loader = DataLoader(
-    train_dataset,
-    shuffle=True,  # Only shuffle if not using sampler
-    **dataloader_kwargs
-)
-val_loader = DataLoader(
-    val_dataset,
-    shuffle=False,
-    **dataloader_kwargs
-)
+if inference_mode == 'test_only':
+    test_loader = DataLoader(
+        test_dataset,
+        shuffle=False,
+        **dataloader_kwargs
+    )
+else:
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,  # Only shuffle if not using sampler
+        **dataloader_kwargs
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        shuffle=False,
+        **dataloader_kwargs
+    )
 
 # Load model
 print('Loading model')
-model = PtychoViT(config=config['model'])
+model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
+if model_type == 'vit':
+    model = PtychoViT(config=config['model'])
+    img_size = config['model']['encoder']['img_size']
+elif model_type == 'cnn':
+    model = PtychoCNN(config=config['model']['cnn'])
+    img_size = 512  # CNN models are fixed at 512x512
+elif model_type == 'cnn256':
+    model = PtychoCNN256(config=config['model']['cnn256'])
+    img_size = 256  # CNN256 models are fixed at 256x256
+else:
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', or 'cnn256'")
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 run_path = os.path.join(config['paths']['model_save_path'], 'run' + str(config['trainer']['run_num']))
-model.load_state_dict(torch.load(os.path.join(run_path, 'best_model.pth')))
+model.load_state_dict(torch.load(os.path.join(run_path, 'checkpoint_model.pth')))
 print('Model loaded successfully')
 
 # Make predictions and save directly to disk
-def predict_and_save(model, dataloader, output_dir, prefix, device=DEVICE):
+def predict_and_save(model, dataloader, output_dir, prefix, img_size, device=DEVICE):
     """Run inference and save results directly to disk using memory-mapped arrays.
 
     This avoids loading the entire dataset into RAM.
@@ -89,7 +127,6 @@ def predict_and_save(model, dataloader, output_dir, prefix, device=DEVICE):
     """
     # Get dataset size and image dimensions
     total_samples = len(dataloader.dataset)
-    img_size = config['model']['encoder']['img_size']
 
     print(f'Creating memory-mapped arrays for {total_samples} samples...')
 
@@ -168,8 +205,12 @@ if not os.path.isdir(RESULTS_PATH):
 if not os.path.isdir(results_run):
     os.mkdir(results_run)
 
-print('Running inference on training set...')
-predict_and_save(model, train_loader, results_run, 'train')
+if inference_mode == 'test_only':
+    print('Running inference on test set...')
+    predict_and_save(model, test_loader, results_run, 'brick', img_size)
+else:
+    print('Running inference on training set...')
+    predict_and_save(model, train_loader, results_run, 'train', img_size)
 
-print('\nRunning inference on validation set...')
-predict_and_save(model, val_loader, results_run, 'val')
+    print('\nRunning inference on validation set...')
+    predict_and_save(model, val_loader, results_run, 'val', img_size)
