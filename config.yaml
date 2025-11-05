@@ -7,19 +7,21 @@ data:
      - '/scratch/aileenluo/ptycho-vit/data/eagle256_dp.hdf5'
     # Add more files as needed:
      - '/scratch/aileenluo/ptycho-vit/data/cameraman256_dp.hdf5'
+     - '/scratch/aileenluo/ptycho-vit/data/brick256_dp.hdf5'
+     - '/scratch/aileenluo/ptycho-vit/data/grass256_dp.hdf5'
+     - '/scratch/aileenluo/ptycho-vit/data/gravel256_dp.hdf5'
 
   # Option 2: Specify a directory - will auto-discover all paired files
   # (comment out 'datafiles' above and uncomment this to use)
-  # data_path: '/scratch/aileenluo/ptycho-vit/data'
-  image_size: 256
-  scale: 1000.0
+  #data_path: '/scratch/aileenluo/ptycho-vit/data'
+  scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
   normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
 
-  train_split: 0.9  # Fraction of data for training (remainder used for validation)
-  random_seed: 7
+  train_split: 0.95  # Fraction of data for training (remainder used for validation)
+  random_seed: 8
 
   # DataLoader Configuration
   num_workers: 4
@@ -29,94 +31,91 @@ data:
 
 # Training Configuration
 training:
-  mode: 'supervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 128
+  mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
+  batch_size: 64
   learning_rate: 5.0e-4
-  epochs: 81  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 201  # Total epochs to train for (not additional epochs when resuming)
   ngpus: 2
-  loss_function: 'smooth_l1'  # Options: smooth_l1, mse, l1, poisson_nll
-  validation_plot_freq: 5  # Plot validation results every N epochs
+  loss_function: 'l1'  # Options: smooth_l1, mse, l1, poisson_nll
+  validation_plot_freq: 10  # Plot validation results every N epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
 
 # Model Architecture
 model:
-  # Model type selection: 'vit', 'cnn', or 'cnn256'
-  model_type: 'cnn256'  # Options: 'vit' (Vision Transformer), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256)
+  # Model type selection: 'vit', 'cnn', 'cnn256', or 'vit256'
+  model_type: 'vit256'  # Options: 'vit' (ViT for 512x512), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256), 'vit256' (ViT with CNN decoders for 256x256)
 
-  # Vision Transformer Encoder (used when model_type='vit')
-  encoder:
-    img_size: 512
-    patch_size: 16
-    in_channels: 1
-    embed_dim: 192
-    depth: 12
-    num_heads: 3
-    mlp_ratio: 4.0
-    use_cls_token: false
-    dropout: 0.1  # Dropout for positional embedding and MLP layers
-    attn_dropout: 0.0  # Dropout for attention weights
-
-  # Amplitude Decoder
-  amp_decoder:
-    embed_dim: 192
-    out_channels: 1
-    hidden_dims: [128, 64, 32, 16]
-    activation: 'sigmoid'
-    dropout: 0.1  # Dropout after each conv block
-
-  # Phase Decoder
-  ph_decoder:
-    embed_dim: 192
-    out_channels: 1
-    hidden_dims: [128, 64, 32, 16]
-    activation: 'tanh'
-    dropout: 0.1  # Dropout after each conv block
+  # ViT Model Configuration for 512x512 images (used when model_type='vit')
+  vit:
+    encoder:
+      img_size: 512
+      patch_size: 16
+      in_channels: 1
+      embed_dim: 192
+      depth: 12
+      num_heads: 3
+      mlp_ratio: 4.0
+      use_cls_token: false
+      dropout: 0.1
+      attn_dropout: 0.0
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 192     # Must match encoder embed_dim
+      num_stages: 5       # 32x32 -> 512x512
+      use_batchnorm: true
+      dropout: 0.0
 
   # CNN Model Configuration for 512x512 images (used when model_type='cnn')
   cnn:
     encoder:
       in_channels: 1
-      base_channels: 32  # Reduced from 64 for smaller model (7.5M params)
-      latent_dim: 256    # Reduced from 512 for smaller model
+      base_channels: 32
+      latent_dim: 256
+      num_stages: 5       # 512 -> 16
       use_batchnorm: true
-      dropout: 0.1  # Dropout for encoder conv layers
-    amp_decoder:
-      base_channels: 32  # Reduced from 64 for smaller model
-      latent_dim: 256    # Reduced from 512 for smaller model
-      out_channels: 1
+      dropout: 0.1
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 32
+      latent_dim: 256
+      num_stages: 5
       use_batchnorm: true
-      output_activation: 'sigmoid'
-      dropout: 0.1  # Dropout for amplitude decoder conv layers
-    ph_decoder:
-      base_channels: 32  # Reduced from 64 for smaller model
-      latent_dim: 256    # Reduced from 512 for smaller model
-      out_channels: 1
-      use_batchnorm: true
-      output_activation: 'tanh'
-      dropout: 0.1  # Dropout for phase decoder conv layers
+      dropout: 0.1
 
   # CNN Model Configuration for 256x256 images (used when model_type='cnn256')
   cnn256:
     encoder:
       in_channels: 1
-      base_channels: 32  # Small model for 256x256 images (~3M params)
-      latent_dim: 256    # Bottleneck dimension at 16x16
+      base_channels: 64
+      latent_dim: 1024
+      num_stages: 5       # 256 -> 8
       use_batchnorm: true
-      dropout: 0.1  # Dropout for encoder conv layers
-    amp_decoder:
-      base_channels: 32
-      latent_dim: 256
-      out_channels: 1
+      dropout: 0.1
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 1024
+      num_stages: 5
       use_batchnorm: true
-      output_activation: 'sigmoid'
-      dropout: 0.1  # Dropout for amplitude decoder conv layers
-    ph_decoder:
-      base_channels: 32
-      latent_dim: 256
-      out_channels: 1
+      dropout: 0.1
+
+  # ViT with CNN Decoders for 256x256 images (used when model_type='vit256')
+  vit256:
+    encoder:
+      img_size: 256
+      patch_size: 16
+      in_channels: 1
+      embed_dim: 512
+      depth: 12
+      num_heads: 8
+      mlp_ratio: 4.0
+      use_cls_token: false
+      dropout: 0.1
+      attn_dropout: 0.0
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 512     # Must match encoder embed_dim
+      num_stages: 4       # 16x16 -> 256x256
       use_batchnorm: true
-      output_activation: 'tanh'
-      dropout: 0.1  # Dropout for phase decoder conv layers
+      dropout: 0.1
 
 # Paths
 paths:
@@ -127,10 +126,10 @@ wandb:
   enabled: false
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
-  dataset_name: 'eagle + cameraman'
-  notes: 'Supervised, CNN, 256x256, -I_P'
+  dataset_name: 'eagle, cameraman, brick, grass, gravel'
+  notes: 'vit256, 43M, log-polar, regular sigmoid'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 82
+  run_num: 4
