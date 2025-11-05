@@ -4,58 +4,46 @@ Physics-informed Vision Transformer and CNN for Ptychography Reconstruction
 
 ## Overview
 
-This project implements physics-informed deep learning architectures for ptychographic image reconstruction. The framework supports two model types:
-- **Vision Transformer (ViT)**: Transformer-based encoder with CNN decoders
-- **Convolutional Neural Network (CNN)**: Symmetric encoder-decoder architecture
+This project implements physics-informed deep learning architectures for ptychographic image reconstruction. The framework supports four model variants optimized for different image sizes and computational requirements:
 
-Both models combine learned representations with physics-based constraints to reconstruct amplitude and phase information from diffraction patterns.
+- **PtychoViT** (512×512): Vision Transformer encoder with CNN decoders
+- **PtychoViT256** (256×256): Vision Transformer encoder with CNN decoders and log-polar transform
+- **PtychoCNN** (512×512): Symmetric CNN encoder-decoder architecture
+- **PtychoCNN256** (256×256): CNN encoder-decoder with log-polar transform
 
-## Architecture
+All models combine learned representations with physics-based constraints to reconstruct amplitude and phase information from diffraction patterns.
 
-### Model Types
+## Key Features
 
-Choose between two architectures via `model_type` in `config.yaml`:
-
-#### Vision Transformer (model_type: 'vit')
-1. **ViT Encoder** (`vit.py`): Processes diffraction patterns through patch embeddings and transformer blocks
-2. **Dual CNN Decoders** (`decoders.py`): Separate decoders for amplitude (sigmoid) and phase (tanh) reconstruction
-3. **Physics-Informed Forward Model** (`model.py`): Enforces ptychographic forward physics
-
-#### CNN Architecture (model_type: 'cnn')
-1. **CNN Encoder** (`model_cnn.py`): 5-stage convolutional encoder with progressive downsampling (512→16)
-2. **Dual CNN Decoders** (`model_cnn.py`): Symmetric decoders for amplitude (sigmoid) and phase (tanh) with upsampling (16→512)
-3. **Physics-Informed Forward Model** (`model_cnn.py`): Same ptychographic forward model as ViT
-
-### Key Features
-
-- **Multiple architectures**: Switch between ViT and CNN models via config
-- **Distributed training**: PyTorch DDP (DistributedDataParallel) support for multi-GPU training
-- **Flexible configuration**: YAML-based config file for all hyperparameters and architecture settings
-- **Configurable dropout**: Independent dropout rates for encoder and decoders
-- **Multi-dataset support**: Load and train on multiple HDF5 files simultaneously with automatic discovery
-- **Efficient data loading**: PyTorch DataLoader with DistributedSampler for DDP training
-- **Configurable architecture**: All model layers and dimensions controllable via config
-- **Multiple loss functions**: Support for SmoothL1, MSE, L1, and PoissonNLL losses
+- **Multiple architectures**: Four model variants optimized for different image sizes
+- **Log-polar preprocessing**: Enhanced feature extraction for 256×256 models
+- **Physics-informed**: Enforces ptychographic forward model during training
+- **Distributed training**: PyTorch DDP (DistributedDataParallel) for multi-GPU training
+- **Flexible configuration**: YAML-based config with unified decoder specification
+- **Multi-dataset support**: Automatic discovery and loading of HDF5 file pairs
+- **Multiple loss functions**: SmoothL1, MSE, L1, and PoissonNLL
 - **Training modes**: Supervised (amp/phase loss) or unsupervised (diffraction loss)
-- **Physics-informed**: Enforces ptychographic forward model in training loop
 - **Experiment tracking**: Integrated Weights & Biases logging
 
 ## Project Structure
 
 ```
 ptycho-vit/
-├── vit.py                # Vision Transformer encoder implementation
-├── decoders.py           # CNN decoder for upsampling to full resolution (ViT)
-├── model.py              # PtychoViT model combining encoder, decoders, and physics
-├── model_cnn.py          # PtychoCNN model with symmetric encoder-decoder architecture
-├── data.py               # PtychographyDataset and CombinedDataset for data loading
+├── vit.py                # Vision Transformer encoder
+├── model.py              # PtychoViT and PtychoViT256 models
+├── model_cnn.py          # PtychoCNN and PtychoCNN256 models, Encoder/Decoder classes
+├── ptychi_utils.py       # Image processing utilities (Fourier shift, patch extraction)
+├── data.py               # PtychographyDataset and CombinedDataset
 ├── training.py           # Trainer class with train/validation loops
 ├── main.py               # Main training script with DDP initialization
-├── config.yaml           # Configuration file for all training parameters
+├── inference.py          # Inference script for model evaluation
+├── config.yaml           # Configuration file for all parameters
+├── custom_loss.py        # Custom loss functions
 ├── tests/
 │   ├── test_data.py              # Data loading tests
-│   ├── test_model_selection.py  # Model selection and initialization tests
+│   ├── test_model_selection.py  # Model selection tests
 │   └── test_utils.py             # Utility function tests
+├── development_logs/     # Archive of deprecated code (gitignored)
 └── pyproject.toml        # Project dependencies
 ```
 
@@ -78,115 +66,158 @@ pip install -e .
 ## Data Format
 
 The dataset expects paired HDF5 files in Ptychodus format:
-- `*_dp.hdf5`: Contains diffraction patterns under key 'dp'
-- `*_para.hdf5`: Contains object (complex), probe positions, and probe information
+- `*_dp.hdf5`: Contains diffraction patterns under key `'dp'` with shape `[N, H, W]`
+- `*_para.hdf5`: Contains reconstruction parameters
 
-**Data Structure:**
+**Required keys in `*_para.hdf5`:**
+- `'object'`: Complex object array with shape `[1, H, W]`
+  - Attributes: `'pixel_height_m'` (pixel size in meters)
+- `'probe'`: Probe function (complex array)
+- `'probe_position_x_m'`: Probe x-positions in meters with shape `[N]`
+- `'probe_position_y_m'`: Probe y-positions in meters with shape `[N]`
+
+**Directory structure:**
 ```
-object_name/
-├── object_name_dp.hdf5     # Diffraction patterns [N, H, W]
-└── object_name_para.hdf5   # Object data:
-                            #   - 'object': Complex object [1, H, W]
-                            #   - 'probe': Probe function (optional)
+data/
+├── object1_dp.hdf5
+├── object1_para.hdf5
+├── object2_dp.hdf5
+├── object2_para.hdf5
+└── ...
 ```
 
 ## Configuration
 
-All training parameters are configured in `config.yaml`:
+All training parameters are configured in `config.yaml`. The configuration uses a unified decoder structure to reduce redundancy.
 
-### Key Configuration Sections
+### Model Architecture
 
-**Data Configuration:**
-- `data_path`: Directory containing paired HDF5 files (auto-discovers all files)
-- `datafiles`: Alternatively, specify explicit list of files
-- `normalization_dict_path`: Path to pickle file with per-object normalization factors
-- `train_split`: Train/validation split ratio (e.g., 0.9 for 90% train, 10% validation)
-- `random_seed`: Seed for reproducible splits
-
-**DataLoader Settings:**
-- `num_workers`: Number of worker processes for data loading (0 = main process only)
-  - Recommended: 2-4 for CPU data loading, 0 for fast storage or small datasets
-- `prefetch_factor`: Batches to prefetch per worker (only if num_workers > 0)
-  - Recommended: 2-10, increase if GPU is waiting for data
-- `pin_memory`: Use pinned memory for faster CPU-to-GPU transfer
-  - Recommended: true for GPU training
-- `persistent_workers`: Keep workers alive between epochs (only if num_workers > 0)
-  - Recommended: true to avoid worker startup overhead
-
-**Training Configuration:**
-- `mode`: 'supervised' (amp/phase loss) or 'unsupervised' (diffraction loss)
-- `batch_size`: Samples per batch per GPU
-- `learning_rate`: Optimizer learning rate
-- `epochs`: Number of training epochs
-- `ngpus`: Number of GPUs for DDP
-- `loss_function`: Choice of 'smooth_l1', 'mse', 'l1', or 'poisson_nll'
-- `validation_plot_freq`: Plot validation results every N epochs
-- `resume_from_checkpoint`: Resume from checkpoint if available
-
-**Model Architecture:**
-- `model_type`: Choose 'vit' or 'cnn' architecture
-- **ViT Configuration**: Fully configurable transformer encoder and CNN decoders
-  - Embedding dimension, depth, attention heads, MLP ratio
-  - Dropout for positional embeddings and attention
-- **CNN Configuration**: Symmetric encoder-decoder with configurable channels
-  - Base channels (e.g., 32 or 64) - determines model size
-  - Latent dimension at bottleneck (e.g., 256 or 512)
-  - Dropout for all convolutional layers (encoder and both decoders)
-- All parameters in `config.yaml` under `model` section
-
-## Model Selection
-
-### Choosing Between ViT and CNN
-
-Select model architecture in `config.yaml`:
+Select model type via `model_type`:
 
 ```yaml
 model:
-  model_type: 'vit'  # or 'cnn'
+  model_type: 'vit256'  # Options: 'vit', 'cnn', 'cnn256', 'vit256'
 ```
 
-### Model Comparison
+Each model type has two sections:
+- `encoder`: Encoder-specific parameters
+- `decoder`: Shared decoder config (activations hardcoded in model)
 
-| Model | Parameters | Architecture | Best For |
-|-------|-----------|--------------|----------|
-| **ViT** | 7.1M | Transformer encoder + CNN decoders | Global context, attention mechanisms |
-| **CNN (small)** | 7.5M | base=32, latent=256 | Faster training, local features |
-| **CNN (large)** | 29.8M | base=64, latent=512 | High capacity, detailed reconstruction |
-
-**Adjust CNN model size** via `base_channels` and `latent_dim`:
-- `base_channels`: 32 (small), 64 (large)
-- `latent_dim`: 256 (small), 512 (large)
-
-### Example Configurations
-
-**Small CNN** (7.5M params):
+**Example - PtychoViT256:**
 ```yaml
 model:
-  model_type: 'cnn'
-  cnn:
+  model_type: 'vit256'
+  vit256:
     encoder:
-      base_channels: 32
-      latent_dim: 256
+      img_size: 256
+      patch_size: 16
+      embed_dim: 512
+      depth: 12
+      num_heads: 8
       dropout: 0.1
-    amp_decoder:
-      base_channels: 32
-      latent_dim: 256
-      dropout: 0.1
-    ph_decoder:
-      base_channels: 32
-      latent_dim: 256
+      attn_dropout: 0.0
+    decoder:
+      base_channels: 64
+      latent_dim: 512      # Must match encoder embed_dim
+      num_stages: 4        # 16×16 → 256×256
+      use_batchnorm: true
       dropout: 0.1
 ```
 
-**ViT** (7.1M params):
+### Data Configuration
+
 ```yaml
-model:
-  model_type: 'vit'
-  encoder:
-    embed_dim: 192
-    depth: 12
-    num_heads: 3
-    dropout: 0.1
+data:
+  # Option 1: List specific files
+  datafiles:
+    - '/path/to/object1_dp.hdf5'
+    - '/path/to/object2_dp.hdf5'
+
+  # Option 2: Auto-discover all paired files in directory
+  # data_path: '/path/to/data/'
+
+  scale: 10000.0
+  normalization_dict_path: '/path/to/norm_factors.pkl'  # Optional
+  train_split: 0.95
+  random_seed: 8
+
+  # DataLoader settings
+  num_workers: 4
+  prefetch_factor: 10
+  pin_memory: true
+  persistent_workers: false
+```
+
+### Training Configuration
+
+```yaml
+training:
+  mode: 'unsupervised'  # 'supervised' or 'unsupervised'
+  batch_size: 64
+  learning_rate: 5.0e-4
+  epochs: 201
+  ngpus: 2
+  loss_function: 'l1'  # Options: 'smooth_l1', 'mse', 'l1', 'poisson_nll'
+  validation_plot_freq: 10
+  resume_from_checkpoint: false
+```
+
+## Model Comparison
+
+| Model | Image Size | Parameters | Key Features |
+|-------|-----------|------------|--------------|
+| **PtychoViT** | 512×512 | ~7M | ViT encoder, global attention |
+| **PtychoViT256** | 256×256 | ~43M | ViT encoder, log-polar transform |
+| **PtychoCNN** | 512×512 | 7.5M - 30M | CNN encoder-decoder, configurable size |
+| **PtychoCNN256** | 256×256 | ~3M | CNN encoder-decoder, log-polar transform |
+
+### Model Architecture Details
+
+#### PtychoViT (512×512)
+1. **ViT Encoder**: Processes 512×512 diffraction patterns into patch embeddings
+   - Default: 32×32 patches with 16×16 patch size
+2. **CNN Decoders**: Two symmetric decoders (amplitude/phase)
+   - 5 upsampling stages: 32×32 → 512×512
+3. **Physics Forward Model**: Enforces ptychographic physics
+
+#### PtychoViT256 (256×256)
+1. **Log-polar Transform**: Preprocesses diffraction patterns to enhance rotational features
+2. **ViT Encoder**: Processes transformed 256×256 images
+   - Default: 16×16 patches with 16×16 patch size
+3. **CNN Decoders**: 4 upsampling stages: 16×16 → 256×256
+4. **Physics Forward Model**: Same as PtychoViT
+
+#### PtychoCNN (512×512)
+1. **CNN Encoder**: 5-stage encoder with progressive downsampling
+   - 512×512 → 256×256 → 128×128 → 64×64 → 32×32 → 16×16
+2. **Dual Decoders**: Symmetric decoders for amplitude and phase
+   - 5 upsampling stages: 16×16 → 512×512
+3. **Configurable Size**: Adjust via `base_channels` and `latent_dim`
+
+#### PtychoCNN256 (256×256)
+1. **Log-polar Transform**: Preprocesses diffraction patterns
+2. **CNN Encoder**: 5-stage encoder: 256×256 → 8×8
+3. **Dual Decoders**: 5 upsampling stages: 8×8 → 256×256
+4. **Compact Design**: Optimized for smaller images
+
+### Physics Integration
+
+All models enforce ptychographic physics:
+```python
+# Subtract probe intensity contribution
+x = x - sqrt(probe_intensity)
+
+# Encode to latent representation
+latent = encoder(x)
+
+# Decode to amplitude and phase
+amp = amp_decoder(latent)      # sigmoid activation
+phase = ph_decoder(latent)     # tanh activation, scaled to [-π, π]
+
+# Apply physics forward model
+complex_object = amp * exp(i * phase)
+Psi = FFT(complex_object * probe)
+predicted_diffraction = |Psi|²
 ```
 
 ## Usage
@@ -203,96 +234,76 @@ python main.py
 torchrun --nnodes 1 --nproc-per-node 2 main.py
 ```
 
-This will launch distributed training across 2 GPUs on a single node.
+### Inference
 
-### Model Configuration
+```bash
+python inference.py --model_path /path/to/checkpoint.pt --config config.yaml
+```
 
-**Default ViT Configuration** (ViT-Tiny):
-- Image size: 512x512
-- Patch size: 16x16
-- Embedding dimension: 192
-- Depth: 12 transformer blocks
-- Attention heads: 3
-- Decoder layers: [128, 64, 32, 16]
+## Data Loading
 
-**Default CNN Configuration** (Small):
-- Image size: 512x512 (fixed)
-- Base channels: 32
-- Latent dimension: 256
-- Architecture: 5-stage encoder-decoder
-- Channel progression: 32 → 64 → 128 → 256 → 256 (latent) → 256 → 128 → 64 → 32
+### PtychographyDataset
+- Loads probe positions from HDF5 file in meters
+- Converts positions to pixels using `pixel_height_m` attribute
+- Extracts patches using Fourier shift for sub-pixel accuracy
+- Applies Poisson noise to diffraction patterns (optional)
+- Efficient caching of object and probe data
 
-All parameters can be modified in `config.yaml`.
+### CombinedDataset
+- Auto-discovers paired HDF5 files in directory
+- Manages multiple `PtychographyDataset` instances
+- Provides unified indexing across all files
+- Works seamlessly with PyTorch `DataLoader` and `DistributedSampler`
+
+### Normalization
+- Per-object normalization factors loaded from pickle file
+- Format: `{object_name: normalization_factor}`
+- Falls back to default value if object not found
 
 ## Training Details
 
-### Data Loading
-- **PyTorch DataLoader**: Standard PyTorch data loading with configurable num_workers
-- **DistributedSampler**: Automatic data partitioning across GPUs for DDP training
-- **On-demand file access**: HDF5 files opened and closed per sample access for thread safety
-- **Fixed splits**: Train/val split determined once and preserved across epochs
-- **Normalization support**: Per-object normalization factors from pickle dictionary
-- **Multi-file support**: CombinedDataset transparently handles multiple HDF5 file pairs
-
-### Training Loop
-- **Loss calculation**: Compares predicted diffraction amplitude to ground truth
-- **Physics enforcement**: Forward model computes diffraction from reconstructed object
-- **Optimizer**: Adam
-- **Validation**: Periodic evaluation with optional visualization
-- **Checkpointing**: Saves model, optimizer state, and metrics
-
 ### Distributed Training
 - PyTorch DDP for efficient multi-GPU training
-- Gradient synchronization across all GPUs
-- **DistributedSampler**: Automatically partitions data across ranks and handles shuffling
-- Only rank 0 process logs to WandB and saves checkpoints
-- All ranks process data in parallel
-- DataLoader automatically handles batch count equalization across ranks
+- `DistributedSampler` automatically partitions data across GPUs
+- Only rank 0 logs to WandB and saves checkpoints
+- Gradient synchronization across all processes
 
-## Model Architecture Details
+### Checkpointing
+Checkpoints include:
+- Model state dict
+- Optimizer state dict
+- Epoch number
+- Training/validation losses
+- Model configuration
 
-### PtychoViT (model.py)
+Resume training by setting `resume_from_checkpoint: true` in config.
 
-The Vision Transformer-based model integrates:
-1. ViT encoder that processes diffraction patterns into latent features via patch embeddings
-2. Two parallel CNN decoders for amplitude and phase reconstruction
-3. Physics-based forward model applying Fourier transform and probe multiplication
-4. Normalization and scaling to match experimental data range
+## Experiment Tracking
 
-**Parameters:** ~7.1M
+Weights & Biases integration tracks:
+- Training and validation losses
+- Amplitude and phase reconstruction errors
+- Model architecture and hyperparameters
+- Periodic validation visualizations
+- System metrics (GPU usage, memory)
 
-### PtychoCNN (model_cnn.py)
-
-The CNN-based model integrates:
-1. **Encoder**: 5-stage convolutional encoder with progressive downsampling
-   - Architecture: 512×512 → 256×256 → 128×128 → 64×64 → 32×32 → 16×16
-   - Each stage: 2 conv blocks + max pooling
-   - Configurable dropout after each convolutional layer
-2. **Dual Decoders**: Two symmetric decoders for amplitude and phase
-   - Architecture: 16×16 → 32×32 → 64×64 → 128×128 → 256×256 → 512×512
-   - Each stage: transpose conv + conv block
-   - Independent dropout control for each decoder
-3. Physics-based forward model (same as PtychoViT)
-
-**Parameters:** ~7.5M (base=32, latent=256) or ~29.8M (base=64, latent=512)
-
-### Physics Integration
-
-Both models enforce ptychographic physics:
-```python
-complex_object = amp * exp(i * phase)
-Psi = FFT(complex_object * probe)
-predicted_intensity = |Psi|^2
+Configure in `config.yaml`:
+```yaml
+wandb:
+  enabled: true
+  entity: 'your-entity'
+  project: 'PtychoViT'
+  dataset_name: 'dataset-description'
+  notes: 'Experiment notes'
+  resume_run_id: null  # Optional: resume existing run
 ```
-
-Models output: predicted diffraction amplitude, reconstructed amplitude, and reconstructed phase.
 
 ## Testing
 
-Run the test suite to verify model selection and functionality:
+Run tests to verify functionality:
 
 ```bash
-# Test model selection between ViT and CNN
+# Test model selection and initialization
 python tests/test_model_selection.py
 
 # Test data loading
@@ -302,52 +313,23 @@ python tests/test_data.py
 python tests/test_utils.py
 ```
 
-The `test_model_selection.py` verifies:
-- Both ViT and CNN models initialize correctly
-- Forward pass produces expected output shapes
-- Dropout configurations work properly
-- Parameter counts match expected values
+## Development
 
-## Dataset Classes
+### Code Organization
+- **model.py**: ViT-based models (PtychoViT, PtychoViT256)
+- **model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
+- **ptychi_utils.py**: Image processing utilities adapted from pty-chi
+- **data.py**: Dataset classes for loading Ptychodus format files
+- **training.py**: Training and validation logic
 
-### PtychographyDataset (data.py)
-- Handles single paired HDF5 file
-- Opens and closes file on each __getitem__ call for thread safety
-- Caches object and probe data for efficient access
-- Extracts patches using Fourier shift for sub-pixel accuracy
-- Applies Poisson noise to diffraction patterns
-
-### CombinedDataset (data.py)
-- PyTorch Dataset for multiple HDF5 file pairs
-- Auto-discovers paired files from directory
-- Manages multiple PtychographyDataset instances
-- Provides unified indexing across all files
-- Works seamlessly with PyTorch DataLoader and DistributedSampler
-
-## Experiment Tracking
-
-Weights & Biases integration tracks:
-- Training and validation losses
-- Amplitude and phase reconstruction losses
-- Model type (ViT or CNN) and architecture configuration
-- All hyperparameters from config (including dropout rates)
-- Learning rate (if using scheduler)
-- Periodic validation visualizations
-- Training/validation plots
-
-Configure in `config.yaml` under `wandb` section:
-```yaml
-wandb:
-  enabled: true
-  entity: 'your-entity'
-  project: 'PtychoViT'
-  dataset_name: 'your-dataset'
-  notes: 'Experiment description'
-```
+### Adding New Models
+1. Define model class in `model.py` or `model_cnn.py`
+2. Add config section in `config.yaml` under `model:`
+3. Update model selection logic in `main.py`
 
 ## License
 
-This project is under development at the Advanced Photon Source.
+This project is under development at the Advanced Photon Source, Argonne National Laboratory.
 
 ## Acknowledgments
 
