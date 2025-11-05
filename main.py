@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6, 7"
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ import pickle
 import yaml
 
 from data import CombinedDataset
-from model import PtychoViT
+from model import PtychoViT, PtychoViT256
 from model_cnn import PtychoCNN, PtychoCNN256
 from training import Trainer
 from torch.utils.data import DataLoader, random_split
@@ -145,16 +145,19 @@ if is_main_process:
 # Model setup with config
 model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
 if model_type == 'vit':
-    model = PtychoViT(config=config['model'])
-    img_size = config['model']['encoder']['img_size']
+    model = PtychoViT(config=config['model']['vit'])
+    img_size = config['model']['vit']['encoder']['img_size']
 elif model_type == 'cnn':
     model = PtychoCNN(config=config['model']['cnn'])
     img_size = 512  # CNN models are fixed at 512x512
 elif model_type == 'cnn256':
     model = PtychoCNN256(config=config['model']['cnn256'])
     img_size = 256  # CNN256 models are fixed at 256x256
+elif model_type == 'vit256':
+    model = PtychoViT256(config=config['model']['vit256'])
+    img_size = 256  # ViT256 models are fixed at 256x256
 else:
-    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', or 'cnn256'")
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', 'cnn256', or 'vit256'")
 
 if is_main_process:
     print(f"Using model type: {model_type.upper()}", flush=True)

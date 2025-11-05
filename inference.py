@@ -1,16 +1,16 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 import yaml
 
 from data import PtychographyDataset, CombinedDataset
-from model import PtychoViT
+from model import PtychoViT, PtychoViT256
 from model_cnn import PtychoCNN, PtychoCNN256
 
 # NEED TO SET YOUR OWN CONFIG AND RESULTS SAVING (BOTTOM OF SCRIPT) PATHS
-config_path = '/scratch/aileenluo/ptycho-vit/models/run88/config.yaml'
+config_path = '/scratch/aileenluo/ptycho-vit/models/run106/config.yaml'
 inference_mode = 'test_only' # Anything else defaults to whatever data used during training (BIG)
 
 def load_config(path):
@@ -104,12 +104,15 @@ elif model_type == 'cnn':
 elif model_type == 'cnn256':
     model = PtychoCNN256(config=config['model']['cnn256'])
     img_size = 256  # CNN256 models are fixed at 256x256
+elif model_type == 'vit256':
+    model = PtychoViT256(config=config['model']['vit256'])
+    img_size = 256  # ViT256 models are fixed at 256x256
 else:
-    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', or 'cnn256'")
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', 'cnn256', or 'vit256'")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 run_path = os.path.join(config['paths']['model_save_path'], 'run' + str(config['trainer']['run_num']))
-model.load_state_dict(torch.load(os.path.join(run_path, 'checkpoint_model.pth')))
+model.load_state_dict(torch.load(os.path.join(run_path, 'best_model.pth')))
 print('Model loaded successfully')
 
 # Make predictions and save directly to disk
