@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import math
+import numpy as np
+from scipy.ndimage import map_coordinates
 
 
 class ConvBlock(nn.Module):
@@ -279,7 +281,7 @@ class Decoder256(nn.Module):
 
         # Optional output activation
         if output_activation == 'sigmoid':
-            self.output_activation = nn.Sigmoid()
+            self.output_activation = nn.Tanh()
         elif output_activation == 'tanh':
             self.output_activation = nn.Tanh()
         elif output_activation is None:
@@ -315,21 +317,10 @@ class PtychoCNN256(nn.Module):
                     'dropout': 0.0,
                     'num_stages': 4
                 },
-                'amp_decoder': {
+                'decoder': {
                     'base_channels': 64,
                     'latent_dim': 512,
-                    'out_channels': 1,
                     'use_batchnorm': True,
-                    'output_activation': 'sigmoid',
-                    'dropout': 0.0,
-                    'num_stages': 4
-                },
-                'ph_decoder': {
-                    'base_channels': 64,
-                    'latent_dim': 512,
-                    'out_channels': 1,
-                    'use_batchnorm': True,
-                    'output_activation': 'tanh',
                     'dropout': 0.0,
                     'num_stages': 4
                 }
@@ -347,24 +338,24 @@ class PtychoCNN256(nn.Module):
 
         # Amplitude Decoder (configurable bottleneck -> 256x256)
         self.amp_decoder = Decoder256(
-            latent_dim=config['amp_decoder']['latent_dim'],
-            base_channels=config['amp_decoder']['base_channels'],
-            out_channels=config['amp_decoder']['out_channels'],
-            use_batchnorm=config['amp_decoder']['use_batchnorm'],
-            output_activation=config['amp_decoder']['output_activation'],
-            dropout=config['amp_decoder'].get('dropout', 0.0),
-            num_stages=config['amp_decoder'].get('num_stages', 4)
+            latent_dim=config['decoder']['latent_dim'],
+            base_channels=config['decoder']['base_channels'],
+            out_channels=1,
+            use_batchnorm=config['decoder']['use_batchnorm'],
+            output_activation='sigmoid',
+            dropout=config['decoder'].get('dropout', 0.0),
+            num_stages=config['decoder'].get('num_stages', 4)
         )
 
         # Phase Decoder (configurable bottleneck -> 256x256)
         self.ph_decoder = Decoder256(
-            latent_dim=config['ph_decoder']['latent_dim'],
-            base_channels=config['ph_decoder']['base_channels'],
-            out_channels=config['ph_decoder']['out_channels'],
-            use_batchnorm=config['ph_decoder']['use_batchnorm'],
-            output_activation=config['ph_decoder']['output_activation'],
-            dropout=config['ph_decoder'].get('dropout', 0.0),
-            num_stages=config['ph_decoder'].get('num_stages', 4)
+            latent_dim=config['decoder']['latent_dim'],
+            base_channels=config['decoder']['base_channels'],
+            out_channels=1,
+            use_batchnorm=config['decoder']['use_batchnorm'],
+            output_activation='tanh',
+            dropout=config['decoder'].get('dropout', 0.0),
+            num_stages=config['decoder'].get('num_stages', 4)
         )
 
     def forward(self, x, probe, normalization, scale):
@@ -378,14 +369,19 @@ class PtychoCNN256(nn.Module):
         scale = scale.view(scale.shape[0], 1, 1)
         probe_intensity = (probe_intensity / normalization) * scale
 
-        # Subtract probe contribution to total intensity
+        # Log10 and subtract probe contribution to total intensity
+        #x = torch.log10(x + 1.0e-6) 
         x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
+        # Apply log-polar coordinate transform
+        grid = create_logpolar_grid(x.shape[-2], x.shape[-1], x.device)
+        x_prime = apply_logpolar_transform(x, grid, mode='bicubic')
+
         # CNN Encoder
-        x = self.encoder(x)
+        x = self.encoder(x_prime)
 
         # Decode to amplitude and phase
-        amp = self.amp_decoder(x).squeeze(1)
+        amp = (self.amp_decoder(x).squeeze(1) + 1) / 2
         ph = self.ph_decoder(x).squeeze(1) * math.pi
 
         # Complex object and diffraction
@@ -399,6 +395,89 @@ class PtychoCNN256(nn.Module):
         pred_diff_amp = torch.sqrt(intensity)
 
         return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1)
+
+
+def create_logpolar_grid(height, width, device='cpu'):
+    """
+    Create a log-polar sampling grid for torch.nn.functional.grid_sample.
+    Follows numpy 'ij' indexing convention to match scipy behavior.
+
+    Args:
+        height, width: Output dimensions
+        device: torch device
+
+    Returns:
+        grid: Tensor of shape (1, height, width, 2) with normalized coordinates
+    """
+    # Match scipy's np.mgrid convention with 'ij' indexing
+    # np.mgrid[-h//2:h//2, -w//2:w//2] creates grids where:
+    # - first dimension (y) varies along rows (axis 0)
+    # - second dimension (x) varies along columns (axis 1)
+    half_h, half_w = height // 2, width // 2
+    y, x = torch.meshgrid(
+        torch.linspace(-half_h, half_h, height, device=device),
+        torch.linspace(-half_w, half_w, width, device=device),
+        indexing='ij'
+    )
+
+    # Compute log-polar coordinates
+    rho = torch.log(torch.sqrt(x**2 + y**2) + 1e-10)
+    theta = torch.atan2(y, x)
+
+    # Define output log-polar grid (evenly sampled in log-polar space)
+    valid_rho = rho[torch.isfinite(rho)]
+    rho_out = torch.linspace(valid_rho.min(), rho.max(), height, device=device)
+    theta_out = torch.linspace(-torch.pi, torch.pi, width, device=device)
+
+    # np.meshgrid default is 'xy', but we need to match scipy exactly
+    # In the scipy code: rho_grid, theta_grid = np.meshgrid(rho_out, theta_out)
+    # This uses 'xy' indexing, so theta varies along axis 0, rho along axis 1
+    theta_grid, rho_grid = torch.meshgrid(theta_out, rho_out, indexing='ij')
+
+    # Convert log-polar grid back to Cartesian coordinates
+    x_sample = torch.exp(rho_grid) * torch.cos(theta_grid)
+    y_sample = torch.exp(rho_grid) * torch.sin(theta_grid)
+
+    # Normalize to [-1, 1] for grid_sample
+    # grid_sample expects (x, y) in the last dimension
+    x_norm = x_sample / half_w
+    y_norm = y_sample / half_h
+
+    # Stack to (1, H, W, 2) - last dim is (x, y)
+    grid = torch.stack([x_norm, y_norm], dim=-1).unsqueeze(0)
+
+    return grid
+
+
+def apply_logpolar_transform(images, grid, mode='bilinear'):
+    """
+    Apply log-polar transform to batched images.
+
+    Args:
+        images: Tensor of shape (B, C, H, W)
+        grid: Pre-computed grid from create_logpolar_grid
+        mode: Interpolation mode 
+
+    Returns:
+        Transformed images of shape (B, C, H, W)
+    """
+    import torch.nn.functional as F
+
+    batch_size = images.shape[0]
+
+    # Expand grid to batch size
+    grid_expanded = grid.expand(batch_size, -1, -1, -1)
+
+    # Apply transformation
+    transformed = F.grid_sample(
+        images,
+        grid_expanded,
+        mode=mode,
+        padding_mode='zeros',
+        align_corners=False
+    )
+
+    return transformed
 
 
 class PtychoCNN(nn.Module):
@@ -421,21 +500,10 @@ class PtychoCNN(nn.Module):
                     'dropout': 0.0,
                     'num_stages': 5
                 },
-                'amp_decoder': {
+                'decoder': {
                     'base_channels': 64,
                     'latent_dim': 512,
-                    'out_channels': 1,
                     'use_batchnorm': True,
-                    'output_activation': 'sigmoid',
-                    'dropout': 0.0,
-                    'num_stages': 5
-                },
-                'ph_decoder': {
-                    'base_channels': 64,
-                    'latent_dim': 512,
-                    'out_channels': 1,
-                    'use_batchnorm': True,
-                    'output_activation': 'tanh',
                     'dropout': 0.0,
                     'num_stages': 5
                 }
@@ -453,24 +521,24 @@ class PtychoCNN(nn.Module):
 
         # Amplitude Decoder
         self.amp_decoder = Decoder(
-            latent_dim=config['amp_decoder']['latent_dim'],
-            base_channels=config['amp_decoder']['base_channels'],
-            out_channels=config['amp_decoder']['out_channels'],
-            use_batchnorm=config['amp_decoder']['use_batchnorm'],
-            output_activation=config['amp_decoder']['output_activation'],
-            dropout=config['amp_decoder'].get('dropout', 0.0),
-            num_stages=config['amp_decoder'].get('num_stages', 5)
+            latent_dim=config['decoder']['latent_dim'],
+            base_channels=config['decoder']['base_channels'],
+            out_channels=1,
+            use_batchnorm=config['decoder']['use_batchnorm'],
+            output_activation='sigmoid',
+            dropout=config['decoder'].get('dropout', 0.0),
+            num_stages=config['decoder'].get('num_stages', 5)
         )
 
         # Phase Decoder
         self.ph_decoder = Decoder(
-            latent_dim=config['ph_decoder']['latent_dim'],
-            base_channels=config['ph_decoder']['base_channels'],
-            out_channels=config['ph_decoder']['out_channels'],
-            use_batchnorm=config['ph_decoder']['use_batchnorm'],
-            output_activation=config['ph_decoder']['output_activation'],
-            dropout=config['ph_decoder'].get('dropout', 0.0),
-            num_stages=config['ph_decoder'].get('num_stages', 5)
+            latent_dim=config['decoder']['latent_dim'],
+            base_channels=config['decoder']['base_channels'],
+            out_channels=1,
+            use_batchnorm=config['decoder']['use_batchnorm'],
+            output_activation='tanh',
+            dropout=config['decoder'].get('dropout', 0.0),
+            num_stages=config['decoder'].get('num_stages', 5)
         )
 
     def forward(self, x, probe, normalization, scale):

@@ -232,6 +232,7 @@ class Trainer(object):
                     loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                 else:
                     loss = criterion(output_diff, input_diff)
+                    #loss = criterion(torch.log10(output_diff + 1.0e-6), torch.log10(input_diff + 1.0e-6))
                 val_loss += loss.detach().item()
 
                 loss_amp = criterion(output_amp.detach().cpu(), amp_patch)

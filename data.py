@@ -7,6 +7,7 @@ import h5py
 import pickle
 from pathlib import Path
 from typing import Optional, Tuple
+from ptychi_utils import extract_patches_fourier_shift
 
 
 class PtychographyDataset(Dataset):
@@ -19,25 +20,25 @@ class PtychographyDataset(Dataset):
 
     Args:
         file_path (str): Path to data file or corresponding parameters file(*_dp.hdf5 or *_para.hdf5)
-        patch_size (int): Size of patches to extract from the full object in pixels
         scale (float): Factor by which to scale all diffraction intensity to
-        cache_object (bool): Whether to cache object data in memory
         normalization_dict_path (str): Path to .pkl file containing dict of {object_name: normalization_factor}
+        apply_noise (bool): Whether to simulate noise by sampling from a Poisson distribution (set to False for experimental data)
+        cache_object (bool): Whether to cache object data in memory
     """
 
     def __init__(
         self,
         file_path: str,
-        patch_size: int = 512,
         scale: float = 100000., 
-        cache_object: bool = True,
-        normalization_dict_path: Optional[str] = None
+        normalization_dict_path: Optional[str] = None,
+        apply_noise: bool = True,
+        cache_object: bool = True
     ):
         self.file_path = Path(file_path)
-        self.patch_size = patch_size
         self.scale = scale
-        self.cache_object = cache_object
         self.normalization_dict_path = normalization_dict_path
+        self.apply_noise = apply_noise
+        self.cache_object = cache_object
 
         # Initialize cache variables
         self._cached_object = None
@@ -135,15 +136,12 @@ class PtychographyDataset(Dataset):
         
         # Load from parameters file
         with h5py.File(self.para_file, 'r') as f:
-            required_keys = ['object']
+            required_keys = ['object', 'probe', 'probe_position_x_m', 'probe_position_y_m']
             missing_keys = [key for key in required_keys if key not in f.keys()]
             if missing_keys:
                 raise KeyError(f"Missing required keys in {self.para_file.name}: {missing_keys}")
             
             self.object_shape = f['object'][0].shape
-            
-            # Check if probe data exists
-            self.has_probe = 'probe' in f.keys()
         
     def __len__(self) -> int:
         return self.num_patterns
@@ -189,35 +187,35 @@ class PtychographyDataset(Dataset):
     
     def _extract_patch(self, full_object: np.ndarray, probe_position: Tensor) -> Tensor:
         """Extract patch from full object at given probe position."""
-        return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self.patch_size, self.patch_size))[0]
+        return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self.pattern_shape[0], self.pattern_shape[1]))[0]
     
     def _cache_object_data(self):
         """Cache object and probe position data for efficient access."""
         if self._cached_object is not None:
             return
-            
+
         with h5py.File(self.para_file, 'r') as f:
+            # Load pixel size (needed for position conversion)
+            self.pixel_size_m = f['object'].attrs['pixel_height_m']  # Ptychodus format supports non-square pixels, but we don't consider that for now
+
             # Cache full object
             if self.cache_object:
                 self._cached_object = f['object'][0]
-            
-            # Cache probe if available and small enough
-            if self.has_probe:
-                probe_data = f['probe']
-                if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
-                    self._cached_probe = probe_data[...]
 
-        # Cache probe positions (small)
-        if self.patch_size == 512:
-            fwhm = 98
-        elif self.patch_size == 256:
-            fwhm = 49
-        self._cached_probe_positions = create_positions(self.object_shape, self.pattern_shape, target_overlap=0.8, fwhm=fwhm)
+            # Cache probe if small enough
+            probe_data = f['probe']
+            if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
+                self._cached_probe = probe_data[...]
+
+            # Cache probe positions and convert from meters to pixels
+            positions_m = np.column_stack([f['probe_position_y_m'][...], f['probe_position_x_m'][...]])
+            self._cached_probe_positions = torch.from_numpy(positions_m / self.pixel_size_m)
+
         # Validate that there are the same number of probe positions as diffraction patterns
         if self._cached_probe_positions.shape[0] != self.num_patterns:
             raise ValueError(f"Mismatch in number of patterns: {self.num_patterns} diffraction patterns vs {self._cached_probe_positions.shape[0]} probe positions")
         # Initialize position origin coordinates
-        self._pos_origin_coords = torch.tensor(self.object_shape, dtype=torch.float32) / 2.0 
+        self._pos_origin_coords = torch.tensor(self.object_shape, dtype=torch.float32) / 2.0
         self._pos_origin_coords = self._pos_origin_coords.round() + 0.5
         self._cached_probe_positions = self._cached_probe_positions + self._pos_origin_coords 
     
@@ -240,11 +238,9 @@ class PtychographyDataset(Dataset):
         # Get probe from cache or file
         if self._cached_probe is not None:
             probe = self._cached_probe
-        elif self.has_probe:
+        else:
             with h5py.File(self.para_file, 'r') as para_file:
                 probe = para_file['probe'][...]
-        else:
-            probe = None
         
         # Get object data and extract patches
         if self._cached_object is not None:
@@ -380,189 +376,3 @@ class CombinedDataset(Dataset):
                 return self.datasets[i][local_idx]
 
         raise IndexError(f"Index {idx} not found in any dataset")
-
-
-def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, int]) -> Tensor:
-    """
-    Slice patches from an image at given window positions. The patch size is determined
-    from the starting and ending coordinates in each direction, and is assumed to be
-    the same for all patches. From Ming Du's pty-chi:
-    https://github.com/AdvancedPhotonSource/pty-chi 
-    
-    Parameters
-    ----------
-    image : Tensor
-        A (H, W) tensor of the image.
-    sy : Tensor
-        A (N,) tensor of integers giving the starting y-coordinates of the patches.
-    sx : Tensor
-        A (N,) tensor of integers giving the starting x-coordinates of the patches.
-    patch_size : tuple of int
-        A tuple giving the patch shape in pixels.
-
-    Returns
-    -------
-    Tensor
-        A tensor of shape (N, h, w) containing the extracted patches.
-    """
-    h, w = image.shape[-2:]
-    if (
-        sy.min() < 0 
-        or sy.max() + patch_size[0] > image.shape[-2] 
-        or sx.min() < 0 
-        or sx.max() + patch_size[1] > image.shape[-1]
-    ):
-        raise ValueError("Patch indices are out of bounds.")
-    
-    x = torch.arange(patch_size[1], device=sx.device)[None, :]
-    y = torch.arange(patch_size[0], device=sy.device)[None, :]
-    x = x.expand(len(sx), x.shape[1])
-    y = y.expand(len(sy), y.shape[1])
-    x = x + sx[:, None]
-    y = y + sy[:, None]
-    inds = (y * w).unsqueeze(-1) + x.unsqueeze(1)
-    patches = image.view(-1)[inds.view(-1)]
-    patches = patches.reshape(len(sy), patch_size[0], patch_size[1])
-    return patches
-
-
-def fourier_shift(images: Tensor, shifts: Tensor, strictly_preserve_zeros: bool = False) -> Tensor:
-    """
-    Apply Fourier shift to a batch of images. From Ming Du's pty-chi:
-    https://github.com/AdvancedPhotonSource/pty-chi 
-
-    Parameters
-    ----------
-    images : Tensor
-        A [N, H, W] tensor of images.
-    shifts : Tensor
-        A [N, 2] tensor of shifts in pixels.
-    strictly_preserve_zeros : bool
-        If True, mask of strictly zero pixels will be generated and shifted
-        by the same amount. Pixels that have a non-zero value in the shifted
-        mask will be set to zero in the shifted image. This preserves the zero
-        pixels in the original image, preventing FFT from introducing small
-        non-zero values due to machine precision.
-
-    Returns
-    -------
-    Tensor
-        Shifted images.
-    """
-    if strictly_preserve_zeros:
-        zero_mask = images == 0
-        zero_mask = zero_mask.float()
-        zero_mask_shifted = fourier_shift(zero_mask, shifts, strictly_preserve_zeros=False)
-    # This version intended for torch.complex64 images only, though it inherits type from image
-    ft_images = torch.fft.fft2(images.type(torch.complex128), norm=None).type(torch.complex64)
-    freq_y, freq_x = torch.meshgrid(
-        torch.fft.fftfreq(images.shape[-2]), torch.fft.fftfreq(images.shape[-1]), indexing="ij"
-    )
-    freq_x = freq_x.to(ft_images.device)
-    freq_y = freq_y.to(ft_images.device)
-    freq_x = freq_x.repeat(images.shape[0], 1, 1)
-    freq_y = freq_y.repeat(images.shape[0], 1, 1)
-    mult = torch.exp(
-        1j
-        * -2
-        * torch.pi
-        * (freq_x * shifts[:, 1].view(-1, 1, 1) + freq_y * shifts[:, 0].view(-1, 1, 1))
-    )
-    ft_images = ft_images * mult
-    # Complex images (pty-chi original version supports real datatypes with higher precision)
-    shifted_images = torch.fft.ifft2(ft_images.type(torch.complex128), norm=None).type(torch.complex64) 
-    if not images.dtype.is_complex:
-        shifted_images = shifted_images.real
-    if strictly_preserve_zeros:
-        shifted_images[zero_mask_shifted > 0] = 0
-    return shifted_images
-
-
-def extract_patches_fourier_shift(
-    image: Tensor, positions: Tensor, shape: Tuple[int, int], pad: Optional[int] = 1
-) -> Tensor:
-    """
-    Extract patches from 2D object. If a patch's footprint goes outside the image,
-    the image is padded with zeros to account for the missing pixels. From Ming Du's pty-chi:
-    https://github.com/AdvancedPhotonSource/pty-chi 
-
-    Parameters
-    ----------
-    image : Tensor
-        The whole image.
-    positions : Tensor
-        A tensor of shape (N, 2) giving the center positions of the patches in pixels.
-        The origin of the given positions are assumed to be the TOP LEFT corner of the image.
-    shape : tuple of int
-        A tuple giving the patch shape in pixels.
-    pad : Optional[int]
-        If given, patches with larger size than the intended size by this amount are cropped
-        out from the patches before shifting.
-
-    Returns
-    -------
-    Tensor
-        A tensor of shape (N, H, W) containing the extracted patches.
-    """
-    # Floating point ranges over which interpolations should be done
-    sys_float = positions[:, 0] - (shape[0] - 1.0) / 2.0
-    sxs_float = positions[:, 1] - (shape[1] - 1.0) / 2.0
-
-    # Crop one more pixel each side for Fourier shift
-    sys = sys_float.floor().int() - pad
-    eys = sys + shape[0] + 2 * pad
-    sxs = sxs_float.floor().int() - pad
-    exs = sxs + shape[1] + 2 * pad
-
-    fractional_shifts = torch.stack([sys_float - sys - pad, sxs_float - sxs - pad], -1)
-
-    pad_lengths = [
-        max(-sxs.min(), 0),
-        max(exs.max() - image.shape[1], 0),
-        max(-sys.min(), 0),
-        max(eys.max() - image.shape[0], 0),
-    ]
-    image = torch.nn.functional.pad(image, pad_lengths)
-    sys = sys + pad_lengths[2]
-    eys = eys + pad_lengths[2]
-    sxs = sxs + pad_lengths[0]
-    exs = exs + pad_lengths[0]
-
-    patches = batch_slice(image, sys, sxs, patch_size=[shape[i] + 2 * pad for i in range(2)])
-
-    # Apply Fourier shift to account for fractional shifts
-    if not torch.allclose(fractional_shifts, torch.zeros_like(fractional_shifts), atol=1e-7):
-        patches = fourier_shift(patches, -fractional_shifts)
-    patches = patches[:, pad : patches.shape[-2] - pad, pad : patches.shape[-1] - pad]
-    return patches
-
-
-def create_positions(object_shape, probe_lateral_shape, target_overlap=0.8, fwhm=98):
-    """Create probe positions in pixels. Adapted from Ming Du's ptycho_simulation_factory:
-    https://github.com/mdw771/ptycho_simulation_factory
-
-    This version removes the choice to pre-define number of positions or spacing. 
-    Instead, the spacing is calculated by overlap and probe size.
-    
-    Parameters
-    ----------
-    object_shape : tuple of int
-        Lateral shape of the object.
-    probe_lateral_shape : tuple of int
-        Lateral shape of the probe. This is used to determine the safety margin,
-        so that the probe does not reach outside the object.
-    target_overlap : float
-        Overlap ratio
-    fwhm : int
-        Full width at half maximum of the probe in pixels (approximate is fine here)
-    """
-    spacing = (1 - target_overlap) * fwhm # Spacing is now enforced to be the same in y and x
-
-    margin = [probe_lateral_shape[i] // 2 for i in range(len(probe_lateral_shape))]
-    y = np.arange(margin[0], object_shape[0] - margin[0] - 1, spacing)
-    x = np.arange(margin[1], object_shape[1] - margin[1] - 1, spacing)
-
-    y, x = np.meshgrid(y, x)
-    positions = np.stack([y.reshape(-1), x.reshape(-1)], axis=1)
-    positions = positions - positions.mean(0) # Center is (0, 0)
-    return torch.from_numpy(positions)
