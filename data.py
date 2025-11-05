@@ -188,7 +188,39 @@ class PtychographyDataset(Dataset):
     def _extract_patch(self, full_object: np.ndarray, probe_position: Tensor) -> Tensor:
         """Extract patch from full object at given probe position."""
         return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self.pattern_shape[0], self.pattern_shape[1]))[0]
-    
+
+    def _pad_probe(self, probe: np.ndarray, target_modes: int = 30) -> np.ndarray:
+        """
+        Pad probe array to have target number of modes along axis 1.
+
+        Args:
+            probe: Probe array with shape (1, N, H, W) where N is current number of modes
+            target_modes: Target number of modes (default: 30)
+
+        Returns:
+            Padded probe array with shape (1, target_modes, H, W)
+        """
+        current_shape = probe.shape
+        if len(current_shape) != 4:
+            raise ValueError(f"Expected probe shape (1, N, H, W), got {current_shape}")
+
+        current_modes = current_shape[1]
+        if current_modes >= target_modes:
+            # Already has enough modes, no padding needed
+            return probe
+
+        # Calculate padding: add zeros to the end of axis 1
+        modes_to_add = target_modes - current_modes
+        pad_shape = (current_shape[0], modes_to_add, current_shape[2], current_shape[3])
+
+        # Create zero padding with same dtype as probe
+        padding = np.zeros(pad_shape, dtype=probe.dtype)
+
+        # Concatenate along axis 1
+        padded_probe = np.concatenate([probe, padding], axis=1)
+
+        return padded_probe
+
     def _cache_object_data(self):
         """Cache object and probe position data for efficient access."""
         if self._cached_object is not None:
@@ -202,10 +234,12 @@ class PtychographyDataset(Dataset):
             if self.cache_object:
                 self._cached_object = f['object'][0]
 
-            # Cache probe if small enough
+            # Cache probe if small enough (padded probe will be ~15MB for (1, 30, 256, 256))
             probe_data = f['probe']
             if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
-                self._cached_probe = probe_data[...]
+                probe = probe_data[...]
+                # Pad probe to (1, 30, H, W) if needed
+                self._cached_probe = self._pad_probe(probe, target_modes=30)
 
             # Cache probe positions and convert from meters to pixels
             positions_m = np.column_stack([f['probe_position_y_m'][...], f['probe_position_x_m'][...]])
@@ -227,10 +261,11 @@ class PtychographyDataset(Dataset):
         # Load diffraction pattern - open and close file for each access
         with h5py.File(self.dp_file, 'r') as dp_file:
             diffraction_pattern = dp_file['dp'][pattern_idx]
-            diffraction_pattern = self.normalize(diffraction_pattern)
-            # Add noise by sampling from a Poisson distribution
-            diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern).astype(np.float32)
-            diffraction_amp = np.sqrt(diffraction_pattern)
+        diffraction_pattern = self.normalize(diffraction_pattern)
+        # Add noise by sampling from a Poisson distribution
+        if self.apply_noise:
+            diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern)
+        diffraction_amp = np.sqrt(diffraction_pattern.astype(np.float32))
         
         # Get probe position from cache
         probe_position = self._cached_probe_positions[pattern_idx]
@@ -241,6 +276,8 @@ class PtychographyDataset(Dataset):
         else:
             with h5py.File(self.para_file, 'r') as para_file:
                 probe = para_file['probe'][...]
+                # Pad probe to (1, 30, H, W) if needed
+                probe = self._pad_probe(probe, target_modes=30)
         
         # Get object data and extract patches
         if self._cached_object is not None:
