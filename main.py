@@ -66,9 +66,9 @@ else:
 # Create full dataset
 full_dataset = CombinedDataset(
     file_paths=data_source,
-    patch_size=config['data']['image_size'],
-    scale = config['data']['scale'],
-    normalization_dict_path=config['data'].get('normalization_dict_path')
+    scale=config['data']['scale'],
+    normalization_dict_path=config['data'].get('normalization_dict_path'),
+    apply_noise=True  # Always apply Poisson noise for training/validation
 )
 
 # Split into train and validation
