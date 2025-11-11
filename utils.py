@@ -42,7 +42,7 @@ def visualize_mads(all_mads: np.array,
   num_heads = len(all_mads)
   plt.figure(figsize=(6, 6))
   for idx in range(len(all_mads)):
-      mean_distance = all_mads[f"block_{idx}_mean_dist"]
+      mean_distance = all_mads[idx]
       x = [idx] * num_heads
       y = mean_distance[0, :]
       plt.scatter(x=x, y=y, label=f"attention_head_{idx}")
