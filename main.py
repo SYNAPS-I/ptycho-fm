@@ -1,5 +1,6 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "6, 7"
+# CUDA_VISIBLE_DEVICES should be set by SLURM or environment, not hardcoded
+# Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,6 +26,75 @@ def load_config(config_path='config.yaml'):
         config = yaml.safe_load(f)
     return config
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Minimal, robust distributed setup for SLURM or torchrun
+# Based on multinode.py approach
+# ────────────────────────────────────────────────────────────────────────────────
+def ensure_env_from_slurm():
+    """Populate torchrun-style env vars from SLURM if missing."""
+    if "RANK" not in os.environ and "SLURM_PROCID" in os.environ:
+        os.environ["RANK"] = os.environ["SLURM_PROCID"]
+    if "WORLD_SIZE" not in os.environ and "SLURM_NTASKS" in os.environ:
+        os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+    if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
+        os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+
+
+def init_distributed():
+    """
+    Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
+    respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
+    """
+    ensure_env_from_slurm()
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+    rank_env = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+
+    # Set MASTER_ADDR and MASTER_PORT if not already set
+    if "MASTER_ADDR" not in os.environ:
+        if "SLURM_JOB_NODELIST" in os.environ:
+            import subprocess
+            import socket
+            nodelist = os.environ["SLURM_JOB_NODELIST"]
+            try:
+                result = subprocess.run(
+                    ["scontrol", "show", "hostnames", nodelist],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    first_node = result.stdout.strip().split('\n')[0]
+                    os.environ["MASTER_ADDR"] = first_node
+                else:
+                    os.environ["MASTER_ADDR"] = socket.gethostname()
+            except Exception:
+                os.environ["MASTER_ADDR"] = socket.gethostname()
+        else:
+            import socket
+            os.environ["MASTER_ADDR"] = socket.gethostname()
+    
+    if "MASTER_PORT" not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
+
+    if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
+        dist.init_process_group(backend="nccl", init_method="env://")
+
+    # Map LOCAL_RANK to a valid CUDA device index after any device masking.
+    # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
+    if torch.cuda.is_available():
+        nvis = torch.cuda.device_count()
+        mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
+        torch.cuda.set_device(mapped_local)
+        device = torch.device(f"cuda:{mapped_local}")
+        os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
+    else:
+        mapped_local = 0
+        device = torch.device("cpu")
+
+    return rank_env, world_size, mapped_local, device
+
 # Load configuration
 config = load_config()
 
@@ -36,21 +106,18 @@ LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 
-# Initialize DDP first (if using multiple GPUs)
+# Initialize distributed training (if using multiple GPUs)
+# Use the robust multinode.py approach for proper device mapping
 if NGPUS > 1:
-    dist.init_process_group()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    rank, world_size, local_rank, DEVICE = init_distributed()
     is_main_process = rank == 0
-    # Set CUDA device for this process before any distributed operations
-    torch.cuda.set_device(local_rank)
-    # Keep this print for all ranks - useful for debugging DDP setup
-    print(f"Rank: {rank}, Local Rank: {local_rank}", flush=True)
-    DEVICE = torch.device(f"cuda:{local_rank}")
+    
+    # Keep this print for all ranks - useful for debugging distributed setup
+    print(f"Rank: {rank}, Local Rank: {local_rank}, CUDA Device: {DEVICE}, World Size: {world_size}", flush=True)
 else:
     rank = 0
     world_size = 1
+    local_rank = 0
     is_main_process = True
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -78,10 +145,12 @@ train_size = int(total_size * train_split)
 val_size = total_size - train_size
 
 # Use random_split with a generator for reproducibility
+# Always use CPU generator - DataLoader expects CPU generators
 generator = torch.Generator().manual_seed(config['data']['random_seed'])
 train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
-# Create DistributedSampler if using DDP
+# Create DistributedSampler if using distributed training
+# Use the multinode.py approach - DistributedSampler works correctly with proper device mapping
 if NGPUS > 1:
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=config['data']['random_seed'])
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=config['data']['random_seed'])
@@ -166,10 +235,18 @@ if is_main_process:
     summary(model, input_data={'x': dummy_data, 'probe': dummy_probe,
             'normalization': torch.randn((1, 1)), 'scale': torch.randn((1, 1))}, device='cpu')
 
-# Move model to device and wrap with DDP
+# Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
 if NGPUS > 1:
-    model = DDP(model, device_ids=[local_rank%NGPUS])
+    # Use torch.cuda.current_device() like multinode.py does
+    # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
+        model = DDP(model, find_unused_parameters=False)
+    else:
+        # For torchrun or other launchers, explicitly specify device
+        dev_index = torch.cuda.current_device()
+        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False)
 
 # Loss and optimizer
 if config['training']['loss_function'] == 'smooth_l1':
@@ -288,7 +365,12 @@ for epoch in range(start_epoch, EPOCHS):
         trainer.save_config('config.yaml')
         print('Saved config to run path', flush=True)
 
-    # Set epoch for DistributedSampler (for proper shuffling)
+    # Log epoch start with timestamp
+    if is_main_process:
+        from datetime import datetime
+        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+
+    # Set epoch for DistributedSampler (for proper shuffling across epochs)
     if NGPUS > 1:
         train_sampler.set_epoch(epoch)
         val_sampler.set_epoch(epoch)
@@ -303,8 +385,9 @@ for epoch in range(start_epoch, EPOCHS):
     trainer.validate(val_loader, criterion, optimizer, metrics, plot=plot, epoch=epoch)
 
     if is_main_process:
-        print('Epoch: %d | Train Loss: %.4f | Val. Loss: %.4f'
-              %(epoch, metrics['training_loss'][-1], metrics['validation_loss'][-1]), flush=True)
+        from datetime import datetime
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
 
 # Save final checkpoint only on main process
 if is_main_process:

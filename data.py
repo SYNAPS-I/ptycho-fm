@@ -5,8 +5,10 @@ from torch import Tensor
 from torch.utils.data import Dataset
 import h5py
 import pickle
+import pandas as pd
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
+from collections import OrderedDict
 from ptychi_utils import extract_patches_fourier_shift
 
 
@@ -349,9 +351,19 @@ class CombinedDataset(Dataset):
             raise ValueError(f"No paired HDF5 files found in {directory}")
 
         print(f"Found {len(paired_files)} paired dataset(s) in {directory}", flush=True)
-        for f in paired_files:
-            object_name = f.stem[:-3]
-            print(f"  - {object_name}", flush=True)
+        # Only print first 10 and last 10 to avoid huge output files
+        if len(paired_files) > 20:
+            for f in paired_files[:10]:
+                object_name = f.stem[:-3]
+                print(f"  - {object_name}", flush=True)
+            print(f"  ... ({len(paired_files) - 20} more datasets) ...", flush=True)
+            for f in paired_files[-10:]:
+                object_name = f.stem[:-3]
+                print(f"  - {object_name}", flush=True)
+        else:
+            for f in paired_files:
+                object_name = f.stem[:-3]
+                print(f"  - {object_name}", flush=True)
 
         return paired_files
 
@@ -362,25 +374,81 @@ class CombinedDataset(Dataset):
             if file_path.is_dir():
                 # Scan directory for paired files
                 self.file_paths = self.find_paired_files(file_path)
+                self.data_dir = file_path
             else:
                 # Single file provided as string
                 self.file_paths = [file_path]
+                self.data_dir = file_path.parent
         else:
             # List of files provided
             self.file_paths = [Path(f) for f in file_paths]
+            # Assume all files are in the same directory (use first file's parent)
+            self.data_dir = self.file_paths[0].parent if self.file_paths else None
 
         self.dataset_kwargs = dataset_kwargs
 
-        # Create a dataset for each file and track indices
-        self.datasets = []
+        # Try to load index.csv to avoid opening all HDF5 files
+        self.index_df = None
+        self.pattern_counts: Dict[Path, int] = {}
+        
+        if self.data_dir is not None:
+            index_csv_path = Path(self.data_dir) / 'index.csv'
+            if index_csv_path.exists():
+                try:
+                    print(f"Loading index.csv to avoid opening all HDF5 files...", flush=True)
+                    self.index_df = pd.read_csv(index_csv_path)
+                    
+                    # Create a fast lookup: map filename to n_dps
+                    # This is much faster than nested loops
+                    csv_lookup = {}
+                    for _, row in self.index_df.iterrows():
+                        csv_path = Path(row['dp_path'])
+                        # Get just the filename for fast matching
+                        filename = csv_path.name
+                        csv_lookup[filename] = int(row['n_dps'])
+                    
+                    # Match our file_paths to CSV entries
+                    for file_path in self.file_paths:
+                        if file_path.name in csv_lookup:
+                            self.pattern_counts[file_path] = csv_lookup[file_path.name]
+                    
+                    print(f"Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
+                except Exception as e:
+                    print(f"Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
+                    self.index_df = None
+
+        # Create dataset info without opening HDF5 files if we have index.csv
+        # Use LRU cache to limit number of open datasets in memory (prevents OOM)
+        # Cache size: keep max 100 datasets open at once (adjust based on available memory)
+        self.max_cached_datasets = 100
+        self.dataset_cache = OrderedDict()  # LRU cache: {file_path: dataset}
         self.file_info = []
         total_patterns = 0
 
-        for file_path in self.file_paths:
-            dataset = PtychographyDataset(str(file_path), **dataset_kwargs)
-            num_patterns = len(dataset)
+        total_files = len(self.file_paths)
+        if total_files > 100:
+            if self.index_df is not None:
+                print(f"Initializing {total_files} datasets using index.csv (fast)...", flush=True)
+            else:
+                print(f"Initializing {total_files} datasets (opening files, this may take a while)...", flush=True)
 
-            self.datasets.append(dataset)
+        for idx, file_path in enumerate(self.file_paths):
+            # Show progress every 1000 files
+            if total_files > 100 and (idx + 1) % 1000 == 0:
+                print(f"  Processed {idx + 1}/{total_files} files...", flush=True)
+            
+            # Get num_patterns from index.csv if available, otherwise create dataset to get it
+            if file_path in self.pattern_counts:
+                num_patterns = self.pattern_counts[file_path]
+            else:
+                # Fallback: create dataset to get num_patterns (opens HDF5 files)
+                # Disable caching here too to prevent memory issues
+                fallback_kwargs = dataset_kwargs.copy()
+                fallback_kwargs['cache_object'] = False
+                dataset = PtychographyDataset(str(file_path), **fallback_kwargs)
+                num_patterns = len(dataset)
+                # Don't keep fallback dataset in cache - we'll recreate lazily
+
             self.file_info.append({
                 'path': file_path,
                 'num_patterns': num_patterns,
@@ -401,6 +469,7 @@ class CombinedDataset(Dataset):
         Get a sample by global index.
 
         Maps the global index to the appropriate file and local index.
+        Uses LRU cache to limit number of open datasets in memory.
         """
         if idx >= self.total_patterns:
             raise IndexError(f"Index {idx} out of range for dataset with {self.total_patterns} patterns")
@@ -410,6 +479,34 @@ class CombinedDataset(Dataset):
             if file_info['start_idx'] <= idx < file_info['end_idx']:
                 # Convert global index to local index within file
                 local_idx = idx - file_info['start_idx']
-                return self.datasets[i][local_idx]
+                
+                file_path = file_info['path']
+                
+                # Lazy dataset creation with LRU cache: create dataset only when first accessed
+                # This avoids opening all HDF5 files during initialization
+                # LRU cache prevents memory accumulation by limiting number of open datasets
+                if file_path not in self.dataset_cache:
+                    # Create new dataset
+                    lazy_kwargs = self.dataset_kwargs.copy()
+                    # Disable object caching for lazily created datasets to prevent memory accumulation
+                    # when many datasets are accessed during training (each would cache full objects)
+                    # Objects will be loaded on-demand from HDF5 files instead
+                    lazy_kwargs['cache_object'] = False
+                    dataset = PtychographyDataset(str(file_path), **lazy_kwargs)
+                    
+                    # Add to cache, removing oldest if cache is full (LRU eviction)
+                    if len(self.dataset_cache) >= self.max_cached_datasets:
+                        # Remove least recently used (first item in OrderedDict)
+                        oldest_path, _ = self.dataset_cache.popitem(last=False)
+                        # Close HDF5 files if dataset has them open
+                        # (PtychographyDataset doesn't explicitly close, but Python GC will handle it)
+                    
+                    self.dataset_cache[file_path] = dataset
+                else:
+                    # Move to end (most recently used) for LRU ordering
+                    dataset = self.dataset_cache.pop(file_path)
+                    self.dataset_cache[file_path] = dataset
+                
+                return dataset[local_idx]
 
         raise IndexError(f"Index {idx} not found in any dataset")

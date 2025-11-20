@@ -1,5 +1,6 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# CUDA_VISIBLE_DEVICES should be set by SLURM or environment, not hardcoded
+# Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -9,12 +10,16 @@ from data import PtychographyDataset
 from model import PtychoViT, PtychoViT256
 from model_cnn import PtychoCNN, PtychoCNN256
 
-# NEED TO SET YOUR OWN CONFIG AND TEST DATA PATHS
-config_path = '/scratch/aileenluo/ptycho-vit/models/run106/config.yaml'
-#test_data_path = '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/horse256/horse256_dp.hdf5'
-#test_data_path = '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/coins256/coins256_dp.hdf5'
-#test_data_path = '/scratch/aileenluo/ptycho-vit/data/cameraman256_dp.hdf5'
-test_data_path = '/scratch/aileenluo/ptycho-vit/data/brick256_dp.hdf5'
+# ============================================================================
+# CONFIGURATION: Set your own paths here
+# ============================================================================
+# config_path: Path to the config.yaml file saved with your trained model
+#              This should be in: /global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run<run_num>/config.yaml
+# test_data_path: Path to the test data file (*_dp.hdf5 format)
+#                 Example: '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
+# ============================================================================
+config_path = '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run1/config.yaml'
+test_data_path = '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
 
 def load_config(path):
     """Load configuration from YAML file."""

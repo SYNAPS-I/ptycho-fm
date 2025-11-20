@@ -146,10 +146,48 @@ class Trainer(object):
         running_amp_loss = 0.0
         running_ph_loss = 0.0
 
-        for batch in dataloader:
-            # Unpack batch
-            diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+        total_batches = len(dataloader)
+        progress_milestones = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
+        milestone_batches = [int(total_batches * m) for m in progress_milestones]
+        next_milestone_idx = 0
 
+        import time
+        from datetime import datetime
+        
+        if self.is_main_process:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Loading first batch... (this may take a while with lazy data loading)", flush=True)
+
+        # Start timing for first batch (before DataLoader fetch)
+        batch_0_io_start = time.time()
+        train_end_time = None  # Will be set after each batch completes
+        
+        for batch_idx, batch in enumerate(dataloader):
+            # Time IO (data loading) - this captures the time to get batch from DataLoader
+            # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
+            if batch_idx < 10:
+                if batch_idx == 0:
+                    # For first batch, we already started timing before the loop
+                    io_time = time.time() - batch_0_io_start
+                else:
+                    # For subsequent batches, time from end of previous batch to now
+                    # This includes the DataLoader fetch time (the 2-4 second gap you're seeing)
+                    io_time = time.time() - train_end_time
+            
+            # Print when first batch is loaded and for first 10 batches
+            if batch_idx == 0 and self.is_main_process:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] First batch loaded! Starting training... (batch 1/{total_batches})", flush=True)
+            elif batch_idx < 10 and self.is_main_process:
+                # Print first 10 batches with timestamps to confirm training is working
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
+            
+            # Unpack batch (this is fast - data is already loaded from DataLoader)
+            diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+            
+            # Start training timing (IO timing was already done above)
+            if batch_idx < 10:
+                train_start_time = time.time()
+            
             input_diff = diff_amp.to(self.device)
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
             input_norm = norm.to(self.device)
@@ -164,7 +202,17 @@ class Trainer(object):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
+            
+            # Time training completion - always track end time for IO timing of next batch
+            train_end_time = time.time()
+            
+            # Log timing for first 10 batches
+            if batch_idx < 10:
+                train_time = train_end_time - train_start_time
+                total_time = io_time + train_time
+                if self.is_main_process:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
+            
             running_loss += loss.detach().item()
 
             # Also track the amplitude and phase loss to see if the network is predicting something reasonable
@@ -173,11 +221,30 @@ class Trainer(object):
             running_amp_loss += loss_amp.item()
             running_ph_loss += loss_ph.item()
 
+            # Print progress more frequently for debugging (every 100 batches for first 1000, then every 1000)
+            if batch_idx > 0 and self.is_main_process:
+                from datetime import datetime
+                if batch_idx < 1000 and (batch_idx + 1) % 100 == 0:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
+                elif (batch_idx + 1) % 1000 == 0:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
+            
+            if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
+                from datetime import datetime
+                progress_pct = int(progress_milestones[next_milestone_idx] * 100)
+                if self.is_main_process:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
+                next_milestone_idx += 1
+
         # Calculate average losses (use len(dataloader) for batch count)
         num_batches = len(dataloader)
         avg_train_loss = running_loss / num_batches
         avg_amp_loss = running_amp_loss / num_batches
         avg_ph_loss = running_ph_loss / num_batches
+        
+        if self.is_main_process:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
 
         # Synchronize losses across all ranks for DDP
         avg_train_loss = self.synchronize_loss(avg_train_loss)
@@ -203,6 +270,10 @@ class Trainer(object):
                        (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
             epoch: Current epoch number for plot naming
         """
+        if self.is_main_process:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting validation loop: {len(dataloader)} batches", flush=True)
+        
         val_loss = 0.0
         val_amp_loss = 0.0
         val_ph_loss = 0.0
@@ -217,7 +288,7 @@ class Trainer(object):
 
         # Use no_grad() to prevent gradient computation during validation
         with torch.no_grad():
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader):
                 # Unpack batch
                 diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
 
@@ -240,6 +311,14 @@ class Trainer(object):
                 val_amp_loss += loss_amp.item()
                 val_ph_loss += loss_ph.item()
 
+                # Print progress milestones
+                if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
+                    from datetime import datetime
+                    progress_pct = int(progress_milestones[next_milestone_idx] * 100)
+                    if self.is_main_process:
+                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Validation Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
+                    next_milestone_idx += 1
+
                 # Save last batch for plotting
                 if plot and self.is_main_process:
                     last_input_diff = input_diff
@@ -254,6 +333,10 @@ class Trainer(object):
         avg_val_loss = val_loss / num_batches
         avg_val_amp_loss = val_amp_loss / num_batches
         avg_val_ph_loss = val_ph_loss / num_batches
+        
+        if self.is_main_process:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed", flush=True)
 
         # Synchronize losses across all ranks for DDP
         avg_val_loss = self.synchronize_loss(avg_val_loss)
