@@ -15,8 +15,8 @@ from data import CombinedDataset
 from model import PtychoViT, PtychoViT256
 from model_cnn import PtychoCNN, PtychoCNN256
 from training import Trainer
-from torch.utils.data import DataLoader, random_split
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
+from prefetcher import CUDAPrefetcher
 
 import wandb
 
@@ -121,7 +121,7 @@ else:
     is_main_process = True
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Create CombinedDataset
+# Create CombinedDataset with built-in rank-based sharding (Phase 1: Global Indexing)
 # Support both 'datafiles' (list) and 'data_path' (directory)
 if 'datafiles' in config['data'] and config['data']['datafiles'] is not None:
     data_source = config['data']['datafiles']
@@ -130,39 +130,42 @@ elif 'data_path' in config['data']:
 else:
     raise ValueError("Config must specify either 'datafiles' (list) or 'data_path' (directory)")
 
-# Create full dataset
-full_dataset = CombinedDataset(
+# Create train and validation datasets with built-in sharding
+# No need for random_split or DistributedSampler - sharding is handled by dataset
+train_dataset = CombinedDataset(
     file_paths=data_source,
+    rank=rank,
+    world_size=world_size,
+    train_split=config['data']['train_split'],
+    shuffle=True,
+    random_seed=config['data']['random_seed'],
+    mode='train',
     scale=config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path'),
-    apply_noise=True  # Always apply Poisson noise for training/validation
+    apply_noise=True
 )
 
-# Split into train and validation
-train_split = config['data']['train_split']
-total_size = len(full_dataset)
-train_size = int(total_size * train_split)
-val_size = total_size - train_size
-
-# Use random_split with a generator for reproducibility
-# Always use CPU generator - DataLoader expects CPU generators
-generator = torch.Generator().manual_seed(config['data']['random_seed'])
-train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
-
-# Create DistributedSampler if using distributed training
-# Use the multinode.py approach - DistributedSampler works correctly with proper device mapping
-if NGPUS > 1:
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=config['data']['random_seed'])
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=config['data']['random_seed'])
-else:
-    train_sampler = None
-    val_sampler = None
+val_dataset = CombinedDataset(
+    file_paths=data_source,
+    rank=rank,
+    world_size=world_size,
+    train_split=config['data']['train_split'],
+    shuffle=False,  # No shuffling for validation
+    random_seed=config['data']['random_seed'],
+    mode='val',
+    scale=config['data']['scale'],
+    normalization_dict_path=config['data'].get('normalization_dict_path'),
+    apply_noise=True
+)
 
 # Create DataLoaders
+# No sampler needed - sharding is built into dataset (Phase 1)
+# shuffle=False because shuffling is done in dataset global indexing
 dataloader_kwargs = {
     'batch_size': BATCH_SIZE,
     'num_workers': config['data'].get('num_workers', 0),
     'pin_memory': config['data'].get('pin_memory', True),
+    'shuffle': False,  # Shuffling handled by dataset
 }
 
 # Add prefetch_factor and persistent_workers only if num_workers > 0
@@ -170,19 +173,18 @@ if dataloader_kwargs['num_workers'] > 0:
     dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
     dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
 
-train_loader = DataLoader(
-    train_dataset,
-    sampler=train_sampler,
-    shuffle=(train_sampler is None),  # Only shuffle if not using sampler
-    **dataloader_kwargs
-)
+train_loader = DataLoader(train_dataset, **dataloader_kwargs)
+val_loader = DataLoader(val_dataset, **dataloader_kwargs)
 
-val_loader = DataLoader(
-    val_dataset,
-    sampler=val_sampler,
-    shuffle=False,
-    **dataloader_kwargs
-)
+# Wrap loaders with CUDAPrefetcher for async data transfer (Phase 3)
+# Only use prefetcher if CUDA is available
+if torch.cuda.is_available():
+    train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
+    val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
+else:
+    # Fallback to regular loaders on CPU
+    train_prefetcher = train_loader
+    val_prefetcher = val_loader
 
 # Print configuration only on main process
 if is_main_process:
@@ -197,8 +199,8 @@ if is_main_process:
         print(f"Data source: List of {len(data_source)} file(s)", flush=True)
     else:
         print(f"Data source: {data_source}", flush=True)
-    print(f"Number of files: {len(full_dataset.file_paths)}", flush=True)
-    print(f"Total patterns: {total_size} | Train: {train_size} | Val: {val_size}", flush=True)
+    print(f"Number of files: {len(train_dataset.file_paths)}", flush=True)
+    print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
     print(f"\nDataLoader Settings:", flush=True)
@@ -207,6 +209,7 @@ if is_main_process:
     if dataloader_kwargs['num_workers'] > 0:
         print(f"  prefetch_factor: {dataloader_kwargs.get('prefetch_factor', 'N/A')}", flush=True)
         print(f"  persistent_workers: {dataloader_kwargs.get('persistent_workers', 'N/A')}", flush=True)
+    print(f"  Using CUDAPrefetcher: {torch.cuda.is_available()}", flush=True)
     print(f"\nDevice: {DEVICE}", flush=True)
     print(f"Model save path: {MODEL_SAVE_PATH}", flush=True)
     print("=" * 50, flush=True)
@@ -370,19 +373,14 @@ for epoch in range(start_epoch, EPOCHS):
         from datetime import datetime
         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
 
-    # Set epoch for DistributedSampler (for proper shuffling across epochs)
-    if NGPUS > 1:
-        train_sampler.set_epoch(epoch)
-        val_sampler.set_epoch(epoch)
-
     # Training loop
     model.train()
-    trainer.train(train_loader, criterion, optimizer, metrics)
+    trainer.train(train_prefetcher, criterion, optimizer, metrics)
 
     # Validation loop
     model.eval()
     plot = (epoch % config['training']['validation_plot_freq'] == 0)
-    trainer.validate(val_loader, criterion, optimizer, metrics, plot=plot, epoch=epoch)
+    trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
 
     if is_main_process:
         from datetime import datetime

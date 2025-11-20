@@ -216,8 +216,9 @@ class Trainer(object):
             running_loss += loss.detach().item()
 
             # Also track the amplitude and phase loss to see if the network is predicting something reasonable
-            loss_amp = criterion(output_amp.detach().cpu(), amp_patch)
-            loss_ph = criterion(output_ph.detach().cpu(), ph_patch)
+            # Note: With CUDAPrefetcher, amp_patch and ph_patch are already on GPU, so no need to move to CPU
+            loss_amp = criterion(output_amp.detach(), amp_patch)
+            loss_ph = criterion(output_ph.detach(), ph_patch)
             running_amp_loss += loss_amp.item()
             running_ph_loss += loss_ph.item()
 
@@ -306,8 +307,9 @@ class Trainer(object):
                     #loss = criterion(torch.log10(output_diff + 1.0e-6), torch.log10(input_diff + 1.0e-6))
                 val_loss += loss.detach().item()
 
-                loss_amp = criterion(output_amp.detach().cpu(), amp_patch)
-                loss_ph = criterion(output_ph.detach().cpu(), ph_patch)
+                # Note: With CUDAPrefetcher, amp_patch and ph_patch are already on GPU, so no need to move to CPU
+                loss_amp = criterion(output_amp.detach(), amp_patch)
+                loss_ph = criterion(output_ph.detach(), ph_patch)
                 val_amp_loss += loss_amp.item()
                 val_ph_loss += loss_ph.item()
 
@@ -356,9 +358,10 @@ class Trainer(object):
         if plot and self.is_main_process and last_input_diff is not None:
             input_diff = last_input_diff.squeeze().detach().cpu().numpy()[0]
             output_diff = last_output_diff.squeeze().detach().cpu().numpy()[0]
-            input_amp = last_amp_patch[0, 0]
+            # Note: With CUDAPrefetcher, tensors are on GPU, so move to CPU for plotting
+            input_amp = last_amp_patch[0, 0].cpu()
             output_amp = last_output_amp.squeeze().detach().cpu().numpy()[0]
-            input_ph = last_ph_patch[0, 0]
+            input_ph = last_ph_patch[0, 0].cpu()
             output_ph = last_output_ph.squeeze().detach().cpu().numpy()[0]
             filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff, output_diff, input_amp, output_amp, input_ph, output_ph, filename)

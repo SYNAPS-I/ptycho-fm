@@ -20,13 +20,13 @@ data:
   random_seed: 8
 
   # DataLoader Configuration
-  # System suggests max 1 worker - using 0 to be safe with memory constraints
-  # Note: On-demand HDF5 loading (to prevent OOM) is slower but necessary
-  # With 0 workers, data loading happens on main process (slower but safer)
-  num_workers: 0  # Set to 0 to avoid OOM - workers were being killed
-  prefetch_factor: 1  # Not used when num_workers=0, but kept for consistency
-  pin_memory: false  # Disabled to save memory
-  persistent_workers: false  # Not used when num_workers=0
+  # Phase 3: Multi-worker prefetching with persistent handles
+  # With persistent HDF5 handles and increased cache size, we can now use workers
+  # Reduced to 2 workers to match system recommendation and reduce contention
+  num_workers: 4  # System recommends max 1, using 2 to balance performance vs contention
+  prefetch_factor: 4  # Increased from 2 to 4 to prefetch more batches ahead (2 workers × 4 = 8 batches prefetched)
+  pin_memory: true  # Required for CUDAPrefetcher async transfer
+  persistent_workers: true  # Keep workers alive across epochs
 
 # Training Configuration
 training:

@@ -46,6 +46,10 @@ class PtychographyDataset(Dataset):
         self._cached_object = None
         self._cached_probe_positions = None
         self._cached_probe = None
+        
+        # Initialize persistent HDF5 file handles (Phase 2: Persistent Handles)
+        self.dp_handle = None
+        self.para_handle = None
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -223,6 +227,29 @@ class PtychographyDataset(Dataset):
 
         return padded_probe
 
+    def _get_handles(self):
+        """
+        Get persistent HDF5 file handles, opening them if not already open.
+        
+        Files stay open for the lifetime of the PtychographyDataset instance,
+        only closed on cache eviction or explicit close() call.
+        Uses SWMR mode for safe concurrent reading.
+        """
+        if self.dp_handle is None:
+            self.dp_handle = h5py.File(self.dp_file, 'r', libver='latest', swmr=True)
+        if self.para_handle is None:
+            self.para_handle = h5py.File(self.para_file, 'r', libver='latest', swmr=True)
+        return self.dp_handle, self.para_handle
+    
+    def close(self):
+        """Close persistent HDF5 file handles."""
+        if self.dp_handle is not None:
+            self.dp_handle.close()
+            self.dp_handle = None
+        if self.para_handle is not None:
+            self.para_handle.close()
+            self.para_handle = None
+
     def _cache_object_data(self):
         """Cache object and probe position data for efficient access."""
         if self._cached_object is not None:
@@ -256,13 +283,15 @@ class PtychographyDataset(Dataset):
         self._cached_probe_positions = self._cached_probe_positions + self._pos_origin_coords 
     
     def _load_hdf5_pattern(self, pattern_idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Load specific pattern from paired HDF5 files with efficient caching."""
+        """Load specific pattern from paired HDF5 files with efficient caching and persistent handles."""
         # Cache object data on first access
         self._cache_object_data()
 
-        # Load diffraction pattern - open and close file for each access
-        with h5py.File(self.dp_file, 'r') as dp_file:
-            diffraction_pattern = dp_file['dp'][pattern_idx]
+        # Get persistent file handles (Phase 2: Persistent Handles)
+        dp_handle, para_handle = self._get_handles()
+        
+        # Load diffraction pattern using persistent handle
+        diffraction_pattern = dp_handle['dp'][pattern_idx]
         diffraction_pattern = self.normalize(diffraction_pattern)
         # Add noise by sampling from a Poisson distribution
         if self.apply_noise:
@@ -276,18 +305,16 @@ class PtychographyDataset(Dataset):
         if self._cached_probe is not None:
             probe = self._cached_probe
         else:
-            with h5py.File(self.para_file, 'r') as para_file:
-                probe = para_file['probe'][...]
-                # Pad probe to (1, 30, H, W) if needed
-                probe = self._pad_probe(probe, target_modes=30)
+            probe = para_handle['probe'][...]
+            # Pad probe to (1, 30, H, W) if needed
+            probe = self._pad_probe(probe, target_modes=30)
         
         # Get object data and extract patches
         if self._cached_object is not None:
             full_object = self._cached_object
         else:
             # If not cached, load on demand (for memory-constrained situations)
-            with h5py.File(self.para_file, 'r') as para_file:
-                full_object = para_file['object'][...]
+            full_object = para_handle['object'][...]
         
         # Extract patches at probe position
         patch = self._extract_patch(full_object, probe_position)
@@ -367,7 +394,20 @@ class CombinedDataset(Dataset):
 
         return paired_files
 
-    def __init__(self, file_paths, **dataset_kwargs):
+    def __init__(self, file_paths, rank=0, world_size=1, train_split=0.95, shuffle=True, random_seed=42, mode='train', **dataset_kwargs):
+        """
+        Initialize CombinedDataset with global indexing and rank-based sharding.
+        
+        Args:
+            file_paths: Directory path or list of file paths
+            rank: Rank of current process (default: 0)
+            world_size: Total number of processes (default: 1)
+            train_split: Fraction of data for training (default: 0.95)
+            shuffle: Whether to shuffle global indices (default: True)
+            random_seed: Random seed for shuffling and splitting (default: 42)
+            mode: 'train' or 'val' to select which split to use (default: 'train')
+            **dataset_kwargs: Additional arguments passed to PtychographyDataset
+        """
         # Auto-detect if file_paths is a directory or a list
         if isinstance(file_paths, (str, Path)):
             file_path = Path(file_paths)
@@ -386,6 +426,12 @@ class CombinedDataset(Dataset):
             self.data_dir = self.file_paths[0].parent if self.file_paths else None
 
         self.dataset_kwargs = dataset_kwargs
+        self.rank = rank
+        self.world_size = world_size
+        self.train_split = train_split
+        self.shuffle = shuffle
+        self.random_seed = random_seed
+        self.mode = mode
 
         # Try to load index.csv to avoid opening all HDF5 files
         self.index_df = None
@@ -395,7 +441,7 @@ class CombinedDataset(Dataset):
             index_csv_path = Path(self.data_dir) / 'index.csv'
             if index_csv_path.exists():
                 try:
-                    print(f"Loading index.csv to avoid opening all HDF5 files...", flush=True)
+                    print(f"[Rank {rank}] Loading index.csv to avoid opening all HDF5 files...", flush=True)
                     self.index_df = pd.read_csv(index_csv_path)
                     
                     # Create a fast lookup: map filename to n_dps
@@ -412,30 +458,33 @@ class CombinedDataset(Dataset):
                         if file_path.name in csv_lookup:
                             self.pattern_counts[file_path] = csv_lookup[file_path.name]
                     
-                    print(f"Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
+                    print(f"[Rank {rank}] Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
                 except Exception as e:
-                    print(f"Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
+                    print(f"[Rank {rank}] Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
                     self.index_df = None
 
-        # Create dataset info without opening HDF5 files if we have index.csv
+        # Build global index map using index.csv when available
         # Use LRU cache to limit number of open datasets in memory (prevents OOM)
-        # Cache size: keep max 100 datasets open at once (adjust based on available memory)
-        self.max_cached_datasets = 100
+        # Cache size: increased to 64 to keep more files open (64 files × 2 handles = 128 FDs per rank)
+        # This reduces cache misses and file handle churn, improving sustained IO performance
+        self.max_cached_datasets = 64
         self.dataset_cache = OrderedDict()  # LRU cache: {file_path: dataset}
         self.file_info = []
+        self.file_offsets = [0]  # Cumulative offsets for bisect search
+        self.file_map = []  # List of file paths corresponding to offsets
         total_patterns = 0
 
         total_files = len(self.file_paths)
         if total_files > 100:
             if self.index_df is not None:
-                print(f"Initializing {total_files} datasets using index.csv (fast)...", flush=True)
+                print(f"[Rank {rank}] Initializing {total_files} datasets using index.csv (fast)...", flush=True)
             else:
-                print(f"Initializing {total_files} datasets (opening files, this may take a while)...", flush=True)
+                print(f"[Rank {rank}] Initializing {total_files} datasets (opening files, this may take a while)...", flush=True)
 
         for idx, file_path in enumerate(self.file_paths):
             # Show progress every 1000 files
             if total_files > 100 and (idx + 1) % 1000 == 0:
-                print(f"  Processed {idx + 1}/{total_files} files...", flush=True)
+                print(f"[Rank {rank}]   Processed {idx + 1}/{total_files} files...", flush=True)
             
             # Get num_patterns from index.csv if available, otherwise create dataset to get it
             if file_path in self.pattern_counts:
@@ -455,58 +504,98 @@ class CombinedDataset(Dataset):
                 'start_idx': total_patterns,
                 'end_idx': total_patterns + num_patterns
             })
+            self.file_map.append(file_path)
             total_patterns += num_patterns
+            self.file_offsets.append(total_patterns)
 
         self.total_patterns = total_patterns
 
-        print(f"CombinedDataset: {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
+        # Build global indices and apply train/val split
+        global_indices = np.arange(total_patterns)
+        
+        # Global shuffle with deterministic seed
+        # IMPORTANT: For train/val split to work correctly, both train and val must use the SAME
+        # shuffled indices. When doing a split (train_split < 1.0), we always shuffle with the same
+        # seed to ensure train and val use the same shuffled order (just different portions).
+        # The shuffle parameter controls whether shuffling happens when train_split=1.0 (no split),
+        # but when doing splits, we always shuffle to ensure consistency.
+        if shuffle or (train_split < 1.0):
+            # Always shuffle when doing splits to ensure train and val use same shuffled indices
+            rng = np.random.default_rng(random_seed)
+            rng.shuffle(global_indices)
+        
+        # Split into train and val
+        train_size = int(total_patterns * train_split)
+        train_indices = global_indices[:train_size]
+        val_indices = global_indices[train_size:]
+        
+        # Select indices based on mode
+        if mode == 'train':
+            selected_indices = train_indices
+            split_name = 'train'
+        else:
+            selected_indices = val_indices
+            split_name = 'val'
+        
+        # Rank-based sharding: Each rank gets a subset of indices
+        total_selected = len(selected_indices)
+        start = total_selected * rank // world_size
+        end = total_selected * (rank + 1) // world_size
+        self.current_indices = selected_indices[start:end]
+        
+        print(f"[Rank {rank}] CombinedDataset ({mode}): {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
+        print(f"[Rank {rank}]   Global {split_name} split: {total_selected} patterns", flush=True)
+        print(f"[Rank {rank}]   Rank shard: {len(self.current_indices)} patterns (indices {start} to {end-1})", flush=True)
 
     def __len__(self) -> int:
-        return self.total_patterns
+        """Return number of patterns in current rank's shard."""
+        return len(self.current_indices)
 
     def __getitem__(self, idx: int):
         """
-        Get a sample by global index.
+        Get a sample by rank-local index.
 
-        Maps the global index to the appropriate file and local index.
+        Maps rank-local index to global index, then to file and local file index.
         Uses LRU cache to limit number of open datasets in memory.
         """
-        if idx >= self.total_patterns:
-            raise IndexError(f"Index {idx} out of range for dataset with {self.total_patterns} patterns")
+        if idx >= len(self.current_indices):
+            raise IndexError(f"Index {idx} out of range for rank shard with {len(self.current_indices)} patterns")
 
-        # Find which file this index belongs to
-        for i, file_info in enumerate(self.file_info):
-            if file_info['start_idx'] <= idx < file_info['end_idx']:
-                # Convert global index to local index within file
-                local_idx = idx - file_info['start_idx']
-                
-                file_path = file_info['path']
-                
-                # Lazy dataset creation with LRU cache: create dataset only when first accessed
-                # This avoids opening all HDF5 files during initialization
-                # LRU cache prevents memory accumulation by limiting number of open datasets
-                if file_path not in self.dataset_cache:
-                    # Create new dataset
-                    lazy_kwargs = self.dataset_kwargs.copy()
-                    # Disable object caching for lazily created datasets to prevent memory accumulation
-                    # when many datasets are accessed during training (each would cache full objects)
-                    # Objects will be loaded on-demand from HDF5 files instead
-                    lazy_kwargs['cache_object'] = False
-                    dataset = PtychographyDataset(str(file_path), **lazy_kwargs)
-                    
-                    # Add to cache, removing oldest if cache is full (LRU eviction)
-                    if len(self.dataset_cache) >= self.max_cached_datasets:
-                        # Remove least recently used (first item in OrderedDict)
-                        oldest_path, _ = self.dataset_cache.popitem(last=False)
-                        # Close HDF5 files if dataset has them open
-                        # (PtychographyDataset doesn't explicitly close, but Python GC will handle it)
-                    
-                    self.dataset_cache[file_path] = dataset
-                else:
-                    # Move to end (most recently used) for LRU ordering
-                    dataset = self.dataset_cache.pop(file_path)
-                    self.dataset_cache[file_path] = dataset
-                
-                return dataset[local_idx]
-
-        raise IndexError(f"Index {idx} not found in any dataset")
+        # Map rank-local index to global index
+        global_idx = self.current_indices[idx]
+        
+        # Map global index to file using bisect (fast O(log n) search)
+        import bisect
+        file_idx = bisect.bisect_right(self.file_offsets, global_idx) - 1
+        
+        # Calculate local index within file
+        local_idx = global_idx - self.file_offsets[file_idx]
+        file_path = self.file_map[file_idx]
+        
+        # Lazy dataset creation with LRU cache: create dataset only when first accessed
+        # This avoids opening all HDF5 files during initialization
+        # LRU cache prevents memory accumulation by limiting number of open datasets
+        if file_path not in self.dataset_cache:
+            # Create new dataset
+            lazy_kwargs = self.dataset_kwargs.copy()
+            # Disable object caching for lazily created datasets to prevent memory accumulation
+            # when many datasets are accessed during training (each would cache full objects)
+            # Objects will be loaded on-demand from HDF5 files instead
+            lazy_kwargs['cache_object'] = False
+            dataset = PtychographyDataset(str(file_path), **lazy_kwargs)
+            
+            # Add to cache, removing oldest if cache is full (LRU eviction)
+            if len(self.dataset_cache) >= self.max_cached_datasets:
+                # Remove least recently used (first item in OrderedDict)
+                oldest_path, oldest_dataset = self.dataset_cache.popitem(last=False)
+                # Close HDF5 files if dataset has them open
+                if hasattr(oldest_dataset, 'close'):
+                    oldest_dataset.close()
+            
+            self.dataset_cache[file_path] = dataset
+        else:
+            # Move to end (most recently used) for LRU ordering
+            dataset = self.dataset_cache.pop(file_path)
+            self.dataset_cache[file_path] = dataset
+        
+        return dataset[local_idx]
