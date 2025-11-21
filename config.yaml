@@ -9,13 +9,15 @@ data:
 
   # Option 2: Specify a directory - will auto-discover all paired files
   # (comment out 'datafiles' above and uncomment this to use)
-  data_path: '/global/cfs/cdirs/m5073/synaps_data/simulated_data'
+  # data_path: '/global/cfs/cdirs/m5073/synaps_data/simulated_data'
+  data_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata'
+  # data_path: '/global/cfs/cdirs/m5073/pecomyint/data'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: null  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-
+  normalization_dict_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  # normalization_dict_path: null  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
 

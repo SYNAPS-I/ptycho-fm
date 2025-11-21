@@ -40,7 +40,15 @@ def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, in
         or sx.min() < 0 
         or sx.max() + patch_size[1] > image.shape[-1]
     ):
-        raise ValueError("Patch indices are out of bounds.")
+        raise ValueError(
+            f"Patch indices are out of bounds.\n"
+            f"Image shape: {image.shape}\n"
+            f"Patch size: {patch_size}\n"
+            f"sy range: [{sy.min().item()}, {sy.max().item()}]\n"
+            f"sx range: [{sx.min().item()}, {sx.max().item()}]\n"
+            f"sy max + patch height: {sy.max().item() + patch_size[0]} (limit: {image.shape[-2]})\n"
+            f"sx max + patch width: {sx.max().item() + patch_size[1]} (limit: {image.shape[-1]})"
+        )
     
     x = torch.arange(patch_size[1], device=sx.device)[None, :]
     y = torch.arange(patch_size[0], device=sy.device)[None, :]

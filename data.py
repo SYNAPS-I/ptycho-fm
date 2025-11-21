@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 import h5py
 import pickle
 import pandas as pd
@@ -168,7 +168,11 @@ class PtychographyDataset(Dataset):
             raise IndexError(f"Index {idx} out of range for dataset with {self.num_patterns} patterns")
         
         # Load data from file
-        diffraction_amp, amplitude_patch, phase_patch, probe, probe_position = self._load_hdf5_pattern(idx)
+        try:
+            diffraction_amp, amplitude_patch, phase_patch, probe, probe_position = self._load_hdf5_pattern(idx)
+        except Exception as e:
+            print(f"[Error] Failed to load pattern {idx} from {self.file_path}", flush=True)
+            raise e
         
         # Convert to tensors
         diffraction_amp = torch.from_numpy(diffraction_amp) if isinstance(diffraction_amp, np.ndarray) else diffraction_amp
@@ -314,7 +318,9 @@ class PtychographyDataset(Dataset):
             full_object = self._cached_object
         else:
             # If not cached, load on demand (for memory-constrained situations)
-            full_object = para_handle['object'][...]
+            # Note: ptychodus format stores object as (1, H, W), so we take [0] to get (H, W)
+            # This matches the cached version and ensures extract_patches_fourier_shift receives correct shape
+            full_object = para_handle['object'][0]
         
         # Extract patches at probe position
         patch = self._extract_patch(full_object, probe_position)
@@ -332,12 +338,22 @@ class CombinedDataset(Dataset):
     PyTorch Dataset for multiple ptychography datasets.
 
     Handles multiple pairs of .hdf5 files and provides a unified interface.
-    Works with PyTorch DataLoader and DistributedSampler for DDP training.
+    Supports three modes for train/val splitting:
+    - 'train': Returns training split with rank sharding
+    - 'val': Returns validation split with rank sharding
+    - None or 'full': Returns full dataset with rank sharding (no train/val split)
+                      Use this mode with PyTorch's random_split() for standard splitting.
 
     Args:
         file_paths: Either:
                    - List of paths to data files (*_dp.hdf5 or *_para.hdf5), OR
                    - Single directory path to scan for paired files
+        rank: Rank of current process for distributed training (default: 0)
+        world_size: Total number of processes for distributed training (default: 1)
+        train_split: Fraction of data for training (default: 0.95)
+        shuffle: Whether to shuffle global indices (default: True)
+        random_seed: Random seed for shuffling and splitting (default: 42)
+        mode: 'train', 'val', None, or 'full' to select which split to use (default: 'train')
         **dataset_kwargs: Additional arguments passed to PtychographyDataset
     """
 
@@ -394,7 +410,7 @@ class CombinedDataset(Dataset):
 
         return paired_files
 
-    def __init__(self, file_paths, rank=0, world_size=1, train_split=0.95, shuffle=True, random_seed=42, mode='train', **dataset_kwargs):
+    def __init__(self, file_paths, rank=0, world_size=1, train_split=0.95, shuffle=True, random_seed=42, mode='train', debug=False, **dataset_kwargs):
         """
         Initialize CombinedDataset with global indexing and rank-based sharding.
         
@@ -405,7 +421,12 @@ class CombinedDataset(Dataset):
             train_split: Fraction of data for training (default: 0.95)
             shuffle: Whether to shuffle global indices (default: True)
             random_seed: Random seed for shuffling and splitting (default: 42)
-            mode: 'train' or 'val' to select which split to use (default: 'train')
+            mode: 'train', 'val', None, or 'full' to select which split to use.
+                  - 'train': Returns training split with rank sharding
+                  - 'val': Returns validation split with rank sharding
+                  - None or 'full': Returns full dataset with rank sharding (no train/val split)
+                  (default: 'train')
+            debug: If True, enable debug logging for CSV usage and data access (default: False)
             **dataset_kwargs: Additional arguments passed to PtychographyDataset
         """
         # Auto-detect if file_paths is a directory or a list
@@ -432,6 +453,8 @@ class CombinedDataset(Dataset):
         self.shuffle = shuffle
         self.random_seed = random_seed
         self.mode = mode
+        self.debug = debug
+        self.debug_call_count = 0  # Track number of __getitem__ calls for debug logging
 
         # Try to load index.csv to avoid opening all HDF5 files
         self.index_df = None
@@ -459,9 +482,18 @@ class CombinedDataset(Dataset):
                             self.pattern_counts[file_path] = csv_lookup[file_path.name]
                     
                     print(f"[Rank {rank}] Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
+                    if debug:
+                        print(f"[DEBUG Rank {rank}] CSV Usage: index.csv found and loaded successfully", flush=True)
+                        print(f"[DEBUG Rank {rank}] CSV Usage: Matched {len(self.pattern_counts)}/{len(self.file_paths)} files from CSV", flush=True)
+                        # Print sample of pattern counts
+                        sample_files = list(self.pattern_counts.items())[:5]
+                        for file_path, count in sample_files:
+                            print(f"[DEBUG Rank {rank}] CSV Sample: {file_path.name} -> {count} patterns", flush=True)
                 except Exception as e:
                     print(f"[Rank {rank}] Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
                     self.index_df = None
+                    if debug:
+                        print(f"[DEBUG Rank {rank}] CSV Usage: index.csv NOT found or failed to load", flush=True)
 
         # Build global index map using index.csv when available
         # Use LRU cache to limit number of open datasets in memory (prevents OOM)
@@ -519,33 +551,60 @@ class CombinedDataset(Dataset):
         # seed to ensure train and val use the same shuffled order (just different portions).
         # The shuffle parameter controls whether shuffling happens when train_split=1.0 (no split),
         # but when doing splits, we always shuffle to ensure consistency.
-        if shuffle or (train_split < 1.0):
+        if shuffle or (train_split < 1.0 and mode not in (None, 'full')):
             # Always shuffle when doing splits to ensure train and val use same shuffled indices
+            # Also shuffle in full mode if shuffle=True
             rng = np.random.default_rng(random_seed)
             rng.shuffle(global_indices)
         
-        # Split into train and val
-        train_size = int(total_patterns * train_split)
-        train_indices = global_indices[:train_size]
-        val_indices = global_indices[train_size:]
-        
-        # Select indices based on mode
-        if mode == 'train':
-            selected_indices = train_indices
-            split_name = 'train'
+        # Split into train and val (only if mode is 'train' or 'val')
+        if mode is None or mode == 'full':
+            # Full dataset mode: return all indices, no train/val split
+            selected_indices = global_indices
+            split_name = 'full'
         else:
-            selected_indices = val_indices
-            split_name = 'val'
+            # Split into train and val
+            train_size = int(total_patterns * train_split)
+            train_indices = global_indices[:train_size]
+            val_indices = global_indices[train_size:]
+            
+            # Select indices based on mode
+            if mode == 'train':
+                selected_indices = train_indices
+                split_name = 'train'
+            elif mode == 'val':
+                selected_indices = val_indices
+                split_name = 'val'
+            else:
+                raise ValueError(f"Invalid mode: {mode}. Must be 'train', 'val', None, or 'full'")
         
-        # Rank-based sharding: Each rank gets a subset of indices
+        # Rank-based sharding: Only apply for 'train' and 'val' modes
+        # For 'full' or None mode, rank sharding will be applied by RankShardedSubset after random_split
         total_selected = len(selected_indices)
-        start = total_selected * rank // world_size
-        end = total_selected * (rank + 1) // world_size
-        self.current_indices = selected_indices[start:end]
-        
-        print(f"[Rank {rank}] CombinedDataset ({mode}): {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
-        print(f"[Rank {rank}]   Global {split_name} split: {total_selected} patterns", flush=True)
-        print(f"[Rank {rank}]   Rank shard: {len(self.current_indices)} patterns (indices {start} to {end-1})", flush=True)
+        if mode is None or mode == 'full':
+            # No rank sharding - return full dataset
+            # This allows random_split to work on the complete dataset, then RankShardedSubset handles sharding
+            self.current_indices = selected_indices
+            print(f"[Rank {rank}] CombinedDataset ({mode}): {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
+            print(f"[Rank {rank}]   Global {split_name} split: {total_selected} patterns (no rank sharding yet)", flush=True)
+            
+            if debug:
+                print(f"[DEBUG Rank {rank}] Global Shuffle: First 10 indices = {self.current_indices[:10].tolist()}", flush=True)
+                print(f"[DEBUG Rank {rank}] No rank sharding applied - will be handled by RankShardedSubset wrapper", flush=True)
+        else:
+            # Apply rank sharding for 'train' and 'val' modes (legacy compatibility)
+            start = total_selected * rank // world_size
+            end = total_selected * (rank + 1) // world_size
+            self.current_indices = selected_indices[start:end]
+            
+            print(f"[Rank {rank}] CombinedDataset ({mode}): {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
+            print(f"[Rank {rank}]   Global {split_name} split: {total_selected} patterns", flush=True)
+            print(f"[Rank {rank}]   Rank shard: {len(self.current_indices)} patterns (indices {start} to {end-1})", flush=True)
+            
+            if debug:
+                print(f"[DEBUG Rank {rank}] Global Shuffle: First 10 indices for this rank = {self.current_indices[:10].tolist()}", flush=True)
+                if world_size > 1:
+                    print(f"[DEBUG Rank {rank}] Rank Sharding: This rank gets indices {start} to {end-1} (total {len(self.current_indices)} patterns)", flush=True)
 
     def __len__(self) -> int:
         """Return number of patterns in current rank's shard."""
@@ -571,6 +630,21 @@ class CombinedDataset(Dataset):
         # Calculate local index within file
         local_idx = global_idx - self.file_offsets[file_idx]
         file_path = self.file_map[file_idx]
+        
+        # Debug logging (only for first few calls per rank)
+        # Auto-reset counter when it exceeds limit (allows logging to resume in new epochs)
+        # if self.debug_call_count >= 15:
+        #     self.debug_call_count = 0
+        
+        if self.debug and self.debug_call_count < 15:  # Log first 15 calls (covers first few batches)
+            file_info = self.file_info[file_idx]
+            num_patterns_in_file = file_info['num_patterns']
+            # Note: 'idx' parameter is the dataset index (could be split index or global index depending on mode)
+            # 'global_idx' is the actual global index across all files
+            print(f"[DEBUG Rank {self.rank}] CombinedDataset.__getitem__: "
+                  f"DatasetIdx={idx}, GlobalIdx={global_idx}, "
+                  f"File={file_path.name}, Pattern={local_idx}/{num_patterns_in_file}", flush=True)
+            self.debug_call_count += 1
         
         # Lazy dataset creation with LRU cache: create dataset only when first accessed
         # This avoids opening all HDF5 files during initialization
@@ -599,3 +673,107 @@ class CombinedDataset(Dataset):
             self.dataset_cache[file_path] = dataset
         
         return dataset[local_idx]
+
+
+class RankShardedSubset(Dataset):
+    """
+    Wrapper class that applies rank-based sharding to a PyTorch Subset.
+    
+    This class takes a Subset object (typically from random_split) and applies
+    rank sharding to distribute the subset's indices across multiple processes
+    in distributed training.
+    
+    Args:
+        subset: PyTorch Subset object containing a dataset and indices
+        rank: Rank of current process (default: 0)
+        world_size: Total number of processes (default: 1)
+    
+    Example:
+        >>> full_dataset = CombinedDataset(file_paths, mode=None, ...)
+        >>> train_subset, val_subset = random_split(full_dataset, [train_size, val_size])
+        >>> train_dataset = RankShardedSubset(train_subset, rank=0, world_size=8)
+        >>> val_dataset = RankShardedSubset(val_subset, rank=0, world_size=8)
+    """
+    
+    def __init__(self, subset: Subset, rank: int = 0, world_size: int = 1, debug: bool = False, subset_type: str = 'unknown'):
+        """
+        Initialize RankShardedSubset with rank-based sharding.
+        
+        Args:
+            subset: PyTorch Subset object
+            rank: Rank of current process
+            world_size: Total number of processes
+            debug: If True, enable debug logging (default: False)
+            subset_type: Type of subset ('train' or 'val') for debug logging (default: 'unknown')
+        """
+        self.subset = subset
+        self.rank = rank
+        self.world_size = world_size
+        self.debug = debug
+        self.subset_type = subset_type
+        self.debug_call_count = 0  # Track number of __getitem__ calls for debug logging
+        
+        # Extract indices from the Subset
+        # Subset stores indices in subset.indices (PyTorch >= 1.9) or we need to access it
+        # For compatibility, we'll access the indices attribute directly
+        if hasattr(subset, 'indices'):
+            subset_indices = subset.indices
+        else:
+            # Fallback: if indices aren't directly accessible, we need to reconstruct
+            # This shouldn't happen with standard PyTorch Subset, but handle it gracefully
+            raise AttributeError("Subset object does not have 'indices' attribute. "
+                               "This may indicate an incompatible PyTorch version.")
+        
+        # Convert to list if it's a tensor for easier handling
+        if isinstance(subset_indices, torch.Tensor):
+            subset_indices = subset_indices.tolist()
+        
+        # Apply rank-based sharding to the subset's indices
+        total_indices = len(subset_indices)
+        start = total_indices * rank // world_size
+        end = total_indices * (rank + 1) // world_size
+        self.sharded_indices = subset_indices[start:end]
+        
+        print(f"[Rank {rank}] RankShardedSubset ({subset_type}): {total_indices} total indices, "
+              f"{len(self.sharded_indices)} indices for this rank (indices {start} to {end-1})", flush=True)
+        
+        if debug:
+            print(f"[DEBUG Rank {rank}] RankShardedSubset ({subset_type}): First 10 sharded indices = {self.sharded_indices[:10]}", flush=True)
+    
+    def __len__(self) -> int:
+        """Return number of indices in current rank's shard."""
+        return len(self.sharded_indices)
+    
+    def __getitem__(self, idx: int):
+        """
+        Get a sample by rank-local index.
+        
+        Maps rank-local index to the original dataset's global index, then retrieves
+        the sample from the underlying dataset.
+        
+        Args:
+            idx: Rank-local index (0 to len(self.sharded_indices)-1)
+        
+        Returns:
+            Sample from the underlying dataset
+        """
+        if idx >= len(self.sharded_indices):
+            raise IndexError(f"Index {idx} out of range for rank shard with {len(self.sharded_indices)} indices")
+        
+        # self.sharded_indices contains the actual dataset indices (sliced from subset.indices)
+        # So we can use them directly to access the underlying dataset
+        dataset_idx = self.sharded_indices[idx]
+        
+        # Debug logging (only for first few calls per rank)
+        # Auto-reset counter when it exceeds limit (allows logging to resume in new epochs)
+        # if self.debug_call_count >= 15:
+        #     self.debug_call_count = 0
+        
+        if self.debug and self.debug_call_count < 15:  # Log first 15 calls (covers first few batches)
+            # idx = position within this rank's shard (0 to len(sharded_indices)-1)
+            # dataset_idx = index in the train/val split (after random_split, before rank sharding)
+            print(f"[DEBUG Rank {self.rank}] RankShardedSubset.__getitem__ ({self.subset_type}): "
+                  f"RankLocalIdx={idx} (pos in rank shard), SplitIdx={dataset_idx} (index in {self.subset_type} split)", flush=True)
+            self.debug_call_count += 1
+        
+        return self.subset.dataset[dataset_idx]

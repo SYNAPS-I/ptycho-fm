@@ -278,6 +278,12 @@ class Trainer(object):
         val_loss = 0.0
         val_amp_loss = 0.0
         val_ph_loss = 0.0
+        
+        # Progress milestones (every 10%)
+        total_batches = len(dataloader)
+        progress_milestones = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        milestone_batches = [int(m * total_batches) for m in progress_milestones]
+        next_milestone_idx = 0
 
         # Variables for plotting (save last batch)
         last_input_diff = None

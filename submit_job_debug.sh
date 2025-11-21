@@ -4,7 +4,7 @@
 #SBATCH --qos=debug
 #SBATCH --time=00:30:00
 #SBATCH --nodes=2
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=4
 #SBATCH --constraint=gpu
 #SBATCH --output=ptycho_vit_debug_%j.out
 #SBATCH --error=ptycho_vit_debug_%j.err
@@ -35,6 +35,7 @@ unset NCCL_DEBUG  # Reduce debug output (set to INFO if needed)
 # Using full path ensures venv's site-packages are found
 # Use --gpu-bind=none like multinode.sh to avoid GPU binding issues
 # Note: The actual GPU count comes from SLURM (WORLD_SIZE), not config.yaml
-srun --ntasks-per-node=2 --gpus-per-task=1 --cpus-per-task=1 --gpu-bind=none \
-     /global/cfs/cdirs/m5073/pecomyint/ptycho-vit/.venv/bin/python main.py
+# --debug flag enables detailed logging for CSV usage and shuffling verification
+srun --ntasks-per-node=4 --gpus-per-task=1 --cpus-per-task=1 --gpu-bind=none \
+     /global/cfs/cdirs/m5073/pecomyint/ptycho-vit/.venv/bin/python main.py --debug
 
