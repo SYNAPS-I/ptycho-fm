@@ -10,7 +10,7 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 import wandb
 
 class Trainer(object):
-    def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, wandb_enabled=True):
+    def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, use_prefetch=False, wandb_enabled=True):
         super().__init__()
         self.model = model
         self.mode = mode
@@ -19,6 +19,7 @@ class Trainer(object):
         self.model_save_path = model_save_path
         self.is_main_process = is_main_process
         self.use_ddp = use_ddp
+        self.use_prefetch = use_prefetch
         self.wandb_enabled = wandb_enabled
 
     def synchronize_loss(self, loss_value):
@@ -192,7 +193,9 @@ class Trainer(object):
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
             input_norm = norm.to(self.device)
             input_scale = scale.to(self.device)
-
+            if self.use_prefetch == False:
+                amp_patch = amp_patch.to(self.device)
+                ph_patch = ph_patch.to(self.device)
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
             if self.mode == 'supervised':
@@ -303,6 +306,9 @@ class Trainer(object):
                 input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
                 input_norm = norm.to(self.device)
                 input_scale = scale.to(self.device)
+                if self.use_prefetch == False:
+                    amp_patch = amp_patch.to(self.device)
+                    ph_patch = ph_patch.to(self.device)
 
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 

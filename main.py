@@ -3,6 +3,8 @@ import os
 # Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
 import argparse
 import numpy as np
+from mpi4py import MPI
+import socket
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,7 +14,7 @@ import torch.distributed as dist
 import pickle
 import yaml
 
-from data import CombinedDataset, RankShardedSubset
+from data import RankShardedSubset
 from model import PtychoViT, PtychoViT256
 from model_cnn import PtychoCNN, PtychoCNN256
 from training import Trainer
@@ -20,6 +22,15 @@ from torch.utils.data import DataLoader, random_split
 from prefetcher import CUDAPrefetcher
 
 import wandb
+
+
+import tempfile, os, multiprocessing as mp
+
+#print("TEMP DIR:", tempfile.gettempdir())
+#print("PYTHON TMPDIR:", os.environ.get("TMPDIR"))
+#print("CWD:", os.getcwd())
+#print("MP start method:", mp.get_start_method(allow_none=True))
+
 
 def load_config(config_path='config.yaml'):
     """Load configuration from YAML file."""
@@ -31,8 +42,18 @@ def load_config(config_path='config.yaml'):
 parser = argparse.ArgumentParser(description='PtychoViT Training Script')
 parser.add_argument('--debug', action='store_true', 
                     help='Enable debug logging to verify CSV usage and shuffling')
+parser.add_argument('--use-random-data', action='store_true',
+                    help='Use synthetic random dataset from data_random.py for quick testing')
 args = parser.parse_args()
 DEBUG_MODE = args.debug
+USE_RANDOM_DATA = args.use_random_data
+
+# Conditional CombinedDataset import so we can use a synthetic dataset for testing
+if USE_RANDOM_DATA:
+    # Local synthetic dataset for quick testing without HDF5 files
+    from data_random import CombinedDataset
+else:
+    from data import CombinedDataset
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
@@ -47,6 +68,35 @@ def ensure_env_from_slurm():
     if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
         os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
 
+def init_device():
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        local_rank = rank % torch.cuda.device_count()
+        torch.cuda.set_device(int(local_rank))
+        backend='nccl'
+    elif torch.xpu.is_available():
+        device = torch.device('xpu')
+        local_rank = rank % torch.xpu.device_count()
+        torch.xpu.set_device(int(local_rank))
+        backend='xccl'
+    else:
+        device = torch.device('cpu')
+
+    os.environ['RANK']=str(rank)
+    os.environ['WORLD_SIZE']=str(size)
+    master_addr = "localhost"
+    master_port = "29500"
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = master_port
+    
+    if size > 1:
+        torch.distributed.init_process_group(backend=backend, init_method='env://', rank=int(rank), world_size=int(size))
+    print("Hello World from rank {} of {} on {}".format(rank, size, socket.gethostname()))
+    return rank, size, local_rank, device
 
 def init_distributed():
     """
@@ -87,7 +137,7 @@ def init_distributed():
         os.environ["MASTER_PORT"] = "29500"
 
     if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
-        dist.init_process_group(backend="xccl", init_method="env://")
+        dist.init_process_group(backend="nccl", init_method="env://")
 
     # Map LOCAL_RANK to a valid CUDA device index after any device masking.
     # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
@@ -97,12 +147,6 @@ def init_distributed():
         torch.cuda.set_device(mapped_local)
         device = torch.device(f"cuda:{mapped_local}")
         os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
-    elif torch.xpu.is_available():
-        nvis = torch.xpu.device_count()
-        mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
-        torch.xpu.set_device(mapped_local)
-        os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
-        device = torch.device(f"xpu:{mapped_local}")
     else:
         mapped_local = 0
         device = torch.device("cpu")
@@ -120,20 +164,18 @@ LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 
+rank, world_size, local_rank, DEVICE = init_device()
+
 # Initialize distributed training (if using multiple GPUs)
 # Use the robust multinode.py approach for proper device mapping
-if NGPUS > 1:
-    rank, world_size, local_rank, DEVICE = init_distributed()
+if world_size > 1:
+    #rank, world_size, local_rank, DEVICE = init_distributed()
     is_main_process = rank == 0
-    
     # Keep this print for all ranks - useful for debugging distributed setup
     print(f"Rank: {rank}, Local Rank: {local_rank}, Device: {DEVICE}, World Size: {world_size}", flush=True)
 else:
-    rank = 0
-    world_size = 1
-    local_rank = 0
+    print(f"Rank: {rank}, Local Rank: {local_rank}, Device: {DEVICE}, World Size: {world_size}", flush=True)
     is_main_process = True
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Create full dataset with rank-based sharding, then split using random_split
 # Support both 'datafiles' (list) and 'data_path' (directory)
@@ -209,10 +251,12 @@ val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
 if torch.cuda.is_available():
     train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
     val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
+    cuda_prefetch = True
 else:
     # Fallback to regular loaders on CPU
     train_prefetcher = train_loader
     val_prefetcher = val_loader
+    cuda_prefetch = False 
 
 # Print configuration only on main process
 if is_main_process:
@@ -270,15 +314,15 @@ if is_main_process:
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
-if NGPUS > 1:
+if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
+    if "CUDA_VISIBLE_DEVICES" in os.environ or DEVICE=='xpu':
         # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
         model = DDP(model, find_unused_parameters=False)
     else:
         # For torchrun or other launchers, explicitly specify device
-        dev_index = torch.cuda.current_device()
+        dev_index = torch.xpu.current_device()
         model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False)
 
 # Loss and optimizer
@@ -310,6 +354,7 @@ trainer = Trainer(
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
     use_ddp=(NGPUS > 1),
+    use_prefetch = cuda_prefetch,
     wandb_enabled=config['wandb']['enabled']
 )
 
