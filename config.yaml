@@ -3,36 +3,37 @@
 # Data Configuration
 data:
   # Option 1: Specify a list of specific files to use
-  datafiles:
-     - '/scratch/aileenluo/ptycho-vit/data/eagle256_dp.hdf5'
-    # Add more files as needed:
-     - '/scratch/aileenluo/ptycho-vit/data/cameraman256_dp.hdf5'
-     - '/scratch/aileenluo/ptycho-vit/data/brick256_dp.hdf5'
-     - '/scratch/aileenluo/ptycho-vit/data/grass256_dp.hdf5'
-     - '/scratch/aileenluo/ptycho-vit/data/gravel256_dp.hdf5'
+  #datafiles:
+  #   - '/path/to/file1_dp.hdf5'
+  #   - '/path/to/file2_dp.hdf5'
 
   # Option 2: Specify a directory - will auto-discover all paired files
   # (comment out 'datafiles' above and uncomment this to use)
-  #data_path: '/scratch/aileenluo/ptycho-vit/data'
+  # data_path: '/global/cfs/cdirs/m5073/synaps_data/simulated_data'
+  data_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata'
+  # data_path: '/global/cfs/cdirs/m5073/pecomyint/data'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/norm_factors.pkl'  # Example: '/path/to/normalization_factors.pkl'
-
+  normalization_dict_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  # normalization_dict_path: null  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
 
   # DataLoader Configuration
-  num_workers: 4
-  prefetch_factor: 10
-  pin_memory: true
-  persistent_workers: false
+  # Phase 3: Multi-worker prefetching with persistent handles
+  # With persistent HDF5 handles and increased cache size, we can now use workers
+  # Reduced to 2 workers to match system recommendation and reduce contention
+  num_workers: 4  # System recommends max 1, using 2 to balance performance vs contention
+  prefetch_factor: 4  # Increased from 2 to 4 to prefetch more batches ahead (2 workers × 4 = 8 batches prefetched)
+  pin_memory: true  # Required for CUDAPrefetcher async transfer
+  persistent_workers: true  # Keep workers alive across epochs
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 64
+  batch_size: 16  # Keep at 16 to avoid OOM - the bottleneck is data loading, not batch size
   learning_rate: 5.0e-4
   epochs: 201  # Total epochs to train for (not additional epochs when resuming)
   ngpus: 2
@@ -119,7 +120,7 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/scratch/aileenluo/ptycho-vit/models'
+  model_save_path: '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models'
 
 # WandB Configuration
 wandb:
@@ -132,4 +133,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: 4
+  run_num: 1
