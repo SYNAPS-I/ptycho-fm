@@ -87,7 +87,7 @@ def init_distributed():
         os.environ["MASTER_PORT"] = "29500"
 
     if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
-        dist.init_process_group(backend="nccl", init_method="env://")
+        dist.init_process_group(backend="xccl", init_method="env://")
 
     # Map LOCAL_RANK to a valid CUDA device index after any device masking.
     # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
@@ -97,6 +97,12 @@ def init_distributed():
         torch.cuda.set_device(mapped_local)
         device = torch.device(f"cuda:{mapped_local}")
         os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
+    elif torch.xpu.is_available():
+        nvis = torch.xpu.device_count()
+        mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
+        torch.xpu.set_device(mapped_local)
+        os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
+        device = torch.device(f"xpu:{mapped_local}")
     else:
         mapped_local = 0
         device = torch.device("cpu")
@@ -121,7 +127,7 @@ if NGPUS > 1:
     is_main_process = rank == 0
     
     # Keep this print for all ranks - useful for debugging distributed setup
-    print(f"Rank: {rank}, Local Rank: {local_rank}, CUDA Device: {DEVICE}, World Size: {world_size}", flush=True)
+    print(f"Rank: {rank}, Local Rank: {local_rank}, Device: {DEVICE}, World Size: {world_size}", flush=True)
 else:
     rank = 0
     world_size = 1
