@@ -212,7 +212,6 @@ class Trainer(object):
 
             # Track peak memory usage during forward/backward pass (first 3 batches only)
             if batch_idx < 10:
-                print(self.device)
                 if 'cuda' in str(self.device):
                     max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 3)
                     torch.cuda.reset_peak_memory_stats(device=self.device)
