@@ -196,8 +196,9 @@ class Trainer(object):
             if self.use_prefetch == False:
                 amp_patch = amp_patch.to(self.device)
                 ph_patch = ph_patch.to(self.device)
+            fwd_pass_st =  time.time()
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-
+            fwd_pass_end =  time.time()
             if self.mode == 'supervised':
                 loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
             else:
@@ -208,13 +209,28 @@ class Trainer(object):
             
             # Time training completion - always track end time for IO timing of next batch
             train_end_time = time.time()
+
+            # Track peak memory usage during forward/backward pass (first 3 batches only)
+            if batch_idx < 10:
+                print(self.device)
+                if 'cuda' in str(self.device):
+                    max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 3)
+                    torch.cuda.reset_peak_memory_stats(device=self.device)
+                    if self.is_main_process:
+                        print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
+                elif 'xpu' in str(self.device):
+                    max_mem_gb = torch.xpu.max_memory_allocated(device=self.device) / (1024 ** 3)
+                    if self.is_main_process:
+                        print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
+                    torch.xpu.reset_peak_memory_stats(device=self.device)
             
             # Log timing for first 10 batches
             if batch_idx < 10:
                 train_time = train_end_time - train_start_time
+                fwd_pass_time = fwd_pass_end - fwd_pass_st
                 total_time = io_time + train_time
                 if self.is_main_process:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | fwdpass: {fwd_pass_time:.3f}s | Total: {total_time:.3f}s", flush=True)
             
             running_loss += loss.detach().item()
 
