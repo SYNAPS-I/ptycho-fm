@@ -1,3 +1,4 @@
+import sys
 import os
 # CUDA_VISIBLE_DEVICES should be set by SLURM or environment, not hardcoded
 # Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
@@ -22,15 +23,7 @@ from torch.utils.data import DataLoader, random_split
 from prefetcher import CUDAPrefetcher
 
 import wandb
-
-
 import tempfile, os, multiprocessing as mp
-
-#print("TEMP DIR:", tempfile.gettempdir())
-#print("PYTHON TMPDIR:", os.environ.get("TMPDIR"))
-#print("CWD:", os.getcwd())
-#print("MP start method:", mp.get_start_method(allow_none=True))
-
 
 def load_config(config_path='config.yaml'):
     """Load configuration from YAML file."""
@@ -87,7 +80,8 @@ def init_device():
 
     os.environ['RANK']=str(rank)
     os.environ['WORLD_SIZE']=str(size)
-    master_addr = "localhost"
+    master_addr = socket.gethostname() if rank == 0 else None #"localhost"
+    master_addr = comm.bcast(master_addr, root=0)
     master_port = "29500"
     os.environ["LOCAL_RANK"] = str(local_rank)
     os.environ["MASTER_ADDR"] = master_addr
@@ -158,7 +152,7 @@ config = load_config()
 
 # Training parameters
 MODE = config['training']['mode']
-NGPUS = config['training']['ngpus']
+NGPUS = config['training']['ngpus'] # This is not correct - needs to be the world size
 BATCH_SIZE = config['training']['batch_size']
 LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
@@ -317,12 +311,12 @@ model = model.to(DEVICE)
 if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if "CUDA_VISIBLE_DEVICES" in os.environ or DEVICE=='xpu':
+    if DEVICE=='cuda' or DEVICE=='xpu':
         # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
         model = DDP(model, find_unused_parameters=False)
     else:
         # For torchrun or other launchers, explicitly specify device
-        dev_index = torch.xpu.current_device()
+        dev_index = torch.cuda.current_device()
         model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False)
 
 # Loss and optimizer
@@ -353,7 +347,7 @@ trainer = Trainer(
     DEVICE,
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
-    use_ddp=(NGPUS > 1),
+    use_ddp=(world_size > 1),
     use_prefetch = cuda_prefetch,
     wandb_enabled=config['wandb']['enabled']
 )
@@ -368,7 +362,7 @@ if config['training'].get('resume_from_checkpoint', False):
     model_checkpoint = os.path.join(checkpoint_path, 'checkpoint_model.pth')
 
     if os.path.exists(model_checkpoint):
-        if NGPUS > 1:
+        if world_size > 1:
             model.module.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
         else:
             model.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
@@ -507,4 +501,6 @@ if is_main_process:
     print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
-    wandb.finish() 
+    wandb.finish()
+
+torch.distributed.destroy_process_group()

@@ -6,9 +6,21 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-
+from torch.profiler import profile, ProfilerActivity, record_function
 import wandb
 
+activities = [ProfilerActivity.CPU]
+if torch.cuda.is_available():
+    device = "cuda"
+    activities += [ProfilerActivity.CUDA]
+elif torch.xpu.is_available():
+    device = "xpu"
+    activities += [ProfilerActivity.XPU]
+else:
+    print("Neither CUDA nor XPU devices are available to demonstrate profiling on acceleration devices") 
+    import sys
+    sys.exit(0)
+sort_by_keyword = device + "_time_total"
 class Trainer(object):
     def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, use_prefetch=False, wandb_enabled=True):
         super().__init__()
@@ -324,9 +336,10 @@ class Trainer(object):
                 if self.use_prefetch == False:
                     amp_patch = amp_patch.to(self.device)
                     ph_patch = ph_patch.to(self.device)
-
-                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-
+                with profile(activities=activities, profile_memory=True, record_shapes=True) as prof:
+                        with record_function("model_fwdpass"):
+                            output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                print(prof.key_averages().table(sort_by=sort_by_keyword, row_limit=40))
                 if self.mode == 'supervised':
                     loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                 else:
