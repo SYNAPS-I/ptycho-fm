@@ -6,8 +6,6 @@ import pandas as pd
 import h5py
 import tqdm
 
-import util
-
 logger = logging.getLogger(__name__)
 
 

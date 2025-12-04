@@ -181,7 +181,7 @@ class PtychoViT256(nn.Module):
             base_channels=config['decoder']['base_channels'],
             out_channels=1,
             use_batchnorm=config['decoder']['use_batchnorm'],
-            output_activation='sigmoid',
+            output_activation='custom',
             dropout=config['decoder'].get('dropout', 0.1),
             num_stages=config['decoder'].get('num_stages', 4)
         )
@@ -192,31 +192,55 @@ class PtychoViT256(nn.Module):
             base_channels=config['decoder']['base_channels'],
             out_channels=1,
             use_batchnorm=config['decoder']['use_batchnorm'],
-            output_activation='tanh',
+            output_activation='custom',
             dropout=config['decoder'].get('dropout', 0.1),
             num_stages=config['decoder'].get('num_stages', 4)
         )
 
+        # Scaling factors for the outputs
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.025), dtype=torch.float32), requires_grad=False)
+        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(math.pi), dtype=torch.float32), requires_grad=False)
+
     def forward(self, x, probe, normalization, scale):
+        x = 2 * torch.log10(x + 1e-1)
+
+        # Compute inverse of diffraction amplitude where x >= 1, else 0
+        # Create mask for values >= 1
+        #mask = (x >= 1.0).float()
+        # Compute inverse where x >= 1, using mask to avoid division by zero
+        # For x < 1: mask=0 makes the result 0
+        # For x >= 1: mask=1 gives 1/x
+        #x = mask / (x + 1e-6)  # Add small epsilon for numerical stability
+
         # FFT probe
         probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
-        probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
-        probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
+        # probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
+        # probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
 
         # Normalization
         normalization = normalization.view(normalization.shape[0], 1, 1)
         scale = scale.view(scale.shape[0], 1, 1)
-        probe_intensity = (probe_intensity / normalization) * scale
+        # probe_intensity = (probe_intensity / normalization) * scale
 
         # Subtract probe contribution to total intensity
-        x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
+        # x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
+
+        # Ratio
+        #x = x / (torch.sqrt(probe_intensity.float().unsqueeze(1)) + 1e-6)
+
+        # Use log-ratio instead of subtraction to preserve intensity information
+        # This is more stable than direct ratio and handles large dynamic range
+        # log(ratio) = 0: minimal object effect
+        # log(ratio) > 0: object creates constructive interference
+        # log(ratio) < 0: object absorbs or creates destructive interference
+        #x = torch.log(x + 1e-6) - torch.log(torch.sqrt(probe_intensity.float().unsqueeze(1)) + 1e-6)
 
         # Apply log-polar coordinate transform
-        grid = create_logpolar_grid(x.shape[-2], x.shape[-1], x.device)
-        x_prime = apply_logpolar_transform(x, grid, mode='bicubic')
+        # grid = create_logpolar_grid(x.shape[-2], x.shape[-1], x.device)
+        # x_prime = apply_logpolar_transform(x, grid, mode='bicubic')
 
         # ViT Encoder: (B, 1, 256, 256) -> (B, num_patches, embed_dim)
-        x = self.encoder(x_prime)
+        x = self.encoder(x)
 
         # Reshape from (B, num_patches, embed_dim) to (B, embed_dim, H, W)
         # where H = W = num_patches_per_side
@@ -224,9 +248,13 @@ class PtychoViT256(nn.Module):
         x = x.transpose(1, 2).reshape(B, -1, self.num_patches_per_side, self.num_patches_per_side)
 
         # Decode to amplitude and phase
-        #amp = self.amp_decoder(x).squeeze(1)
-        amp = (self.amp_decoder(x).squeeze(1) + 1) / 2
-        ph = self.ph_decoder(x).squeeze(1) * math.pi
+        constrained_amp = self.amp_decoder(x).squeeze(1)
+        constrained_ph = self.ph_decoder(x).squeeze(1)
+
+        # Scale the constrained outputs using trainable scalars
+        # Broadcasting automatically handles the shape: [1] * (B, H, W) -> (B, H, W)
+        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + 0.975
+        ph = constrained_ph * torch.exp(self.log_scale_ph)
 
         # Complex object and diffraction
         complex_object = torch.complex(amp * torch.cos(ph), amp * torch.sin(ph))

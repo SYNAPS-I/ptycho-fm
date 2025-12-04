@@ -1,7 +1,7 @@
 [project]
 name = "ptycho-vit"
 version = "0.1.0"
-description = "Add your description here"
+description = "A foundation model for single-shot coherent diffractive imaging"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

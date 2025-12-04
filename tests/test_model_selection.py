@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import yaml
-from model import PtychoViT
-from model_cnn import PtychoCNN, PtychoCNN256
+from development_logs.model512 import PtychoViT
+from development_logs.model_cnn import PtychoCNN, PtychoCNN256
 
 
 def load_config(config_path='../config.yaml'):
