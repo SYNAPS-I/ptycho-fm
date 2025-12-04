@@ -261,7 +261,7 @@ class CombinedDataset:
 
             # Truncate the rank's portion of the split indices
             # We need to truncate the indices AFTER partitioning
-            rank_indices_truncated = rank_indices[:samples_to_keep]
+            _rank_indices_truncated = rank_indices[:samples_to_keep]
 
             # Calculate what indices to actually use from the global split
             # We need to update the original split indices to reflect the truncation
@@ -270,10 +270,10 @@ class CombinedDataset:
 
             if split_name == 'train':
                 self.train_batches_per_rank = min_batches
-                samples_dropped = original_count - samples_to_keep
+                _samples_dropped = original_count - samples_to_keep
             else:
                 self.val_batches_per_rank = min_batches
-                samples_dropped = original_count - samples_to_keep
+                _samples_dropped = original_count - samples_to_keep
 
             if self.is_main_process:
                 print(f"  Equalizing to {min_batches} batches per rank", flush=True)
@@ -292,8 +292,6 @@ class CombinedDataset:
         Creates a list of all samples indexed by global index.
         This significantly speeds up training when dataset fits in RAM.
         """
-        import sys
-
         if self.is_main_process:
             print("\n" + "=" * 50, flush=True)
             print("PRE-LOADING DATA TO MEMORY", flush=True)
@@ -385,7 +383,7 @@ class CombinedDataset:
 
         print(f"\n[Rank {self.rank}] {split.upper()} data allocation (Epoch {epoch}):", flush=True)
         print(f"  Total patterns for this rank: {len(rank_indices)}", flush=True)
-        print(f"  File allocation:", flush=True)
+        print("  File allocation:", flush=True)
 
         total_allocated = 0
         for file_idx in file_order:

@@ -4,13 +4,13 @@
 data:
   # Directory path - will auto-discover all paired *_dp.hdf5 and *_para.hdf5 files
   data_path: '/scratch/aileenluo/ptycho-vit/data'
-  test_path: '/global/cfs/cdirs/m5073/aileenluo/test_data'
+  test_path: '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/scan807/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  test_normalization: '/global/cfs/cdirs/m5073/aileenluo/test_data/test2probes_norm.pkl' 
+  normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  test_normalization: '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl' 
 
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
@@ -28,9 +28,9 @@ data:
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 16  
-  learning_rate: 5.0e-4
-  epochs: 201  # Total epochs to train for (not additional epochs when resuming)
+  batch_size: 128  
+  learning_rate: 1.0e-4
+  epochs: 161  # Total epochs to train for (not additional epochs when resuming)
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
 
   # Weighted loss configuration (only used when loss_function: 'weighted')
@@ -40,7 +40,7 @@ training:
     alpha: 1.0        # Weight exponent (alpha=1 → inverse weighting (1/intensity), alpha=0 → uniform weighting)
 
   validation_plot_freq: 10  # Plot validation results every N epochs
-  test_plor_freq: 20 # Plot stitched test results every M epochs
+  test_plot_freq: 20 # Plot stitched test results every M epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
 
 # Model Architecture
@@ -79,17 +79,17 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models'
+  model_save_path: '/scratch/aileenluo/ptycho-vit/models'
 
 # WandB Configuration
 wandb:
-  enabled: false
+  enabled: true
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
-  dataset_name: 'eagle, cameraman, brick, grass, gravel'
-  notes: 'vit256, 43M, log-polar, regular sigmoid'
+  dataset_name: '2 s26 probes'
+  notes: 'reproduce 132 w/static sharding'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 1
+  run_num: 133

@@ -174,8 +174,8 @@ sharding_strategy = config['data'].get('sharding_strategy', 'static')
 if sharding_strategy == 'static':
     # Static sharding: Use RankShardedSubset, each rank gets fixed samples across all epochs
     if is_main_process:
-        print(f"\nUsing STATIC sharding (RankShardedSubset)", flush=True)
-        print(f"  - Each rank processes fixed samples across all epochs", flush=True)
+        print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
+        print("  - Each rank processes fixed samples across all epochs", flush=True)
 
     train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
     val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
@@ -214,8 +214,8 @@ if sharding_strategy == 'static':
 elif sharding_strategy == 'dynamic':
     # Dynamic sharding: Use DistributedSampler, each rank gets different samples each epoch (better diversity)
     if is_main_process:
-        print(f"\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
-        print(f"  - Each rank sees different samples each epoch", flush=True)
+        print("\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
+        print("  - Each rank sees different samples each epoch", flush=True)
 
     # Use the subsets directly (no RankShardedSubset wrapper)
     train_dataset = train_subset
@@ -317,7 +317,7 @@ if is_main_process:
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
-    print(f"\nDataLoader Settings:", flush=True)
+    print("\nDataLoader Settings:", flush=True)
     print(f"  num_workers: {train_dataloader_kwargs['num_workers']}", flush=True)
     print(f"  pin_memory: {train_dataloader_kwargs['pin_memory']}", flush=True)
     print(f"  train shuffle: {train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
@@ -474,7 +474,7 @@ if is_main_process and config['wandb']['enabled']:
     # Delete the copy after wandb saves it
     if os.path.exists(config_copy_path):
         os.remove(config_copy_path)
-    print(f'Uploaded config to wandb as artifact', flush=True)
+    print('Uploaded config to wandb as artifact', flush=True)
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)

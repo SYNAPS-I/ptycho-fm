@@ -202,7 +202,7 @@ def test_sharding():
     # Test 7: Verify deterministic shuffling (same seed = same indices)
     print("\nTest 7: Verify deterministic shuffling")
     train_rank0_v2 = CombinedDataset(
-        file_paths=data_source,
+        file_paths=data_dir,
         rank=0,
         world_size=world_size,
         train_split=train_split,

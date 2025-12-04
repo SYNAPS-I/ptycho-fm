@@ -1,9 +1,7 @@
 """Tests for data loading components."""
 import sys
 import tempfile
-import shutil
 from pathlib import Path
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 
@@ -11,7 +9,7 @@ from torch.utils.data import DataLoader, random_split
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data import PtychographyDataset, CombinedDataset
-from tests.test_utils import create_dummy_hdf5_pair, cleanup_test_files
+from tests.test_utils import create_dummy_hdf5_pair
 
 
 def test_ptychography_dataset():
@@ -80,7 +78,7 @@ def test_combined_dataset_basic():
         sample = combined[0]
         diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = sample
 
-        print(f"Sample 0 shapes:")
+        print("Sample 0 shapes:")
         print(f"  diff_amp: {diff_amp.shape}")
         print(f"  amp_patch: {amp_patch.shape}")
         print(f"  ph_patch: {ph_patch.shape}")

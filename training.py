@@ -80,7 +80,7 @@ class Trainer(object):
         checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
         try:
             os.path.exists(checkpoint_fname)
-        except:
+        except Exception:
             raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
         state_dict = torch.load(checkpoint_fname)
         current_epoch = state_dict['current_epoch']

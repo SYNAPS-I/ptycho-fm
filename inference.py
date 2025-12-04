@@ -164,7 +164,7 @@ def predict_and_save(model, dataloader, output_dir, prefix, img_size, device=DEV
                     print(f'  GPU memory: {torch.cuda.memory_allocated(device)/1024**3:.2f} GiB allocated, {torch.cuda.memory_reserved(device)/1024**3:.2f} GiB reserved')
 
     # Flush to ensure all data is written to disk
-    print(f'Flushing results to disk...')
+    print('Flushing results to disk...')
     pred_diff.flush()
     pred_amp.flush()
     pred_ph.flush()

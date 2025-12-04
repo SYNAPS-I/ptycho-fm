@@ -55,7 +55,7 @@ def test_model_initialization(model_type):
 
     pred_diff_amp, amp, ph = model(x, probe, normalization, scale)
 
-    print(f"✓ Forward pass successful")
+    print("✓ Forward pass successful")
     print(f"  Input shape: {x.shape}")
     print(f"  Predicted diffraction amplitude: {pred_diff_amp.shape}")
     print(f"  Amplitude: {amp.shape}")

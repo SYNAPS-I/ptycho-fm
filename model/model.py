@@ -11,7 +11,7 @@ import math
 from model.vit import CustomViT
 from model.vit_pretrained import VisionTransformer
 from model.decoders import Decoder256
-from utils.math import create_logpolar_grid, apply_logpolar_transform
+# from utils.math import create_logpolar_grid, apply_logpolar_transform
 
 
 class PtychoViT(nn.Module):
