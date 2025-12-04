@@ -33,7 +33,7 @@ def create_logpolar_grid(height, width, device='cpu'):
 
     # Compute log-polar coordinates
     rho = torch.log(torch.sqrt(x**2 + y**2) + 1e-10)
-    theta = torch.atan2(y, x)
+    _theta = torch.atan2(y, x)
 
     # Define output log-polar grid (evenly sampled in log-polar space)
     valid_rho = rho[torch.isfinite(rho)]
