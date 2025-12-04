@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import yaml
-from model import PtychoViT
-from model_cnn import PtychoCNN, PtychoCNN256
+from development_logs.model512 import PtychoViT
+from development_logs.model_cnn import PtychoCNN, PtychoCNN256
 
 
 def load_config(config_path='../config.yaml'):
@@ -55,7 +55,7 @@ def test_model_initialization(model_type):
 
     pred_diff_amp, amp, ph = model(x, probe, normalization, scale)
 
-    print(f"✓ Forward pass successful")
+    print("✓ Forward pass successful")
     print(f"  Input shape: {x.shape}")
     print(f"  Predicted diffraction amplitude: {pred_diff_amp.shape}")
     print(f"  Amplitude: {amp.shape}")

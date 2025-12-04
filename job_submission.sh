@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH -J custom_vit256_exp_7
+#SBATCH -J pretrained_vit256_exp_9
 #SBATCH -q regular
 #SBATCH -C gpu
 #SBATCH -N 63
-#SBATCH -c 16                      
+#SBATCH -c 16                     
 #SBATCH -t 00:55:00
 #SBATCH -A m5073_g
-#SBATCH -o exp7_%j.log
-#SBATCH -e exp7_%j.err
+#SBATCH -o exp9_%j.log
+#SBATCH -e exp9_%j.err
 
 # --- Modules ---
 module load pytorch/2.6.0
@@ -39,4 +39,4 @@ CFG="config.yaml"
 
 # --- Launch (128 nodes × 4 tasks/node = 512 GPUs) ---
 srun -N 63 --ntasks-per-node=4 --ntasks=252 --gpus-per-task=1 --gpu-bind=none -l -u \
-    python custom_multinode.py --config "$CFG"
+    python main.py --config "$CFG"

@@ -6,9 +6,8 @@
 # https://github.com/mdw771/ptycho_simulation_factory
 
 import numpy as np
-from numpy._core.numeric import False_
 import torch
-from torch import Tensor, bilinear
+from torch import Tensor
 from typing import Optional, Tuple, Literal
 
 def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, int]) -> Tensor:

@@ -4,10 +4,9 @@ Physics-informed Vision Transformer and CNN for Ptychography Reconstruction
 
 ## Overview
 
-This project implements physics-informed deep learning architectures for ptychographic image reconstruction. The framework supports four model variants optimized for different image sizes and computational requirements:
+This project implements physics-informed deep learning architectures for ptychographic image reconstruction. The framework supports multiple model variants optimized for different image sizes and computational requirements:
 
-- **PtychoViT** (512×512): Vision Transformer encoder with CNN decoders
-- **PtychoViT256** (256×256): Vision Transformer encoder with CNN decoders and log-polar transform
+- **PtychoViT**: Unified Vision Transformer encoder with CNN decoders (supports any image size via config)
 - **PtychoCNN** (512×512): Symmetric CNN encoder-decoder architecture
 - **PtychoCNN256** (256×256): CNN encoder-decoder with log-polar transform
 
@@ -30,7 +29,7 @@ All models combine learned representations with physics-based constraints to rec
 ```
 ptycho-vit/
 ├── vit.py                # Vision Transformer encoder
-├── model.py              # PtychoViT and PtychoViT256 models
+├── model.py              # PtychoViT model (unified ViT-based model)
 ├── model_cnn.py          # PtychoCNN and PtychoCNN256 models, Encoder/Decoder classes
 ├── ptychi_utils.py       # Image processing utilities (Fourier shift, patch extraction)
 ├── data.py               # PtychographyDataset and CombinedDataset
@@ -96,32 +95,31 @@ Select model type via `model_type`:
 
 ```yaml
 model:
-  model_type: 'vit256'  # Options: 'vit', 'cnn', 'cnn256', 'vit256'
+  encoder_type: 'custom'  # Options: 'custom' (train from scratch), 'pretrained' (use pretrained encoder)
 ```
 
-Each model type has two sections:
-- `encoder`: Encoder-specific parameters
-- `decoder`: Shared decoder config (activations hardcoded in model)
+The model configuration has two main sections:
+- `encoder`: Encoder-specific parameters (supports any image size)
+- `decoder`: Decoder configuration (independent of encoder)
 
-**Example - PtychoViT256:**
+**Example - PtychoViT (256×256):**
 ```yaml
 model:
-  model_type: 'vit256'
-  vit256:
-    encoder:
-      img_size: 256
-      patch_size: 16
-      embed_dim: 512
-      depth: 12
-      num_heads: 8
-      dropout: 0.1
-      attn_dropout: 0.0
-    decoder:
-      base_channels: 64
-      latent_dim: 512      # Must match encoder embed_dim
-      num_stages: 4        # 16×16 → 256×256
-      use_batchnorm: true
-      dropout: 0.1
+  encoder_type: 'custom'
+  encoder:
+    img_size: 256
+    patch_size: 16
+    embed_dim: 512
+    depth: 12
+    num_heads: 8
+    dropout: 0.1
+    attn_dropout: 0.0
+  decoder:
+    base_channels: 64
+    latent_dim: null      # null = auto-use encoder embed_dim
+    num_stages: 4         # Number of upsampling stages (16×16 → 256×256)
+    use_batchnorm: true
+    dropout: 0.1
 ```
 
 ### Data Configuration
@@ -166,26 +164,21 @@ training:
 
 | Model | Image Size | Parameters | Key Features |
 |-------|-----------|------------|--------------|
-| **PtychoViT** | 512×512 | ~7M | ViT encoder, global attention |
-| **PtychoViT256** | 256×256 | ~43M | ViT encoder, log-polar transform |
+| **PtychoViT** | Configurable | 7M - 50M+ | ViT encoder, flexible architecture, log-polar transform |
 | **PtychoCNN** | 512×512 | 7.5M - 30M | CNN encoder-decoder, configurable size |
 | **PtychoCNN256** | 256×256 | ~3M | CNN encoder-decoder, log-polar transform |
 
 ### Model Architecture Details
 
-#### PtychoViT (512×512)
-1. **ViT Encoder**: Processes 512×512 diffraction patterns into patch embeddings
-   - Default: 32×32 patches with 16×16 patch size
-2. **CNN Decoders**: Two symmetric decoders (amplitude/phase)
-   - 5 upsampling stages: 32×32 → 512×512
-3. **Physics Forward Model**: Enforces ptychographic physics
-
-#### PtychoViT256 (256×256)
+#### PtychoViT (Unified, Configurable)
 1. **Log-polar Transform**: Preprocesses diffraction patterns to enhance rotational features
-2. **ViT Encoder**: Processes transformed 256×256 images
-   - Default: 16×16 patches with 16×16 patch size
-3. **CNN Decoders**: 4 upsampling stages: 16×16 → 256×256
-4. **Physics Forward Model**: Same as PtychoViT
+2. **ViT Encoder**: Processes images at any resolution (configurable via `img_size` and `patch_size`)
+   - Example 256×256: 16×16 patches with patch_size=16 → 16×16 feature map
+   - Example 512×512: 32×32 patches with patch_size=16 → 32×32 feature map
+   - Supports both custom (train from scratch) and pretrained encoders
+3. **CNN Decoders**: Two symmetric decoders (amplitude/phase) with configurable stages
+   - Automatically adjusts upsampling based on encoder output size
+4. **Physics Forward Model**: Enforces ptychographic physics
 
 #### PtychoCNN (512×512)
 1. **CNN Encoder**: 5-stage encoder with progressive downsampling
@@ -316,7 +309,7 @@ python tests/test_utils.py
 ## Development
 
 ### Code Organization
-- **model.py**: ViT-based models (PtychoViT, PtychoViT256)
+- **model.py**: ViT-based model (PtychoViT - unified, supports any image size)
 - **model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
 - **ptychi_utils.py**: Image processing utilities adapted from pty-chi
 - **data.py**: Dataset classes for loading Ptychodus format files

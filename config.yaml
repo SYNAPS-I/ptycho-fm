@@ -2,135 +2,94 @@
 
 # Data Configuration
 data:
-  # Option 1: Specify a list of specific files to use
-  #datafiles:
-  #   - '/path/to/file1_dp.hdf5'
-  #   - '/path/to/file2_dp.hdf5'
-
-  # Option 2: Specify a directory - will auto-discover all paired files
-  # (comment out 'datafiles' above and uncomment this to use)
-  # data_path: '/global/cfs/cdirs/m5073/synaps_data/simulated_data'
-  data_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata'
-  # data_path: '/global/cfs/cdirs/m5073/pecomyint/data'
+  # Directory path - will auto-discover all paired *_dp.hdf5 and *_para.hdf5 files
+  data_path: '/scratch/aileenluo/ptycho-vit/data'
+  test_path: '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/scan807/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: '/global/cfs/cdirs/m5073/pecomyint/aileendata/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  # normalization_dict_path: null  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  normalization_dict_path: '/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  test_normalization: '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl' 
+
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
+  max_probe_modes: 8  # Maximum number of probe modes to pad to
+
+  # Distributed data loading strategy:
+  sharding_strategy: 'static'  # Options: 'static' or 'dynamic'
 
   # DataLoader Configuration
-  # Phase 3: Multi-worker prefetching with persistent handles
-  # With persistent HDF5 handles and increased cache size, we can now use workers
-  # Reduced to 2 workers to match system recommendation and reduce contention
-  num_workers: 4  # System recommends max 1, using 2 to balance performance vs contention
-  prefetch_factor: 4  # Increased from 2 to 4 to prefetch more batches ahead (2 workers × 4 = 8 batches prefetched)
+  num_workers: 2 
+  prefetch_factor: 4  
   pin_memory: true  # Required for CUDAPrefetcher async transfer
   persistent_workers: true  # Keep workers alive across epochs
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 16  # Keep at 16 to avoid OOM - the bottleneck is data loading, not batch size
-  learning_rate: 5.0e-4
-  epochs: 201  # Total epochs to train for (not additional epochs when resuming)
-  ngpus: 2
-  loss_function: 'l1'  # Options: smooth_l1, mse, l1, poisson_nll
+  batch_size: 128  
+  learning_rate: 1.0e-4
+  epochs: 161  # Total epochs to train for (not additional epochs when resuming)
+  loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
+
+  # Weighted loss configuration (only used when loss_function: 'weighted')
+  weighted_loss:
+    loss_type: 'mse'  # Options: 'mse', 'mae'
+    threshold: 0.0    # Pixels below this value are ignored
+    alpha: 1.0        # Weight exponent (alpha=1 → inverse weighting (1/intensity), alpha=0 → uniform weighting)
+
   validation_plot_freq: 10  # Plot validation results every N epochs
+  test_plot_freq: 20 # Plot stitched test results every M epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
 
 # Model Architecture
+# All models are fixed at 256x256 image size
 model:
-  # Model type selection: 'vit', 'cnn', 'cnn256', or 'vit256'
-  model_type: 'vit256'  # Options: 'vit' (ViT for 512x512), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256), 'vit256' (ViT with CNN decoders for 256x256)
+  # Encoder type selection: 'custom' (train from scratch) or 'pretrained' (use pretrained encoder)
+  encoder_type: 'custom'  # Options: 'custom', 'pretrained'
 
-  # ViT Model Configuration for 512x512 images (used when model_type='vit')
-  vit:
-    encoder:
-      img_size: 512
-      patch_size: 16
-      in_channels: 1
-      embed_dim: 192
-      depth: 12
-      num_heads: 3
-      mlp_ratio: 4.0
-      use_cls_token: false
-      dropout: 0.1
-      attn_dropout: 0.0
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 192     # Must match encoder embed_dim
-      num_stages: 5       # 32x32 -> 512x512
-      use_batchnorm: true
-      dropout: 0.0
+  # Encoder Configuration
+  encoder:
+    img_size: 256
+    patch_size: 16
+    in_channels: 1
+    embed_dim: 512
+    depth: 12
+    num_heads: 8
+    mlp_ratio: 4.0
+    use_cls_token: false
+    dropout: 0.1
+    attn_dropout: 0.0
+    # Additional options for pretrained encoder (only used when encoder_type: 'pretrained')
+    # timm_model_name: 'vit_large_patch32_224' 
+    # timm_kwargs: 
+      # 'pretrained': false     
+      # checkpoint_path: null 
+      # checkpoint_kwargs:                  
+        # strict: true                     
 
-  # CNN Model Configuration for 512x512 images (used when model_type='cnn')
-  cnn:
-    encoder:
-      in_channels: 1
-      base_channels: 32
-      latent_dim: 256
-      num_stages: 5       # 512 -> 16
-      use_batchnorm: true
-      dropout: 0.1
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 32
-      latent_dim: 256
-      num_stages: 5
-      use_batchnorm: true
-      dropout: 0.1
-
-  # CNN Model Configuration for 256x256 images (used when model_type='cnn256')
-  cnn256:
-    encoder:
-      in_channels: 1
-      base_channels: 64
-      latent_dim: 1024
-      num_stages: 5       # 256 -> 8
-      use_batchnorm: true
-      dropout: 0.1
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 1024
-      num_stages: 5
-      use_batchnorm: true
-      dropout: 0.1
-
-  # ViT with CNN Decoders for 256x256 images (used when model_type='vit256')
-  vit256:
-    encoder:
-      img_size: 256
-      patch_size: 16
-      in_channels: 1
-      embed_dim: 512
-      depth: 12
-      num_heads: 8
-      mlp_ratio: 4.0
-      use_cls_token: false
-      dropout: 0.1
-      attn_dropout: 0.0
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 512     # Must match encoder embed_dim
-      num_stages: 4       # 16x16 -> 256x256
-      use_batchnorm: true
-      dropout: 0.1
+  # Decoder Configuration (independent of encoder type)
+  decoder:
+    base_channels: 64
+    latent_dim: null    # If null, automatically uses encoder.embed_dim
+    num_stages: 4       # Number of upsampling stages (depends on patch_size)
+    use_batchnorm: true
+    dropout: 0.1
 
 # Paths
 paths:
-  model_save_path: '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models'
+  model_save_path: '/scratch/aileenluo/ptycho-vit/models'
 
 # WandB Configuration
 wandb:
-  enabled: false
+  enabled: true
   entity: 'SYNAPS-I'
   project: 'PtychoViT'
-  dataset_name: 'eagle, cameraman, brick, grass, gravel'
-  notes: 'vit256, 43M, log-polar, regular sigmoid'
+  dataset_name: '2 s26 probes'
+  notes: 'reproduce 132 w/static sharding'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 1
+  run_num: 133

@@ -1,23 +1,14 @@
 import os
-# CUDA_VISIBLE_DEVICES should be set by SLURM or environment, not hardcoded
-# Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import yaml
 
 from data import PtychographyDataset
-from model import PtychoViT, PtychoViT256
-from model_cnn import PtychoCNN, PtychoCNN256
+from model.model import PtychoViT
+from development_logs.model512 import PtychoViT as PtychoViT512
+from development_logs.model_cnn import PtychoCNN, PtychoCNN256
 
-# ============================================================================
-# CONFIGURATION: Set your own paths here
-# ============================================================================
-# config_path: Path to the config.yaml file saved with your trained model
-#              This should be in: /global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run<run_num>/config.yaml
-# test_data_path: Path to the test data file (*_dp.hdf5 format)
-#                 Example: '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
-# ============================================================================
 config_path = '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run1/config.yaml'
 test_data_path = '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
 
@@ -33,21 +24,20 @@ config = load_config(config_path)
 test_dataset = PtychographyDataset(
     test_data_path,
     config['data']['scale'],
-    config['data'].get('normalization_dict_path'),
-    apply_noise=True
+    '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl',
+    #config['data'].get('normalization_dict_path'),
+    apply_noise=True # Set to False for experimental data!
 )
 
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 dataloader_kwargs = {
     'batch_size': BATCH_SIZE,
-    'num_workers': config['data'].get('num_workers', 0),
-    'pin_memory': config['data'].get('pin_memory', True),
+    'num_workers': 0,  # Must be 0 for inference with memory-mapped arrays to avoid bus errors
+    'pin_memory': False,  # Disable pin_memory to reduce memory pressure
 }
 
-# Add prefetch_factor and persistent_workers only if num_workers > 0
-if dataloader_kwargs['num_workers'] > 0:
-    dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-    dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+# Note: num_workers is forced to 0 for inference because memory-mapped arrays
+# created in the main process cannot be safely accessed from DataLoader worker processes
 
 test_loader = DataLoader(
     test_dataset,
@@ -59,7 +49,12 @@ test_loader = DataLoader(
 print('Loading model')
 model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
 if model_type == 'vit':
-    model = PtychoViT(config=config['model']['vit'])
+    # New unified PtychoViT model 
+    model = PtychoViT(config=config['model'])
+    img_size = config['model']['encoder']['img_size']
+elif model_type == 'vit512':
+    # Legacy 512x512 model from development_logs
+    model = PtychoViT512(config=config['model']['vit'])
     img_size = config['model']['vit']['encoder']['img_size']
 elif model_type == 'cnn':
     model = PtychoCNN(config=config['model']['cnn'])
@@ -67,16 +62,22 @@ elif model_type == 'cnn':
 elif model_type == 'cnn256':
     model = PtychoCNN256(config=config['model']['cnn256'])
     img_size = 256  # CNN256 models are fixed at 256x256
-elif model_type == 'vit256':
-    model = PtychoViT256(config=config['model']['vit256'])
-    img_size = 256  # ViT256 models are fixed at 256x256
 else:
-    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', 'cnn256', or 'vit256'")
+    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'vit512', 'cnn', or 'cnn256'")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Clear any cached memory before loading model
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    print(f'GPU memory before loading model: {torch.cuda.memory_allocated()/1024**3:.2f} GiB allocated, {torch.cuda.memory_reserved()/1024**3:.2f} GiB reserved')
+
 run_path = os.path.join(config['paths']['model_save_path'], 'run' + str(config['trainer']['run_num']))
-model.load_state_dict(torch.load(os.path.join(run_path, 'best_model.pth')))
+model.load_state_dict(torch.load(os.path.join(run_path, 'best_model.pth'), map_location=DEVICE, weights_only=True))
 print('Model loaded successfully')
+
+if torch.cuda.is_available():
+    print(f'GPU memory after loading model: {torch.cuda.memory_allocated()/1024**3:.2f} GiB allocated, {torch.cuda.memory_reserved()/1024**3:.2f} GiB reserved')
 
 # Make predictions and save directly to disk
 def predict_and_save(model, dataloader, output_dir, prefix, img_size, device=DEVICE):
@@ -147,13 +148,23 @@ def predict_and_save(model, dataloader, output_dir, prefix, img_size, device=DEV
             gt_amp[sample_idx:sample_idx+batch_size] = amp_patch.squeeze().detach().numpy()
             gt_ph[sample_idx:sample_idx+batch_size] = ph_patch.squeeze().detach().numpy()
 
+            # Explicitly delete tensors and clear cache to prevent memory buildup
+            del input_diff, input_probe, input_norm, input_scale
+            del output_diff, output_amp, output_ph
+            del diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale
+
+            if device.type == 'cuda' and i % 10 == 0:
+                torch.cuda.empty_cache()
+
             sample_idx += batch_size
 
-            if i % 50 == 0:
+            if i % 10 == 0:
                 print(f'Processed batch {i}/{len(dataloader)} ({sample_idx}/{total_samples} samples)')
+                if device.type == 'cuda':
+                    print(f'  GPU memory: {torch.cuda.memory_allocated(device)/1024**3:.2f} GiB allocated, {torch.cuda.memory_reserved(device)/1024**3:.2f} GiB reserved')
 
     # Flush to ensure all data is written to disk
-    print(f'Flushing results to disk...')
+    print('Flushing results to disk...')
     pred_diff.flush()
     pred_amp.flush()
     pred_ph.flush()
@@ -172,4 +183,4 @@ if not os.path.isdir(results_run):
     os.mkdir(results_run)
 
 print('Running inference on test set...')
-predict_and_save(model, test_loader, results_run, 'brick', img_size)
+predict_and_save(model, test_loader, results_run, 'scan807', img_size)

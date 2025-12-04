@@ -1,6 +1,4 @@
 import os
-# CUDA_VISIBLE_DEVICES should be set by SLURM or environment, not hardcoded
-# Uncomment and set if needed for local testing: os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
 import argparse
 import numpy as np
 import torch
@@ -11,12 +9,13 @@ from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
 import pickle
 import yaml
+import socket
 
-from data import CombinedDataset, RankShardedSubset
-from model import PtychoViT, PtychoViT256
-from model_cnn import PtychoCNN, PtychoCNN256
+from data import PtychographyDataset, CombinedDataset, RankShardedSubset
+from model.model import PtychoViT
+from custom_loss import WeightedLoss
 from training import Trainer
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, DistributedSampler
 from prefetcher import CUDAPrefetcher
 
 import wandb
@@ -36,7 +35,6 @@ DEBUG_MODE = args.debug
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
-# Based on multinode.py approach
 # ────────────────────────────────────────────────────────────────────────────────
 def ensure_env_from_slurm():
     """Populate torchrun-style env vars from SLURM if missing."""
@@ -93,7 +91,12 @@ def init_distributed():
     # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
     if torch.cuda.is_available():
         nvis = torch.cuda.device_count()
-        mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
+        # For single-process (world_size=1), always use GPU 0
+        # For distributed training, map local_rank to available GPUs
+        if world_size == 1:
+            mapped_local = 0
+        else:
+            mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
         torch.cuda.set_device(mapped_local)
         device = torch.device(f"cuda:{mapped_local}")
         os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
@@ -103,54 +106,53 @@ def init_distributed():
 
     return rank_env, world_size, mapped_local, device
 
+def cleanup_distributed():
+    if dist.is_available() and dist.is_initialized():
+        try:
+            dist.barrier()
+        except Exception:
+            pass
+        dist.destroy_process_group()
+
 # Load configuration
 config = load_config()
 
 # Training parameters
 MODE = config['training']['mode']
-NGPUS = config['training']['ngpus']
 BATCH_SIZE = config['training']['batch_size']
 LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 
-# Initialize distributed training (if using multiple GPUs)
-# Use the robust multinode.py approach for proper device mapping
-if NGPUS > 1:
-    rank, world_size, local_rank, DEVICE = init_distributed()
-    is_main_process = rank == 0
-    
-    # Keep this print for all ranks - useful for debugging distributed setup
-    print(f"Rank: {rank}, Local Rank: {local_rank}, CUDA Device: {DEVICE}, World Size: {world_size}", flush=True)
-else:
-    rank = 0
-    world_size = 1
-    local_rank = 0
-    is_main_process = True
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ────────────────────────────────────────────────────────────────────────────────
+# Distributed init (Code A style)
+# ────────────────────────────────────────────────────────────────────────────────
+rank, world_size, local_rank, DEVICE = init_distributed()
+is_main_process = rank == 0
+print(
+    f"[{socket.gethostname()}] WORLD_SIZE={world_size} RANK={rank} "
+    f"LOCAL_RANK={local_rank} device={DEVICE}",
+    flush=True,
+)
 
-# Create full dataset with rank-based sharding, then split using random_split
-# Support both 'datafiles' (list) and 'data_path' (directory)
-if 'datafiles' in config['data'] and config['data']['datafiles'] is not None:
-    data_source = config['data']['datafiles']
-elif 'data_path' in config['data']:
-    data_source = config['data']['data_path']
-else:
-    raise ValueError("Config must specify either 'datafiles' (list) or 'data_path' (directory)")
+# ────────────────────────────────────────────────────────────────────────────────
+# Dataset & Dataloaders
+# ────────────────────────────────────────────────────────────────────────────────
+if 'data_path' not in config['data']:
+    raise ValueError("Config must specify 'data_path' (directory containing paired HDF5 files)")
 
-# Create full dataset once (single source of truth)
-# This builds the global index map one time, avoiding duplicate file scanning
+data_dir = config['data']['data_path']
+
+# Create full dataset with sequential indices
+# Shuffling is handled by random_split with a deterministic seed
 full_dataset = CombinedDataset(
-    file_paths=data_source,
+    file_paths=data_dir,
     rank=rank,
     world_size=world_size,
-    train_split=config['data']['train_split'],  # Used for size calculation only
-    shuffle=True,  # Shuffle global indices
-    random_seed=config['data']['random_seed'],
-    mode=None,  # Full dataset, no train/val split
     scale=config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path'),
     apply_noise=True,
+    max_probe_modes=config['data'].get('max_probe_modes', 8),
     debug=DEBUG_MODE
 )
 
@@ -164,41 +166,113 @@ val_size = total_size - train_size
 generator = torch.Generator().manual_seed(config['data']['random_seed'])
 train_subset, val_subset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
-# Apply rank sharding to each split
-# This ensures each rank processes different data for both training and validation
-train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
-val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
+# ────────────────────────────────────────────────────────────────────────────────
+# Distributed Data Loading Strategy
+# ────────────────────────────────────────────────────────────────────────────────
+sharding_strategy = config['data'].get('sharding_strategy', 'static')
 
-# Create DataLoaders
-# Rank sharding is handled by RankShardedSubset wrapper
-# Per-epoch local shuffling is handled by DataLoader's shuffle parameter
-train_dataloader_kwargs = {
-    'batch_size': BATCH_SIZE,
-    'num_workers': config['data'].get('num_workers', 0),
-    'pin_memory': config['data'].get('pin_memory', True),
-    'shuffle': True,  # Per-epoch local shuffling within each rank's shard
-}
+if sharding_strategy == 'static':
+    # Static sharding: Use RankShardedSubset, each rank gets fixed samples across all epochs
+    if is_main_process:
+        print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
+        print("  - Each rank processes fixed samples across all epochs", flush=True)
 
-val_dataloader_kwargs = {
-    'batch_size': BATCH_SIZE,
-    'num_workers': config['data'].get('num_workers', 0),
-    'pin_memory': config['data'].get('pin_memory', True),
-    'shuffle': False,  # No shuffling for validation
-}
+    train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
+    val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
 
-# Add prefetch_factor and persistent_workers only if num_workers > 0
-if train_dataloader_kwargs['num_workers'] > 0:
-    train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-    train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+    # Base DataLoader kwargs
+    train_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'shuffle': True,  # Per-epoch local shuffling within each rank's shard
+    }
 
-if val_dataloader_kwargs['num_workers'] > 0:
-    val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-    val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+    val_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'shuffle': False,
+    }
 
-train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+    # Add prefetch settings if using workers
+    if train_dataloader_kwargs['num_workers'] > 0:
+        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
 
-# Wrap loaders with CUDAPrefetcher for async data transfer (Phase 3)
+    if val_dataloader_kwargs['num_workers'] > 0:
+        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+
+    # No samplers needed - set to None for later reference
+    train_sampler = None
+    val_sampler = None
+
+elif sharding_strategy == 'dynamic':
+    # Dynamic sharding: Use DistributedSampler, each rank gets different samples each epoch (better diversity)
+    if is_main_process:
+        print("\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
+        print("  - Each rank sees different samples each epoch", flush=True)
+
+    # Use the subsets directly (no RankShardedSubset wrapper)
+    train_dataset = train_subset
+    val_dataset = val_subset
+
+    # Create DistributedSamplers
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,  # Global shuffle + dynamic sharding
+        seed=config['data']['random_seed'],
+        drop_last=False
+    )
+
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,  # No shuffle for validation
+        seed=config['data']['random_seed'],
+        drop_last=False
+    )
+
+    # Base DataLoader kwargs (NO shuffle when using sampler!)
+    train_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'sampler': train_sampler,  # Sampler handles sharding and shuffling
+        'shuffle': False,  # MUST be False when sampler is provided
+    }
+
+    val_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'sampler': val_sampler,
+        'shuffle': False,
+    }
+
+    # Add prefetch settings if using workers
+    if train_dataloader_kwargs['num_workers'] > 0:
+        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    if val_dataloader_kwargs['num_workers'] > 0:
+        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+
+else:
+    raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
+
+# Wrap loaders with CUDAPrefetcher for async data transfer
 # Only use prefetcher if CUDA is available
 if torch.cuda.is_available():
     train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
@@ -208,6 +282,27 @@ else:
     train_prefetcher = train_loader
     val_prefetcher = val_loader
 
+# Create test dataset and loader only on main process
+if is_main_process:
+    test_dataset = PtychographyDataset(
+        file_path=config['data']['test_path'],
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('test_normalization'),
+        apply_noise=False  # Don't add noise to test data
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=config['data'].get('num_workers', 0),
+        pin_memory=config['data'].get('pin_memory', True)
+    )
+
+    print(f"Test dataset: {len(test_dataset)} patterns", flush=True)
+else:
+    test_loader = None
+
 # Print configuration only on main process
 if is_main_process:
     print("=" * 50, flush=True)
@@ -215,17 +310,14 @@ if is_main_process:
     print("=" * 50, flush=True)
     print(f"Mode: {MODE}")
     print(f"Batch size: {BATCH_SIZE} | Learning rate: {LR}", flush=True)
-    print(f"Epochs: {EPOCHS} | GPUs: {NGPUS}", flush=True)
+    print(f"Epochs: {EPOCHS} | World Size (GPUs): {world_size}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
-    if isinstance(data_source, list):
-        print(f"Data source: List of {len(data_source)} file(s)", flush=True)
-    else:
-        print(f"Data source: {data_source}", flush=True)
-    print(f"Number of files: {len(full_dataset.file_paths)}", flush=True)
+    print(f"Data directory: {data_dir}", flush=True)
+    print(f"Number of paired files: {len(full_dataset.file_paths)}", flush=True)
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
-    print(f"\nDataLoader Settings:", flush=True)
+    print("\nDataLoader Settings:", flush=True)
     print(f"  num_workers: {train_dataloader_kwargs['num_workers']}", flush=True)
     print(f"  pin_memory: {train_dataloader_kwargs['pin_memory']}", flush=True)
     print(f"  train shuffle: {train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
@@ -238,25 +330,17 @@ if is_main_process:
     print(f"Model save path: {MODEL_SAVE_PATH}", flush=True)
     print("=" * 50, flush=True)
 
-# Model setup with config
-model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
-if model_type == 'vit':
-    model = PtychoViT(config=config['model']['vit'])
-    img_size = config['model']['vit']['encoder']['img_size']
-elif model_type == 'cnn':
-    model = PtychoCNN(config=config['model']['cnn'])
-    img_size = 512  # CNN models are fixed at 512x512
-elif model_type == 'cnn256':
-    model = PtychoCNN256(config=config['model']['cnn256'])
-    img_size = 256  # CNN256 models are fixed at 256x256
-elif model_type == 'vit256':
-    model = PtychoViT256(config=config['model']['vit256'])
-    img_size = 256  # ViT256 models are fixed at 256x256
-else:
-    raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'cnn', 'cnn256', or 'vit256'")
+# ────────────────────────────────────────────────────────────────────────────────
+# Model setup - All models are 256x256
+# ────────────────────────────────────────────────────────────────────────────────
+img_size = 256
+
+# Use unified PtychoViT model with encoder_type selection
+model = PtychoViT(config=config['model'])
 
 if is_main_process:
-    print(f"Using model type: {model_type.upper()}", flush=True)
+    encoder_type = config['model'].get('encoder_type', 'custom')
+    print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
     dummy_data = torch.randn((1, 1, img_size, img_size))
     dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
     summary(model, input_data={'x': dummy_data, 'probe': dummy_probe,
@@ -264,7 +348,7 @@ if is_main_process:
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
-if NGPUS > 1:
+if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
     if "CUDA_VISIBLE_DEVICES" in os.environ:
@@ -273,9 +357,11 @@ if NGPUS > 1:
     else:
         # For torchrun or other launchers, explicitly specify device
         dev_index = torch.cuda.current_device()
-        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False)
+        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
 
-# Loss and optimizer
+# ────────────────────────────────────────────────────────────────────────────────
+# Loss, optimizer, metrics, trainer
+# ────────────────────────────────────────────────────────────────────────────────
 if config['training']['loss_function'] == 'smooth_l1':
     criterion = nn.SmoothL1Loss()
 elif config['training']['loss_function'] == 'mse':
@@ -284,6 +370,9 @@ elif config['training']['loss_function'] == 'l1':
     criterion = nn.L1Loss()
 elif config['training']['loss_function'] == 'poisson_nll':
     criterion = nn.PoissonNLLLoss(log_input=False, full=False)
+elif config['training']['loss_function'] == 'weighted':
+    weighted_loss_config = config['training']['weighted_loss']
+    criterion = WeightedLoss(loss_type=weighted_loss_config['loss_type'], threshold=weighted_loss_config['threshold'], alpha=weighted_loss_config['alpha'])
 else:
     raise ValueError(f"Unknown loss function: {config['training']['loss_function']}")
 
@@ -303,11 +392,13 @@ trainer = Trainer(
     DEVICE,
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
-    use_ddp=(NGPUS > 1),
+    use_ddp=(world_size > 1),
     wandb_enabled=config['wandb']['enabled']
 )
 
+# ────────────────────────────────────────────────────────────────────────────────
 # Resume from checkpoint if requested
+# ────────────────────────────────────────────────────────────────────────────────
 if config['training'].get('resume_from_checkpoint', False):
     if is_main_process:
         print('\nResuming from checkpoint...', flush=True)
@@ -317,7 +408,7 @@ if config['training'].get('resume_from_checkpoint', False):
     model_checkpoint = os.path.join(checkpoint_path, 'checkpoint_model.pth')
 
     if os.path.exists(model_checkpoint):
-        if NGPUS > 1:
+        if world_size > 1:
             model.module.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
         else:
             model.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
@@ -341,7 +432,9 @@ if config['training'].get('resume_from_checkpoint', False):
     else:
         raise FileNotFoundError(f"Checkpoint not found at {model_checkpoint}")
 
+# ────────────────────────────────────────────────────────────────────────────────
 # Initialize wandb only on main process
+# ────────────────────────────────────────────────────────────────────────────────
 if is_main_process and config['wandb']['enabled']:
     wandb.login()
     if wandb_run_id is not None:
@@ -364,7 +457,7 @@ if is_main_process and config['wandb']['enabled']:
                 "dataset": config['wandb']['dataset_name'],
                 "epochs": EPOCHS,
                 "notes": config['wandb']['notes'],
-                "model_type": model_type,
+                "encoder_type": config['model'].get('encoder_type', 'custom'),
                 "model_config": config['model']
             }
         )
@@ -381,73 +474,90 @@ if is_main_process and config['wandb']['enabled']:
     # Delete the copy after wandb saves it
     if os.path.exists(config_copy_path):
         os.remove(config_copy_path)
-    print(f'Uploaded config to wandb as artifact', flush=True)
+    print('Uploaded config to wandb as artifact', flush=True)
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
 
-for epoch in range(start_epoch, EPOCHS):
-    # Save config to run path at epoch 0
-    if epoch == 0 and is_main_process:
-        trainer.save_config('config.yaml')
-        print('Saved config to run path', flush=True)
+# ────────────────────────────────────────────────────────────────────────────────
+# Train / Validate
+# ────────────────────────────────────────────────────────────────────────────────
+try:
+    for epoch in range(start_epoch, EPOCHS):
+        # Set epoch for DistributedSampler (dynamic sharding only)
+        if sharding_strategy == 'dynamic' and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+            val_sampler.set_epoch(epoch)
 
-    # Log epoch start with timestamp
-    if is_main_process:
-        from datetime import datetime
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
-    
-    # Debug logging for first epoch
-    if DEBUG_MODE and epoch < 3:
-        # Select ranks to debug (rank 0, rank 1, and middle rank)
-        debug_ranks = [0]
-        if world_size > 1:
-            debug_ranks.append(1)
-        if world_size > 2:
-            debug_ranks.append(world_size // 2)
+        # Save config to run path at epoch 0
+        if epoch == 0 and is_main_process:
+            trainer.save_config('config.yaml')
+            print('Saved config to run path', flush=True)
+
+        # Log epoch start with timestamp
+        if is_main_process:
+            from datetime import datetime
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
         
-        if rank in debug_ranks:
-            print(f"[DEBUG Rank {rank}] ========== Epoch {epoch + 1} Debug Mode Active ==========", flush=True)
-            print(f"[DEBUG Rank {rank}] Will log first 15 data accesses (covers first ~3-5 batches)", flush=True)
-            print(f"[DEBUG Rank {rank}] Training DataLoader: shuffle={train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
-            print(f"[DEBUG Rank {rank}] Validation DataLoader: shuffle={val_dataloader_kwargs['shuffle']}", flush=True)
-            # Reset debug counters for new epoch (RankShardedSubset has debug_call_count)
-            if hasattr(train_dataset, 'debug_call_count'):
-                train_dataset.debug_call_count = 0
-            if hasattr(val_dataset, 'debug_call_count'):
-                val_dataset.debug_call_count = 0
-            # Also reset the underlying CombinedDataset debug counter
-            if hasattr(full_dataset, 'debug_call_count'):
-                full_dataset.debug_call_count = 0
+        # Debug logging for first epoch
+        if DEBUG_MODE and epoch < 3:
+            # Select ranks to debug (rank 0, rank 1, and middle rank)
+            debug_ranks = [0]
+            if world_size > 1:
+                debug_ranks.append(1)
+            if world_size > 2:
+                debug_ranks.append(world_size // 2)
+            
+            if rank in debug_ranks:
+                print(f"[DEBUG Rank {rank}] ========== Epoch {epoch + 1} Debug Mode Active ==========", flush=True)
+                print(f"[DEBUG Rank {rank}] Will log first 15 data accesses (covers first ~3-5 batches)", flush=True)
+                print(f"[DEBUG Rank {rank}] Training DataLoader: shuffle={train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
+                print(f"[DEBUG Rank {rank}] Validation DataLoader: shuffle={val_dataloader_kwargs['shuffle']}", flush=True)
+                # Reset debug counters for new epoch (RankShardedSubset has debug_call_count)
+                if hasattr(train_dataset, 'debug_call_count'):
+                    train_dataset.debug_call_count = 0
+                if hasattr(val_dataset, 'debug_call_count'):
+                    val_dataset.debug_call_count = 0
+                # Also reset the underlying CombinedDataset debug counter
+                if hasattr(full_dataset, 'debug_call_count'):
+                    full_dataset.debug_call_count = 0
 
-    # Training loop
-    model.train()
-    trainer.train(train_prefetcher, criterion, optimizer, metrics)
+        # Training loop
+        model.train()
+        trainer.train(train_prefetcher, criterion, optimizer, metrics)
 
-    # Validation loop
-    model.eval()
-    plot = (epoch % config['training']['validation_plot_freq'] == 0)
-    
-    # Debug logging for validation in first epoch
-    if DEBUG_MODE and epoch == 0:
-        debug_ranks = [0]
-        if world_size > 1:
-            debug_ranks.append(1)
-        if world_size > 2:
-            debug_ranks.append(world_size // 2)
-        if rank in debug_ranks:
-            print(f"[DEBUG Rank {rank}] ========== Starting Validation (Epoch {epoch + 1}) ==========", flush=True)
-            if hasattr(val_dataset, 'debug_call_count'):
-                val_dataset.debug_call_count = 0  # Reset counter for validation
-    
-    trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
+        # Validation loop
+        model.eval()
+        plot = (epoch % config['training']['validation_plot_freq'] == 0)
+        
+        # Debug logging for validation in first epoch
+        if DEBUG_MODE and epoch == 0:
+            debug_ranks = [0]
+            if world_size > 1:
+                debug_ranks.append(1)
+            if world_size > 2:
+                debug_ranks.append(world_size // 2)
+            if rank in debug_ranks:
+                print(f"[DEBUG Rank {rank}] ========== Starting Validation (Epoch {epoch + 1}) ==========", flush=True)
+                if hasattr(val_dataset, 'debug_call_count'):
+                    val_dataset.debug_call_count = 0  # Reset counter for validation
+        
+        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
 
-    if is_main_process:
-        from datetime import datetime
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
+        # Generate test plot only on main process
+        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
+            trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
 
+        if is_main_process:
+            from datetime import datetime
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
+finally:
+    cleanup_distributed()
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Save final checkpoint only on main process
+# ────────────────────────────────────────────────────────────────────────────────
 if is_main_process:
     trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))

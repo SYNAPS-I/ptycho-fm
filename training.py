@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 
+from utils.ptychi_utils import place_patches_fourier_shift
+
 import wandb
 
 class Trainer(object):
@@ -78,7 +80,7 @@ class Trainer(object):
         checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
         try:
             os.path.exists(checkpoint_fname)
-        except:
+        except Exception:
             raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
         state_dict = torch.load(checkpoint_fname)
         current_epoch = state_dict['current_epoch']
@@ -133,6 +135,130 @@ class Trainer(object):
         if not os.path.isdir(run_path):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
+
+    def generate_test_plot(self, dataloader, epoch, filename):
+        total_scan_points = len(dataloader.dataset)
+        # Note: don't use this with very large datasets, use the inference script for those instead
+        pred_amp = torch.zeros((total_scan_points, dataloader.dataset.pattern_shape[0], dataloader.dataset.pattern_shape[1]), device='cpu')
+        pred_ph = torch.zeros(pred_amp.shape, device='cpu')
+        gt_amp = torch.zeros(pred_amp.shape, device='cpu')
+        gt_ph = torch.zeros(pred_amp.shape, device='cpu')
+        scan_idx = 0
+        with torch.no_grad():
+            for i, batch in enumerate(dataloader):
+                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+                batch_size = diff_amp.size(0)
+
+                input_diff = diff_amp.to(self.device)
+                input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
+                input_norm = norm.to(self.device)
+                input_scale = scale.to(self.device)
+
+                _output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                pred_amp[scan_idx:scan_idx+batch_size] = output_amp.squeeze().detach().cpu()
+                pred_ph[scan_idx:scan_idx+batch_size] = output_ph.squeeze().detach().cpu()
+                gt_amp[scan_idx:scan_idx+batch_size] = amp_patch.squeeze().detach().cpu()
+                gt_ph[scan_idx:scan_idx+batch_size] = ph_patch.squeeze().detach().cpu()
+
+                scan_idx += batch_size
+
+        # Stitch the patches together into an object
+        # Ensure cache is populated (in case no batches were processed)
+        if dataloader.dataset._cached_probe_positions is None:
+            dataloader.dataset._cache_positions()
+            dataloader.dataset._cache_object_data()
+
+        object_size = dataloader.dataset.object_shape
+        positions = dataloader.dataset._cached_probe_positions
+        pred_amp_object = torch.zeros(object_size, device='cpu')
+        pred_ph_object = torch.zeros(object_size, device='cpu')
+        buffer = torch.zeros(object_size, device='cpu')
+        pred_amp_object = place_patches_fourier_shift(
+            pred_amp_object,
+            positions,
+            pred_amp[:, 64:-64, 64:-64], # Slice only the center 128 x 128 portion of each patch
+            op="add", 
+            adjoint_mode=False,
+            pad=32 # Crop 32 pixels from each edge to remove ripple artifacts from Fourier shifting
+        )
+        pred_ph_object = place_patches_fourier_shift(
+            pred_ph_object,
+            positions,
+            pred_ph[:, 64:-64, 64:-64],
+            op="add", 
+            adjoint_mode=False,
+            pad=32
+        )
+        buffer = place_patches_fourier_shift(
+            buffer,
+            positions,
+            torch.ones_like(pred_ph[:, 64:-64, 64:-64]),
+            op="add",
+            adjoint_mode=False,
+            pad=32
+        )
+        gt_amp_object = torch.zeros(object_size, device='cpu')
+        gt_ph_object = torch.zeros(object_size, device='cpu')
+        gt_amp_object = place_patches_fourier_shift(
+            gt_amp_object,
+            positions,
+            gt_amp[:, 64:-64, 64:-64],
+            op="add", 
+            adjoint_mode=False,
+            pad=32
+        )
+        gt_ph_object = place_patches_fourier_shift(
+            gt_ph_object,
+            positions,
+            gt_ph[:, 64:-64, 64:-64], 
+            op="add", 
+            adjoint_mode=False,
+            pad=32
+        )
+        # Normalize by the occupancy
+        pred_amp_object = pred_amp_object / torch.clip(buffer, min=1)
+        pred_ph_object = pred_ph_object / torch.clip(buffer, min=1)
+        gt_amp_object = gt_amp_object / torch.clip(buffer, min=1)
+        gt_ph_object = gt_ph_object / torch.clip(buffer, min=1)
+        
+        # Make the plot
+        vmin_ph = torch.mean(pred_ph_object[180:-180, 180:-180]) - (2 * torch.std(pred_ph_object[180:-180, 180:-180]))
+        vmax_ph = torch.mean(pred_ph_object[180:-180, 180:-180]) + (2 * torch.std(pred_ph_object[180:-180, 180:-180]))
+        f, ax = plt.subplots(figsize=(9, 8), ncols=2, nrows=2)
+        gt0 = ax[0, 0].imshow(gt_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        divider = make_axes_locatable(ax[0, 0])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        f.colorbar(gt0, cax=cax, orientation='vertical')
+        ax[0, 0].set_title('LSQML amplitude')
+
+        gt1 = ax[0, 1].imshow(gt_ph_object[180:-180, 180:-180], interpolation='none', vmin=-1.3, vmax=1.3, cmap='magma')
+        divider = make_axes_locatable(ax[0, 1])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        f.colorbar(gt1, cax=cax, orientation='vertical')
+        ax[0, 1].set_title('LSQML phase')
+
+        pred0 = ax[1, 0].imshow(pred_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        divider = make_axes_locatable(ax[1, 0])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        f.colorbar(pred0, cax=cax, orientation='vertical')
+        ax[1, 0].set_title('Predicted amplitude')
+
+        pred1 = ax[1, 1].imshow(pred_ph_object[180:-180, 180:-180], interpolation='none', vmin=vmin_ph, vmax=vmax_ph, cmap='magma')
+        divider = make_axes_locatable(ax[1, 1])
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        f.colorbar(pred1, cax=cax, orientation='vertical')
+        ax[1, 1].set_title('Predicted phase')
+
+        plt.tight_layout()
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        if not os.path.isdir(run_path):
+            os.mkdir(run_path)
+        f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
+        plt.close(f)
+
+        # Log to wandb
+        if self.wandb_enabled:
+            wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
 
     def train(self, dataloader, criterion, optimizer, metrics):
         """
@@ -362,13 +488,15 @@ class Trainer(object):
         metrics['val_ph_loss'].append(avg_val_ph_loss)
 
         if plot and self.is_main_process and last_input_diff is not None:
-            input_diff = last_input_diff.squeeze().detach().cpu().numpy()[0]
-            output_diff = last_output_diff.squeeze().detach().cpu().numpy()[0]
+            # Extract first item from batch (handle batch_size=1 case properly)
+            # Don't use squeeze() on the batch dimension to avoid removing it when batch_size=1
+            input_diff = last_input_diff[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
+            output_diff = last_output_diff[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
             # Note: With CUDAPrefetcher, tensors are on GPU, so move to CPU for plotting
-            input_amp = last_amp_patch[0, 0].cpu()
-            output_amp = last_output_amp.squeeze().detach().cpu().numpy()[0]
-            input_ph = last_ph_patch[0, 0].cpu()
-            output_ph = last_output_ph.squeeze().detach().cpu().numpy()[0]
+            input_amp = last_amp_patch[0, 0].cpu()  # [B, C, H, W] -> [H, W]
+            output_amp = last_output_amp[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
+            input_ph = last_ph_patch[0, 0].cpu()  # [B, C, H, W] -> [H, W]
+            output_ph = last_output_ph[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
             filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff, output_diff, input_amp, output_amp, input_ph, output_ph, filename)
             if self.wandb_enabled:

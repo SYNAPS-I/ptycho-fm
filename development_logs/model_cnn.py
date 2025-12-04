@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import math
-import numpy as np
-from scipy.ndimage import map_coordinates
 
 
 class ConvBlock(nn.Module):
@@ -222,6 +220,19 @@ class Encoder256(nn.Module):
         return x
 
 
+class CustomActivation(nn.Module):
+    """Custom activation function that can be used in decoders.
+
+    LeCun, et al. Efficient BackProp 1998
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        # Example: You can modify this to any custom activation you want
+        return 1.7159 * torch.tanh((2/3) * x)
+
+
 class Decoder256(nn.Module):
     """CNN Decoder for 256x256 images with configurable depth.
 
@@ -234,6 +245,7 @@ class Decoder256(nn.Module):
         out_channels: Number of output channels (default: 1)
         use_batchnorm: Whether to use batch normalization (default: True)
         output_activation: Output activation function (default: None)
+            Can be 'sigmoid', 'tanh', 'custom', or None
         dropout: Dropout rate (default: 0.0)
         num_stages: Number of upsampling stages, should match encoder (default: 4)
             - 4 stages: 16 -> 256 (spatial size)
@@ -281,9 +293,11 @@ class Decoder256(nn.Module):
 
         # Optional output activation
         if output_activation == 'sigmoid':
-            self.output_activation = nn.Tanh()
+            self.output_activation = nn.Sigmoid()
         elif output_activation == 'tanh':
             self.output_activation = nn.Tanh()
+        elif output_activation == 'custom':
+            self.output_activation = CustomActivation()
         elif output_activation is None:
             self.output_activation = nn.Identity()
         else:
@@ -422,7 +436,7 @@ def create_logpolar_grid(height, width, device='cpu'):
 
     # Compute log-polar coordinates
     rho = torch.log(torch.sqrt(x**2 + y**2) + 1e-10)
-    theta = torch.atan2(y, x)
+    _theta = torch.atan2(y, x)
 
     # Define output log-polar grid (evenly sampled in log-polar space)
     valid_rho = rho[torch.isfinite(rho)]
