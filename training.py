@@ -8,7 +8,7 @@ from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from torch.profiler import profile, ProfilerActivity, record_function
 import wandb
-
+profiling = True
 activities = [ProfilerActivity.CPU]
 if torch.cuda.is_available():
     device = "cuda"
@@ -174,7 +174,7 @@ class Trainer(object):
         # Start timing for first batch (before DataLoader fetch)
         batch_0_io_start = time.time()
         train_end_time = None  # Will be set after each batch completes
-        
+        first_print = 0 
         for batch_idx, batch in enumerate(dataloader):
             # Time IO (data loading) - this captures the time to get batch from DataLoader
             # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
@@ -193,7 +193,8 @@ class Trainer(object):
             elif batch_idx < 10 and self.is_main_process:
                 # Print first 10 batches with timestamps to confirm training is working
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
-            
+           
+            move_data = time.time()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
             
@@ -208,9 +209,17 @@ class Trainer(object):
             if self.use_prefetch == False:
                 amp_patch = amp_patch.to(self.device)
                 ph_patch = ph_patch.to(self.device)
+           
+            # Forward pass timing 
             fwd_pass_st =  time.time()
-            output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+            if profiling:
+                with profile(activities=activities, profile_memory=True, record_shapes=True) as prof:
+                    with record_function("model_fwdpass"):
+                        output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+            else:
+                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
             fwd_pass_end =  time.time()
+            
             if self.mode == 'supervised':
                 loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
             else:
@@ -235,13 +244,20 @@ class Trainer(object):
                         print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
                     torch.xpu.reset_peak_memory_stats(device=self.device)
             
+            if self.is_main_process and first_print < 4:
+                print(f"batch_idx : {batch_idx}, {diff_amp.shape}")
+                print(prof.key_averages().table(sort_by=sort_by_keyword, row_limit=None))
+                first_print = first_print + 1
+            
             # Log timing for first 10 batches
             if batch_idx < 10:
                 train_time = train_end_time - train_start_time
                 fwd_pass_time = fwd_pass_end - fwd_pass_st
                 total_time = io_time + train_time
+                data_move_time = move_data - fwd_pass_st
+                bwd_pass_time = train_end_time - fwd_pass_end
                 if self.is_main_process:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | fwdpass: {fwd_pass_time:.3f}s | Total: {total_time:.3f}s", flush=True)
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | fwdpass: {fwd_pass_time:.3f}s || datamove: {data_move_time:.3f}s | bwd: {bwd_pass_time:.3f}s | Total: {total_time:.3f}s", flush=True)
             
             running_loss += loss.detach().item()
 
@@ -322,7 +338,7 @@ class Trainer(object):
         last_output_amp = None
         last_ph_patch = None
         last_output_ph = None
-
+        first_print = 0
         # Use no_grad() to prevent gradient computation during validation
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
@@ -336,10 +352,9 @@ class Trainer(object):
                 if self.use_prefetch == False:
                     amp_patch = amp_patch.to(self.device)
                     ph_patch = ph_patch.to(self.device)
-                with profile(activities=activities, profile_memory=True, record_shapes=True) as prof:
-                        with record_function("model_fwdpass"):
-                            output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-                print(prof.key_averages().table(sort_by=sort_by_keyword, row_limit=40))
+                
+                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                
                 if self.mode == 'supervised':
                     loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                 else:

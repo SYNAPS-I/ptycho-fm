@@ -12,6 +12,7 @@ import torch.optim as optim
 from torchinfo import summary
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
+import intel_extension_for_pytorch as ipex
 import pickle
 import yaml
 
@@ -308,10 +309,15 @@ if is_main_process:
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=LR)
+if str(DEVICE) == 'xpu':
+    model, optimizer = ipex.optimize(model, optimizer=optimizer)
+else:
+    optimizer = optim.Adam(model.parameters(), lr=LR)
 if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if DEVICE=='cuda' or DEVICE=='xpu':
+    if str(DEVICE)=='cuda' or str(DEVICE)=='xpu':
         # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
         model = DDP(model, find_unused_parameters=False)
     else:
@@ -330,8 +336,6 @@ elif config['training']['loss_function'] == 'poisson_nll':
     criterion = nn.PoissonNLLLoss(log_input=False, full=False)
 else:
     raise ValueError(f"Unknown loss function: {config['training']['loss_function']}")
-
-optimizer = optim.Adam(model.parameters(), lr=LR)
 
 metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'validation_loss': [],
            'val_amp_loss': [], 'val_ph_loss': [], 'best_val_loss': np.inf}
