@@ -185,6 +185,7 @@ full_dataset = CombinedDataset(
     scale=config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path'),
     apply_noise=True,
+    cache_object=config['data'].get('cache_object', False),
     max_probe_modes=config['data'].get('max_probe_modes', 8),
     debug=DEBUG_MODE
 )
@@ -306,16 +307,24 @@ else:
     raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
 
 # Wrap loaders with CUDAPrefetcher for async data transfer
-# Only use prefetcher if CUDA is available
-if torch.cuda.is_available():
+# Only use prefetcher if CUDA is available AND enabled in config
+use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
+if torch.cuda.is_available() and use_cuda_prefetcher:
     train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
     val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
     cuda_prefetch = True
+    if is_main_process:
+        print("Using CUDAPrefetcher for async data transfer", flush=True)
 else:
-    # Fallback to regular loaders on CPU
+    # Fallback to regular loaders (training.py handles device transfers)
     train_prefetcher = train_loader
     val_prefetcher = val_loader
     cuda_prefetch = False
+    if is_main_process:
+        if torch.cuda.is_available():
+            print("Using standard DataLoader (CUDAPrefetcher disabled, manual device transfers)", flush=True)
+        else:
+            print("Using standard DataLoader on CPU/XPU", flush=True)
 
 # Create test dataset and loader only on main process
 if is_main_process:
@@ -360,7 +369,8 @@ if is_main_process:
     if train_dataloader_kwargs['num_workers'] > 0:
         print(f"  prefetch_factor: {train_dataloader_kwargs.get('prefetch_factor', 'N/A')}", flush=True)
         print(f"  persistent_workers: {train_dataloader_kwargs.get('persistent_workers', 'N/A')}", flush=True)
-    print(f"  Using CUDAPrefetcher: {torch.cuda.is_available()}", flush=True)
+    use_prefetcher_status = torch.cuda.is_available() and config['data'].get('use_cuda_prefetcher', True)
+    print(f"  Using CUDAPrefetcher: {use_prefetcher_status}", flush=True)
     print(f"\nDevice: {DEVICE}", flush=True)
     print(f"Model save path: {MODEL_SAVE_PATH}", flush=True)
     print("=" * 50, flush=True)
@@ -417,7 +427,28 @@ elif config['training']['loss_function'] == 'weighted':
 else:
     raise ValueError(f"Unknown loss function: {config['training']['loss_function']}")
 
-optimizer = optim.Adam(model.parameters(), lr=LR)
+# Get individual learning rates from config (fallback to default LR if not specified)
+encoder_lr = config['training'].get('encoder_lr', LR)
+amp_decoder_lr = config['training'].get('amp_decoder_lr', LR)
+ph_decoder_lr = config['training'].get('ph_decoder_lr', LR)
+
+# Get the actual model (unwrap DDP if needed)
+actual_model = model.module if isinstance(model, DDP) else model
+
+# Create parameter groups with individual learning rates
+param_groups = [
+    {'params': actual_model.encoder.parameters(), 'lr': encoder_lr, 'name': 'encoder'},
+    {'params': actual_model.amp_decoder.parameters(), 'lr': amp_decoder_lr, 'name': 'amp_decoder'},
+    {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'}
+]
+
+optimizer = optim.Adam(param_groups)
+
+if is_main_process:
+    print(f"\nOptimizer learning rates:", flush=True)
+    print(f"  Encoder: {encoder_lr}", flush=True)
+    print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
+    print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
 
 metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'validation_loss': [],
            'val_amp_loss': [], 'val_ph_loss': [], 'best_val_loss': np.inf}
@@ -495,6 +526,9 @@ if is_main_process and config['wandb']['enabled']:
             project=config['wandb']['project'],
             config={
                 "learning_rate": LR,
+                "encoder_lr": encoder_lr,
+                "amp_decoder_lr": amp_decoder_lr,
+                "ph_decoder_lr": ph_decoder_lr,
                 "batch_size": BATCH_SIZE,
                 "dataset": config['wandb']['dataset_name'],
                 "epochs": EPOCHS,

@@ -12,18 +12,22 @@ data:
   normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   test_normalization: '/lus/flare/projects/PPFL_FM/test_data/test2probes_norm.pkl' 
 
+  cache_object: true
+  max_probe_modes: 4  # Maximum number of probe modes to pad to
+
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
   max_probe_modes: 10  # Maximum number of probe modes to pad to
 
   # Distributed data loading strategy:
-  sharding_strategy: 'static'  # Options: 'static' or 'dynamic'
+  sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
 
   # DataLoader Configuration
   num_workers: 4
   prefetch_factor: 1 
   pin_memory: true  # Required for CUDAPrefetcher async transfer
   persistent_workers: true  # Keep workers alive across epochs
+  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
@@ -31,6 +35,13 @@ training:
   batch_size: 64  
   learning_rate: 1.0e-4
   epochs: 1  # Total epochs to train for (not additional epochs when resuming)
+
+  # Individual learning rates for model components (optional)
+  # If not specified, will use the default learning_rate above
+  encoder_lr: 1.0e-4
+  amp_decoder_lr: 1.0e-4
+  ph_decoder_lr: 1.0e-4
+
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
 
   # Weighted loss configuration (only used when loss_function: 'weighted')
