@@ -1,11 +1,15 @@
 import os
+import sys
 import numpy as np
 from pathlib import Path
 import h5py
 import pickle
+
+# Add parent directory to path to import data module
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from data import PtychographyDataset
 
-data_path = '/scratch/aileenluo/ptycho-vit/data'
+data_path = '/scratch/aileenluo/ptycho-vit/amp_data'
 
 def find_paired_files(directory):
     """
