@@ -504,7 +504,6 @@ class CombinedDataset(Dataset):
                 # Fallback: create dataset to get num_patterns (opens HDF5 files)
                 # Disable caching here too to prevent memory issues
                 fallback_kwargs = dataset_kwargs.copy()
-                fallback_kwargs['cache_object'] = False
                 dataset = PtychographyDataset(str(file_path), **fallback_kwargs)
                 num_patterns = len(dataset)
                 # Don't keep fallback dataset in cache - we'll recreate lazily
@@ -577,7 +576,6 @@ class CombinedDataset(Dataset):
             lazy_kwargs = self.dataset_kwargs.copy()
             # Disable object caching for lazily created datasets to prevent memory accumulation
             # Objects will be loaded on-demand from HDF5 files instead
-            lazy_kwargs['cache_object'] = False
             dataset = PtychographyDataset(str(file_path), **lazy_kwargs)
             
             # Add to cache, removing oldest if cache is full (LRU eviction)
