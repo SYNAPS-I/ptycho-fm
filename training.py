@@ -6,13 +6,25 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-
+from torch.profiler import profile, ProfilerActivity, record_function
 from utils.ptychi_utils import place_patches_fourier_shift
 
 import wandb
-
+profiling = True
+activities = [ProfilerActivity.CPU]
+if torch.cuda.is_available():
+    device = "cuda"
+    activities += [ProfilerActivity.CUDA]
+elif torch.xpu.is_available():
+    device = "xpu"
+    activities += [ProfilerActivity.XPU]
+else:
+    print("Neither CUDA nor XPU devices are available to demonstrate profiling on acceleration devices")
+    import sys
+    sys.exit(0)
+sort_by_keyword = device + "_time_total"
 class Trainer(object):
-    def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, wandb_enabled=True):
+    def __init__(self, model, mode, run_num, device, model_save_path, is_main_process=True, use_ddp=False, use_prefetch=False, wandb_enabled=True):
         super().__init__()
         self.model = model
         self.mode = mode
@@ -22,6 +34,7 @@ class Trainer(object):
         self.is_main_process = is_main_process
         self.use_ddp = use_ddp
         self.wandb_enabled = wandb_enabled
+        self.use_prefetch = use_prefetch
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -260,6 +273,11 @@ class Trainer(object):
         if self.wandb_enabled:
             wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
 
+    def trace_handler(self,p):
+        if self.is_main_process:
+            print("tracing the profiler")
+            p.export_chrome_trace("./trace_" + str(p.step_num) + ".json")
+
     def train(self, dataloader, criterion, optimizer, metrics):
         """
         Training loop.
@@ -287,7 +305,18 @@ class Trainer(object):
         # Start timing for first batch (before DataLoader fetch)
         batch_0_io_start = time.time()
         train_end_time = None  # Will be set after each batch completes
-        
+        first_print = 0
+        if profiling:
+            prof = torch.profiler.profile(activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.XPU ],
+            schedule=torch.profiler.schedule(wait=2, warmup=3, active=1, repeat=2),
+            on_trace_ready=self.trace_handler,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            )
+            prof.start()        
         for batch_idx, batch in enumerate(dataloader):
             # Time IO (data loading) - this captures the time to get batch from DataLoader
             # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
@@ -306,7 +335,8 @@ class Trainer(object):
             elif batch_idx < 10 and self.is_main_process:
                 # Print first 10 batches with timestamps to confirm training is working
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
-            
+           
+            move_data = time.time()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
             
@@ -318,26 +348,61 @@ class Trainer(object):
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
             input_norm = norm.to(self.device)
             input_scale = scale.to(self.device)
+            if self.use_prefetch == False:
+                ph_patch = ph_patch.to(self.device)
+                amp_patch = amp_patch.to(self.device)
 
-            output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-
-            if self.mode == 'supervised':
-                loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
+            fwd_pass_st =  time.time()
+            if profiling:
+                with torch.profiler.record_function("model_fwdpass"):
+                    output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                fwd_pass_end =  time.time()
+                with torch.profiler.record_function("compute_loss"):
+                    if self.mode == 'supervised':
+                        loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
+                    else:
+                        loss = criterion(output_diff, input_diff)
+                with torch.profiler.record_function("model_backward"):
+                    optimizer.zero_grad()
+                    loss.backward()
+                with torch.profiler.record_function("optimizer_step"):
+                    optimizer.step()
+                prof.step()
             else:
-                loss = criterion(output_diff, input_diff)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                fwd_pass_end =  time.time()
+
+                if self.mode == 'supervised':
+                    loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
+                else:
+                    loss = criterion(output_diff, input_diff)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
             
             # Time training completion - always track end time for IO timing of next batch
             train_end_time = time.time()
-            
+            if batch_idx < 10:
+                if 'cuda' in str(self.device):
+                    max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 3)
+                    torch.cuda.reset_peak_memory_stats(device=self.device)
+                    if self.is_main_process:
+                        print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
+                elif 'xpu' in str(self.device):
+                    max_mem_gb = torch.xpu.max_memory_allocated(device=self.device) / (1024 ** 3)
+                    if self.is_main_process:
+                        print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
+                    torch.xpu.reset_peak_memory_stats(device=self.device)
+
             # Log timing for first 10 batches
             if batch_idx < 10:
                 train_time = train_end_time - train_start_time
+                fwd_pass_time = fwd_pass_end - fwd_pass_st
                 total_time = io_time + train_time
+                data_move_time = fwd_pass_st - move_data
+                bwd_pass_time = train_end_time - fwd_pass_end
                 if self.is_main_process:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | fwdpass: {fwd_pass_time:.3f}s || datamove: {data_move_time:.3f}s | bwd: {bwd_pass_time:.3f}s | Total: {total_time:.3f}s", flush=True)
             
             running_loss += loss.detach().item()
 
@@ -363,6 +428,7 @@ class Trainer(object):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                 next_milestone_idx += 1
 
+        prof.stop()
         # Calculate average losses (use len(dataloader) for batch count)
         num_batches = len(dataloader)
         avg_train_loss = running_loss / num_batches
@@ -429,7 +495,9 @@ class Trainer(object):
                 input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
                 input_norm = norm.to(self.device)
                 input_scale = scale.to(self.device)
-
+                if self.use_prefetch == False:
+                    ph_patch = ph_patch.to(self.device)
+                    amp_patch = amp_patch.to(self.device)
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
                 if self.mode == 'supervised':

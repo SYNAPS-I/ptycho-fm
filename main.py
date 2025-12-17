@@ -1,7 +1,9 @@
 import os
 import argparse
 import numpy as np
+from mpi4py import MPI
 import torch
+import intel_extension_for_pytorch as ipex
 import torch.nn as nn
 import torch.optim as optim
 from torchinfo import summary
@@ -17,9 +19,9 @@ from custom_loss import WeightedLoss
 from training import Trainer
 from torch.utils.data import DataLoader, random_split, DistributedSampler
 from prefetcher import CUDAPrefetcher
-
+import time
 import wandb
-
+os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 def load_config(config_path='config.yaml'):
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
@@ -114,6 +116,37 @@ def cleanup_distributed():
             pass
         dist.destroy_process_group()
 
+def init_device():
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        local_rank = rank % torch.cuda.device_count()
+        torch.cuda.set_device(int(local_rank))
+        backend='nccl'
+    elif torch.xpu.is_available():
+        device = torch.device('xpu')
+        local_rank = rank % torch.xpu.device_count()
+        torch.xpu.set_device(int(local_rank))
+        backend='xccl'
+    else:
+        device = torch.device('cpu')
+
+    os.environ['RANK']=str(rank)
+    os.environ['WORLD_SIZE']=str(size)
+    master_addr = socket.gethostname() if rank == 0 else None #"localhost"
+    master_addr = comm.bcast(master_addr, root=0)
+    master_port = "29500"
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = master_port
+
+    if size > 1:
+        torch.distributed.init_process_group(backend=backend, init_method='env://', rank=int(rank), world_size=int(size))
+    print("Hello World from rank {} of {} on {}".format(rank, size, socket.gethostname()))
+    return rank, size, local_rank, device
+
 # Load configuration
 config = load_config()
 
@@ -127,7 +160,7 @@ MODEL_SAVE_PATH = config['paths']['model_save_path']
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed init (Code A style)
 # ────────────────────────────────────────────────────────────────────────────────
-rank, world_size, local_rank, DEVICE = init_distributed()
+rank, world_size, local_rank, DEVICE = init_device() #init_distributed()
 is_main_process = rank == 0
 print(
     f"[{socket.gethostname()}] WORLD_SIZE={world_size} RANK={rank} "
@@ -277,10 +310,12 @@ else:
 if torch.cuda.is_available():
     train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
     val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
+    cuda_prefetch = True
 else:
     # Fallback to regular loaders on CPU
     train_prefetcher = train_loader
     val_prefetcher = val_loader
+    cuda_prefetch = False
 
 # Create test dataset and loader only on main process
 if is_main_process:
@@ -334,7 +369,7 @@ if is_main_process:
 # Model setup - All models are 256x256
 # ────────────────────────────────────────────────────────────────────────────────
 img_size = 256
-
+print(config['model'])
 # Use unified PtychoViT model with encoder_type selection
 model = PtychoViT(config=config['model'])
 
@@ -348,10 +383,16 @@ if is_main_process:
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=LR)
+if str(DEVICE) == 'xpu':
+    model, optimizer = ipex.optimize(model, optimizer=optimizer)
+else:
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+
 if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
+    if str(DEVICE)=='cuda' or str(DEVICE)=='xpu': #if "CUDA_VISIBLE_DEVICES" in os.environ:
         # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
         model = DDP(model, find_unused_parameters=False)
     else:
@@ -393,6 +434,7 @@ trainer = Trainer(
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
     use_ddp=(world_size > 1),
+    use_prefetch=cuda_prefetch,
     wandb_enabled=config['wandb']['enabled']
 )
 
@@ -478,7 +520,7 @@ if is_main_process and config['wandb']['enabled']:
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
-
+st_train = time.time()
 # ────────────────────────────────────────────────────────────────────────────────
 # Train / Validate
 # ────────────────────────────────────────────────────────────────────────────────
@@ -523,8 +565,10 @@ try:
                     full_dataset.debug_call_count = 0
 
         # Training loop
+        st_train = time.time()
         model.train()
         trainer.train(train_prefetcher, criterion, optimizer, metrics)
+
 
         # Validation loop
         model.eval()
@@ -555,6 +599,7 @@ try:
 finally:
     cleanup_distributed()
 
+end_train = time.time()
 # ────────────────────────────────────────────────────────────────────────────────
 # Save final checkpoint only on main process
 # ────────────────────────────────────────────────────────────────────────────────
@@ -563,7 +608,7 @@ if is_main_process:
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
     with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
-    print('\nFinished Training!', flush=True)
+    print(f'\nFinished Training! {EPOCHS} epochs in {end_train - st_train}s', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
     wandb.finish() 

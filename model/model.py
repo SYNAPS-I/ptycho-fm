@@ -92,7 +92,7 @@ class PtychoViT(nn.Module):
         decoder_config = config.get('decoder', {})
         # Use encoder's embed_dim if latent_dim is None/null
         latent_dim = decoder_config.get('latent_dim')
-        if latent_dim is None:
+        if latent_dim is None or not latent_dim:
             latent_dim = self.encoder.embed_dim
 
         # Amplitude Decoder (CNN-based, from latent spatial representation to 256x256)
