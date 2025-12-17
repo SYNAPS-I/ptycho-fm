@@ -315,6 +315,7 @@ if torch.cuda.is_available() and use_cuda_prefetcher:
     cuda_prefetch = True
     if is_main_process:
         print("Using CUDAPrefetcher for async data transfer", flush=True)
+    cuda_prefetch = True
 else:
     # Fallback to regular loaders (training.py handles device transfers)
     train_prefetcher = train_loader
