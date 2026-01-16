@@ -14,7 +14,7 @@ module load pytorch/2.6.0
 module load nccl/2.18.3-cu12
 
 # --- Project location ---
-PROJECT_DIR=/pscratch/sd/e/edey/ptycho-vit/
+PROJECT_DIR=/pscratch/sd/e/edey/variable_lr/
 cd "$PROJECT_DIR"
 
 # --- NCCL / runtime env ---
