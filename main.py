@@ -21,6 +21,9 @@ from torch.utils.data import DataLoader, random_split, DistributedSampler
 from prefetcher import CUDAPrefetcher
 import time
 import wandb
+
+start_app_time = time.time()
+
 os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 def load_config(config_path='config.yaml'):
     """Load configuration from YAML file."""
@@ -28,10 +31,22 @@ def load_config(config_path='config.yaml'):
         config = yaml.safe_load(f)
     return config
 
+def override_config_from_args(config, args):
+    """Override config values from command-line arguments."""
+    if args.data_fraction is not None:
+        config['data']['data_fraction'] = args.data_fraction
+        print(f"[Config Override] data_fraction = {args.data_fraction}")
+    return config
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='PtychoViT Training Script')
 parser.add_argument('--debug', action='store_true', 
                     help='Enable debug logging to verify CSV usage and shuffling')
+parser.add_argument('--data-fraction', type=float, default=None,
+                    help='Override data_fraction from config.yaml (e.g., 0.1 for 10%, 0.5 for 50%)')
+
+parser.add_argument('--config_file', type=str, default=None,
+                    help='Override config_file name') 
 args = parser.parse_args()
 DEBUG_MODE = args.debug
 
@@ -148,7 +163,10 @@ def init_device():
     return rank, size, local_rank, device
 
 # Load configuration
-config = load_config()
+config = load_config(args.config_file)
+
+# Override config values from command-line arguments
+config = override_config_from_args(config, args)
 
 # Training parameters
 MODE = config['training']['mode']
@@ -187,8 +205,9 @@ full_dataset = CombinedDataset(
     apply_noise=True,
     cache_object=config['data'].get('cache_object', False),
     max_probe_modes=config['data'].get('max_probe_modes', 8),
-    debug=DEBUG_MODE
-)
+    debug=DEBUG_MODE,
+    data_fraction=config['data'].get('data_fraction', 1.0)
+    )
 
 # Split into train and validation using PyTorch's random_split
 # This ensures mutually exclusive splits and follows PyTorch best practices
@@ -394,22 +413,6 @@ if is_main_process:
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=LR)
-if str(DEVICE) == 'xpu':
-    model, optimizer = ipex.optimize(model, optimizer=optimizer)
-else:
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-
-if world_size > 1:
-    # Use torch.cuda.current_device() like multinode.py does
-    # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if str(DEVICE)=='cuda' or str(DEVICE)=='xpu': #if "CUDA_VISIBLE_DEVICES" in os.environ:
-        # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
-        model = DDP(model, find_unused_parameters=False)
-    else:
-        # For torchrun or other launchers, explicitly specify device
-        dev_index = torch.cuda.current_device()
-        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Loss, optimizer, metrics, trainer
@@ -444,6 +447,19 @@ param_groups = [
 ]
 
 optimizer = optim.Adam(param_groups)
+if str(DEVICE) == 'xpu':
+    model, optimizer = ipex.optimize(model, optimizer=optimizer)
+
+if world_size > 1:
+    # Use torch.cuda.current_device() like multinode.py does
+    # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
+    if str(DEVICE)=='cuda' or str(DEVICE)=='xpu': #if "CUDA_VISIBLE_DEVICES" in os.environ:
+        # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
+        model = DDP(model, find_unused_parameters=False, gradient_as_bucket_view=True, bucket_cap_mb=50)
+    else:
+        # For torchrun or other launchers, explicitly specify device
+        dev_index = torch.cuda.current_device()
+        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
 
 if is_main_process:
     print(f"\nOptimizer learning rates:", flush=True)
@@ -457,7 +473,6 @@ metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'vali
 # Track starting epoch for checkpoint resumption
 start_epoch = 0
 wandb_run_id = None
-
 trainer = Trainer(
     model,
     MODE,
@@ -553,9 +568,9 @@ if is_main_process and config['wandb']['enabled']:
         os.remove(config_copy_path)
     print('Uploaded config to wandb as artifact', flush=True)
 
-if is_main_process:
-    print('\nStarting Training...\n', flush=True)
 st_train = time.time()
+if is_main_process:
+    print(f'\nStarting Training... after {st_train - start_app_time } secs\n', flush=True)
 # ────────────────────────────────────────────────────────────────────────────────
 # Train / Validate
 # ────────────────────────────────────────────────────────────────────────────────
@@ -600,7 +615,7 @@ try:
                     full_dataset.debug_call_count = 0
 
         # Training loop
-        st_train = time.time()
+        train_epoch_time = time.time()
         model.train()
         trainer.train(train_prefetcher, criterion, optimizer, metrics)
 
@@ -629,7 +644,7 @@ try:
 
         if is_main_process:
             from datetime import datetime
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} in {time.time() - train_epoch_time} ==========", flush=True)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
 finally:
     cleanup_distributed()

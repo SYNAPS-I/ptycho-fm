@@ -13,7 +13,7 @@ data:
   normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization_fulldata.pkl' #normalization_fulldata.pkl' #normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   #normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   test_normalization: '/lus/flare/projects/PPFL_FM/test_data/test2probes_norm.pkl' 
-  data_fraction: 0.2  # Fraction of data to use for training (for debugging purposes)
+  data_fraction: 0.05  # Fraction of data to use for training (for debugging purposes)
   cache_object: true
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
@@ -32,9 +32,9 @@ data:
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 64  
+  batch_size: 32  
   learning_rate: 1.0e-4
-  epochs: 50  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 5  # Total epochs to train for (not additional epochs when resuming)
 
   # Individual learning rates for model components (optional)
   # If not specified, will use the default learning_rate above
@@ -102,4 +102,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: 1
+  run_num: '5_pc_32'

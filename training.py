@@ -10,7 +10,7 @@ from torch.profiler import profile, ProfilerActivity, record_function
 from utils.ptychi_utils import place_patches_fourier_shift
 
 import wandb
-profiling = True
+profiling = False
 activities = [ProfilerActivity.CPU]
 if torch.cuda.is_available():
     device = "cuda"
@@ -428,7 +428,8 @@ class Trainer(object):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                 next_milestone_idx += 1
 
-        prof.stop()
+        if profiling:
+            prof.stop()
         # Calculate average losses (use len(dataloader) for batch count)
         num_batches = len(dataloader)
         avg_train_loss = running_loss / num_batches

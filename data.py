@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 from collections import OrderedDict
 from utils.ptychi_utils import extract_patches_fourier_shift
-
+import pdb
 
 class PtychographyDataset(Dataset):
     """
@@ -411,7 +411,7 @@ class CombinedDataset(Dataset):
 
         return paired_files
 
-    def __init__(self, file_paths, rank=0, world_size=1, debug=False, **dataset_kwargs):
+    def __init__(self, file_paths, rank=0, world_size=1, debug=False, data_fraction=1.0, **dataset_kwargs):
         """
         Initialize CombinedDataset with sequential global indexing.
 
@@ -420,6 +420,7 @@ class CombinedDataset(Dataset):
             rank: Rank of current process (default: 0)
             world_size: Total number of processes (default: 1)
             debug: If True, enable debug logging for CSV usage and data access (default: False)
+            data_fraction: Fraction of data to use (0 < data_fraction <= 1.0, default: 1.0 for all data)
             **dataset_kwargs: Additional arguments passed to PtychographyDataset
         """
         # file_paths must be a directory
@@ -427,8 +428,25 @@ class CombinedDataset(Dataset):
         if not data_dir.is_dir():
             raise ValueError(f"file_paths must be a directory, got: {file_paths}")
 
+        # Validate data_fraction
+        if not (0 < data_fraction <= 1.0):
+            raise ValueError(f"data_fraction must be between 0 and 1, got {data_fraction}")
+
         # Scan directory for all paired files
-        self.file_paths = self.find_paired_files(data_dir)
+        all_file_paths = self.find_paired_files(data_dir)
+        
+        # Apply data fraction if specified
+        if data_fraction < 1.0:
+            total_files = len(all_file_paths)
+            num_files_to_use = max(1, int(total_files * data_fraction))
+            rng = np.random.default_rng(seed=42)  # Use deterministic seed for reproducibility
+            indices = rng.choice(total_files, size=num_files_to_use, replace=False)
+            self.file_paths = [all_file_paths[i] for i in sorted(indices)]
+            print(f"[Rank {rank}] Using {data_fraction*100:.1f}% of data: {len(self.file_paths)}/{total_files} files", flush=True)
+            if debug:
+                print(f"[DEBUG Rank {rank}] Data fraction sampling: Selected {len(self.file_paths)} out of {total_files} files", flush=True)
+        else:
+            self.file_paths = all_file_paths
         self.data_dir = data_dir
 
         self.dataset_kwargs = dataset_kwargs
@@ -507,7 +525,6 @@ class CombinedDataset(Dataset):
                 dataset = PtychographyDataset(str(file_path), **fallback_kwargs)
                 num_patterns = len(dataset)
                 # Don't keep fallback dataset in cache - we'll recreate lazily
-
             self.file_info.append({
                 'path': file_path,
                 'num_patterns': num_patterns,
@@ -686,3 +703,21 @@ class RankShardedSubset(Dataset):
             self.debug_call_count += 1
         
         return self.subset.dataset[dataset_idx]
+
+
+"""
+if __name__ == 'main':
+    full_dataset = CombinedDataset(
+    file_paths='/lus/flare/projects/PPFL_FM/simulated_data',
+    rank=0,
+    world_size=1,
+    scale=10000.0,
+    normalization_dict_path='/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization_fulldata.pkl',
+    apply_noise=True,
+    cache_object=True,
+    max_probe_modes=10,
+    debug=True
+    )
+"""
+
+
