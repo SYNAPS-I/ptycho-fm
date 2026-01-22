@@ -12,36 +12,43 @@ data:
   #    - '/pscratch/sd/e/edey/aileen/data/astronaut_dp.hdf5'
   #    - '/pscratch/sd/e/edey/aileen/data/rocket_dp.hdf5'    #test probe is simillar as those
   #    - '/pscratch/sd/e/edey/aileen/data/coffee_dp.hdf5'
-  data_path: '/pscratch/sd/e/edey/aileen/data'
-  test_path: '/pscratch/sd/e/edey/aileen/test_data/scan807_dp.hdf5'
+  # Fine-tuning data: symlinked flat directory created by scripts/create_symlinks.sh
+  data_path: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data'
+
+  # TODO: Update test_path to a valid test file from your data
+  test_path: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data/S02252_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
-  # If not specified or file not found, will use default normalization value
-  # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  normalization_dict_path: '/pscratch/sd/e/edey/aileen/data/normalization.pkl'
-  test_normalization: '/pscratch/sd/e/edey/aileen/test_data/test2probes_norm.pkl'
+  # Created by scripts/create_normalization.py - normalizes each scan by max photon count
+  normalization_dict_path: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data/normalization.pkl'
+  test_normalization: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data/normalization.pkl'
 
   cache_object: true
   max_probe_modes: 10  # Maximum number of probe modes to pad to
+  target_size: 256  # Target size for diffraction patterns (pads smaller patterns, upsamples probe)
 
-  train_split: 0.95  # Fraction of data for training (remainder used for validation)
+  train_split: 0.80  # Fraction of data for training (20% held out for validation/test)
   random_seed: 8
 
   # Distributed data loading strategy:
-  sharding_strategy: 'static'  # Options: 'static' or 'dynamic'
+  sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
+
+  # Limit number of files to use (for faster testing). Set to null to use all files.
+  # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
+  max_files: 100
 
   # DataLoader Configuration
-  num_workers: 2
+  num_workers: 4
   prefetch_factor: 2
-  pin_memory: true  # Required for CUDAPrefetcher async transfer
-  persistent_workers: true  # Keep workers alive across epochs
+  pin_memory: false  # Set true only when using CUDAPrefetcher
+  persistent_workers: false  # Disabled to avoid CUDA/HDF5 conflicts
   use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 32
+  batch_size: 256
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
 
   # Individual learning rates for model components (optional)
@@ -62,7 +69,11 @@ training:
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 1 # Plot stitched test results every M epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
-  finetune_from_model: '/pscratch/sd/e/edey/ptycho-vit/models/runcustom_45/best_model.pth'
+  # Save model weights each epoch as model_epoch_XXX.pth
+  save_epoch_models: true
+  # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
+  checkpoint_freq: 0
+  finetune_from_model: '/home/beams0/XYIN/projects/edge-ptycho-vit/run145/best_model.pth'
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -95,7 +106,7 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/pscratch/sd/e/edey/ptycho-vit/models'
+  model_save_path: '/home/beams0/XYIN/projects/edge-ptycho-vit/ptycho-vit/models'
 
 # WandB Configuration
 wandb:
