@@ -22,6 +22,10 @@ import wandb
 
 def load_config(config_path='config.yaml'):
     """Load configuration from YAML file."""
+    # If path is relative, look relative to script directory
+    if not os.path.isabs(config_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, config_path)
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
@@ -125,11 +129,27 @@ EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 FINETUNE_PATH = config['training'].get('finetune_from_model')
 
+# Saving / checkpointing
+save_epoch_models = bool(config['training'].get('save_epoch_models', False))
+checkpoint_freq = int(config['training'].get('checkpoint_freq', 0))  # 0 disables per-epoch checkpoint.state saving
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed init (Code A style)
 # ────────────────────────────────────────────────────────────────────────────────
 rank, world_size, local_rank, DEVICE = init_distributed()
 is_main_process = rank == 0
+
+# Normalize DataLoader pinned-memory usage.
+# Pinned memory speeds up non_blocking H2D copies, but it uses CUDA's caching host allocator
+# and can trigger `CUDACachingHostAllocatorImpl::record_stream` crashes on some systems.
+pin_memory = bool(config['data'].get('pin_memory', True))
+if pin_memory and not (torch.cuda.is_available() and config['data'].get('use_cuda_prefetcher', True)):
+    pin_memory = False
+    config['data']['pin_memory'] = False
+    if is_main_process:
+        print("Disabling DataLoader pin_memory because use_cuda_prefetcher is False (avoids CUDA pinned-host allocator crashes).", flush=True)
+
 print(
     f"[{socket.gethostname()}] WORLD_SIZE={world_size} RANK={rank} "
     f"LOCAL_RANK={local_rank} device={DEVICE}",
@@ -155,6 +175,8 @@ full_dataset = CombinedDataset(
     apply_noise=True,
     cache_object=config['data'].get('cache_object', False),
     max_probe_modes=config['data'].get('max_probe_modes', 8),
+    target_size=config['data'].get('target_size', 256),
+    max_files=config['data'].get('max_files'),
     debug=DEBUG_MODE
 )
 
@@ -186,14 +208,14 @@ if sharding_strategy == 'static':
     train_dataloader_kwargs = {
         'batch_size': BATCH_SIZE,
         'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': config['data'].get('pin_memory', True),
+        'pin_memory': pin_memory,
         'shuffle': True,  # Per-epoch local shuffling within each rank's shard
     }
 
     val_dataloader_kwargs = {
         'batch_size': BATCH_SIZE,
         'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': config['data'].get('pin_memory', True),
+        'pin_memory': pin_memory,
         'shuffle': False,
     }
 
@@ -246,7 +268,7 @@ elif sharding_strategy == 'dynamic':
     train_dataloader_kwargs = {
         'batch_size': BATCH_SIZE,
         'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': config['data'].get('pin_memory', True),
+        'pin_memory': pin_memory,
         'sampler': train_sampler,  # Sampler handles sharding and shuffling
         'shuffle': False,  # MUST be False when sampler is provided
     }
@@ -254,7 +276,7 @@ elif sharding_strategy == 'dynamic':
     val_dataloader_kwargs = {
         'batch_size': BATCH_SIZE,
         'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': config['data'].get('pin_memory', True),
+        'pin_memory': pin_memory,
         'sampler': val_sampler,
         'shuffle': False,
     }
@@ -298,7 +320,9 @@ if is_main_process:
         file_path=config['data']['test_path'],
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('test_normalization'),
-        apply_noise=False  # Don't add noise to test data
+        apply_noise=False,  # Don't add noise to test data
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        target_size=config['data'].get('target_size', 256)
     )
 
     test_loader = DataLoader(
@@ -306,7 +330,7 @@ if is_main_process:
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=config['data'].get('num_workers', 0),
-        pin_memory=config['data'].get('pin_memory', True)
+        pin_memory=pin_memory
     )
 
     print(f"Test dataset: {len(test_dataset)} patterns", flush=True)
@@ -597,6 +621,17 @@ try:
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
             trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
+
+        # Optional per-epoch saving
+        do_checkpoint = checkpoint_freq > 0 and ((epoch + 1) % checkpoint_freq == 0)
+        if do_checkpoint:
+            if dist.is_initialized():
+                dist.barrier()
+            trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
+            if dist.is_initialized():
+                dist.barrier()
+        elif is_main_process and save_epoch_models:
+            trainer.update_saved_model(f'model_epoch_{epoch + 1:03d}')
 
         if is_main_process:
             from datetime import datetime
