@@ -2,6 +2,7 @@ import os
 import shutil
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 import matplotlib.pyplot as plt
 from matplotlib import colors
@@ -10,6 +11,132 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from utils.ptychi_utils import place_patches_fourier_shift
 
 import wandb
+
+
+
+
+def _move_to_cpu(obj):
+    # Recursively detach and move Torch tensors to CPU (for safe serialization).
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _move_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        moved = [_move_to_cpu(v) for v in obj]
+        return tuple(moved) if isinstance(obj, tuple) else moved
+    return obj
+
+
+def _atomic_torch_save(obj, path):
+    tmp_path = f"{path}.tmp"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def compute_psnr(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    data_range: float | torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> float:
+    """
+    Compute Peak Signal-to-Noise Ratio between prediction and target.
+
+    Args:
+        pred: Predicted tensor
+        target: Ground truth tensor
+        data_range: The dynamic range of the data. If None, computed from target.
+
+    Returns:
+        PSNR value in dB
+    """
+    pred = pred.float()
+    target = target.float()
+
+    if data_range is None:
+        data_range = target.max() - target.min()
+    if not torch.is_tensor(data_range):
+        data_range = torch.tensor(float(data_range), device=target.device)
+    data_range = data_range.clamp(min=eps)
+
+    mse = F.mse_loss(pred, target)
+    if mse.item() <= eps:
+        return float("inf")
+
+    psnr = 10 * torch.log10((data_range ** 2) / mse)
+    return psnr.item()
+
+
+def compute_ssim(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    data_range: float | torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> float:
+    """
+    Compute Structural Similarity Index (SSIM) between prediction and target.
+
+    Args:
+        pred: Predicted tensor of shape (B, C, H, W) or (B, H, W) or (H, W)
+        target: Ground truth tensor of same shape
+        window_size: Size of the Gaussian window
+        data_range: The dynamic range of the data. If None, computed from target.
+
+    Returns:
+        SSIM value (0 to 1, higher is better)
+    """
+    # Ensure 4D tensors (B, C, H, W)
+    if pred.dim() == 2:
+        pred = pred.unsqueeze(0).unsqueeze(0)
+        target = target.unsqueeze(0).unsqueeze(0)
+    elif pred.dim() == 3:
+        pred = pred.unsqueeze(1)
+        target = target.unsqueeze(1)
+
+    pred = pred.float()
+    target = target.float()
+
+    if data_range is None:
+        data_range = target.amax(dim=(-2, -1), keepdim=True) - target.amin(dim=(-2, -1), keepdim=True)
+    if not torch.is_tensor(data_range):
+        data_range = torch.tensor(float(data_range), device=target.device)
+    data_range = data_range.clamp(min=eps)
+
+    # Constants for numerical stability
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+
+    # Create Gaussian window
+    def gaussian_window(size, sigma):
+        coords = torch.arange(size, dtype=torch.float32) - size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
+        kernel_2d = g.view(1, -1) * g.view(-1, 1)
+        return kernel_2d
+
+    _, channels, _, _ = pred.shape
+    window_2d = gaussian_window(window_size, 1.5).to(pred.device)
+    window = window_2d.view(1, 1, window_size, window_size).repeat(channels, 1, 1, 1)
+
+    # Compute means
+    mu_pred = F.conv2d(pred, window, padding=window_size // 2, groups=channels)
+    mu_target = F.conv2d(target, window, padding=window_size // 2, groups=channels)
+
+    mu_pred_sq = mu_pred ** 2
+    mu_target_sq = mu_target ** 2
+    mu_pred_target = mu_pred * mu_target
+
+    # Compute variances and covariance
+    sigma_pred_sq = F.conv2d(pred ** 2, window, padding=window_size // 2, groups=channels) - mu_pred_sq
+    sigma_target_sq = F.conv2d(target ** 2, window, padding=window_size // 2, groups=channels) - mu_target_sq
+    sigma_pred_target = F.conv2d(pred * target, window, padding=window_size // 2, groups=channels) - mu_pred_target
+
+    # SSIM formula
+    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
+               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
+
+    return ssim_map.mean().item()
 
 
 class Trainer(object):
@@ -35,17 +162,19 @@ class Trainer(object):
         return loss_value
 
     def update_saved_model(self, name):
-        """Update saved model (checkpoints and if validation loss is minimized)"""
-        if not os.path.isdir(self.model_save_path):
-            os.mkdir(self.model_save_path)
+        """Update saved model (checkpoints and if validation loss is minimized)."""
+        os.makedirs(self.model_save_path, exist_ok=True)
         run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
-        if not os.path.isdir(run_path):
-            os.mkdir(run_path)
+        os.makedirs(run_path, exist_ok=True)
 
         if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            torch.save(self.model.module.state_dict(), os.path.join(run_path, name + '.pth'))
+            state_dict = self.model.module.state_dict()
         else:
-            torch.save(self.model.state_dict(), os.path.join(run_path, name + '.pth'))
+            state_dict = self.model.state_dict()
+
+        # Save a CPU copy so serialization does not depend on CUDA contexts/devices.
+        cpu_state_dict = _move_to_cpu(state_dict)
+        _atomic_torch_save(cpu_state_dict, os.path.join(run_path, name + '.pth'))
 
     def save_config(self, config_path='config.yaml'):
         """Save a copy of the config file to the run path for reproducibility."""
@@ -68,23 +197,36 @@ class Trainer(object):
 
     def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer=None, wandb_run_id=None, scheduler=None):
         """Save a checkpoint state that can be loaded to continue training."""
+        if not self.is_main_process:
+            return
+
         state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
         state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        os.makedirs(state_path, exist_ok=True)
+
         self.update_saved_model('checkpoint_model')
-        torch.save(state_dict, os.path.join(state_path, 'checkpoint.state'))
+        # Also save epoch-specific model
+        self.update_saved_model(f'model_epoch_{epoch_num + 1:03d}')
+
+        cpu_state_dict = _move_to_cpu(state_dict)
+        _atomic_torch_save(cpu_state_dict, os.path.join(state_path, 'checkpoint.state'))
 
     def load_state_checkpoint(self, optimizer, scheduler=None):
         """Load everything but the model."""
         checkpoint_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
-        try:
-            os.path.exists(checkpoint_fname)
-        except Exception:
+        if not os.path.exists(checkpoint_fname):
             raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
-        state_dict = torch.load(checkpoint_fname)
+        state_dict = torch.load(checkpoint_fname, map_location='cpu')
         current_epoch = state_dict['current_epoch']
         metrics = state_dict['loss_tracker']
         optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+        # optimizer_state_dict_device_fix
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(self.device, non_blocking=True)
+
         if state_dict['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(state_dict['scheduler_state_dict'])
         wandb_run_id = state_dict.get('wandb_run_id', None)
@@ -383,7 +525,7 @@ class Trainer(object):
 
     def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None):
         """
-        Validation loop.
+        Validation loop with SSIM and PSNR metrics.
         """
         if self.is_main_process:
             from datetime import datetime
@@ -392,6 +534,13 @@ class Trainer(object):
         val_loss = 0.0
         val_amp_loss = 0.0
         val_ph_loss = 0.0
+
+        # SSIM and PSNR accumulators
+        val_amp_ssim = 0.0
+        val_amp_psnr = 0.0
+        val_ph_ssim = 0.0
+        val_ph_psnr = 0.0
+        num_samples = 0
 
         total_batches = len(dataloader)
         progress_milestones = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -435,6 +584,34 @@ class Trainer(object):
                 val_amp_loss += loss_amp.item()
                 val_ph_loss += loss_ph.item()
 
+                # SSIM/PSNR metrics (vectorized; average over samples)
+                batch_size = output_amp.size(0)
+
+                pred_amp = output_amp.detach()
+                pred_ph = output_ph.detach()
+
+                batch_amp_ssim = compute_ssim(pred_amp, amp_patch)
+                batch_ph_ssim = compute_ssim(pred_ph, ph_patch)
+                val_amp_ssim += batch_amp_ssim * batch_size
+                val_ph_ssim += batch_ph_ssim * batch_size
+
+                # PSNR: compute per-sample PSNR then sum
+                pred_amp_flat = pred_amp.flatten(1)
+                amp_flat = amp_patch.flatten(1)
+                amp_mse = (pred_amp_flat - amp_flat).pow(2).mean(dim=1)
+                amp_range = (amp_flat.amax(dim=1) - amp_flat.amin(dim=1)).clamp(min=1e-8)
+                amp_psnr = 10 * torch.log10((amp_range ** 2) / (amp_mse + 1e-8))
+                val_amp_psnr += amp_psnr.sum().item()
+
+                pred_ph_flat = pred_ph.flatten(1)
+                ph_flat = ph_patch.flatten(1)
+                ph_mse = (pred_ph_flat - ph_flat).pow(2).mean(dim=1)
+                ph_range = (ph_flat.amax(dim=1) - ph_flat.amin(dim=1)).clamp(min=1e-8)
+                ph_psnr = 10 * torch.log10((ph_range ** 2) / (ph_mse + 1e-8))
+                val_ph_psnr += ph_psnr.sum().item()
+
+                num_samples += batch_size
+
                 if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
                     from datetime import datetime
                     progress_pct = int(progress_milestones[next_milestone_idx] * 100)
@@ -455,22 +632,52 @@ class Trainer(object):
         avg_val_amp_loss = val_amp_loss / num_batches
         avg_val_ph_loss = val_ph_loss / num_batches
 
+        # Average SSIM and PSNR
+        avg_amp_ssim = val_amp_ssim / num_samples if num_samples > 0 else 0.0
+        avg_amp_psnr = val_amp_psnr / num_samples if num_samples > 0 else 0.0
+        avg_ph_ssim = val_ph_ssim / num_samples if num_samples > 0 else 0.0
+        avg_ph_psnr = val_ph_psnr / num_samples if num_samples > 0 else 0.0
+
         if self.is_main_process:
             from datetime import datetime
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Metrics - Amp SSIM: {avg_amp_ssim:.4f}, Amp PSNR: {avg_amp_psnr:.2f} dB, Phase SSIM: {avg_ph_ssim:.4f}, Phase PSNR: {avg_ph_psnr:.2f} dB", flush=True)
 
         avg_val_loss = self.synchronize_loss(avg_val_loss)
         avg_val_amp_loss = self.synchronize_loss(avg_val_amp_loss)
         avg_val_ph_loss = self.synchronize_loss(avg_val_ph_loss)
+        avg_amp_ssim = self.synchronize_loss(avg_amp_ssim)
+        avg_amp_psnr = self.synchronize_loss(avg_amp_psnr)
+        avg_ph_ssim = self.synchronize_loss(avg_ph_ssim)
+        avg_ph_psnr = self.synchronize_loss(avg_ph_psnr)
 
         if self.is_main_process and self.wandb_enabled:
             wandb.log({"val_loss": avg_val_loss})
             wandb.log({"val_amp_loss": avg_val_amp_loss})
             wandb.log({"val_ph_loss": avg_val_ph_loss})
+            wandb.log({"val_amp_ssim": avg_amp_ssim})
+            wandb.log({"val_amp_psnr": avg_amp_psnr})
+            wandb.log({"val_ph_ssim": avg_ph_ssim})
+            wandb.log({"val_ph_psnr": avg_ph_psnr})
 
         metrics['validation_loss'].append(avg_val_loss)
         metrics['val_amp_loss'].append(avg_val_amp_loss)
         metrics['val_ph_loss'].append(avg_val_ph_loss)
+
+        # Add SSIM/PSNR to metrics (initialize lists if not present)
+        if 'val_amp_ssim' not in metrics:
+            metrics['val_amp_ssim'] = []
+        if 'val_amp_psnr' not in metrics:
+            metrics['val_amp_psnr'] = []
+        if 'val_ph_ssim' not in metrics:
+            metrics['val_ph_ssim'] = []
+        if 'val_ph_psnr' not in metrics:
+            metrics['val_ph_psnr'] = []
+
+        metrics['val_amp_ssim'].append(avg_amp_ssim)
+        metrics['val_amp_psnr'].append(avg_amp_psnr)
+        metrics['val_ph_ssim'].append(avg_ph_ssim)
+        metrics['val_ph_psnr'].append(avg_ph_psnr)
 
         if plot and self.is_main_process and last_input_diff is not None:
             input_diff_np = last_input_diff[0, 0].detach().cpu().numpy()
@@ -501,3 +708,10 @@ class Trainer(object):
                       % (metrics['best_val_loss'], avg_val_loss), flush=True)
                 self.update_saved_model('best_model')
             metrics['best_val_loss'] = avg_val_loss
+
+        # Synchronize all processes after validation and potential model saving
+        # This prevents CUDA/HDF5 conflicts when other ranks continue while rank 0 saves
+        if self.use_ddp and dist.is_initialized():
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            dist.barrier()
