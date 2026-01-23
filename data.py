@@ -248,6 +248,20 @@ class PtychographyDataset(Dataset):
 
         return padded_probe
 
+    def _normalize_probe_shape(self, probe: np.ndarray) -> np.ndarray:
+        """
+        Normalize probe array to shape (1, N, H, W).
+
+        Accepted input shapes:
+            - (1, N, H, W): already normalized
+            - (A, N, H, W): drop to first A slice
+        """
+        if probe.ndim != 4:
+            raise ValueError(f"Expected 4D probe array (A, N, H, W), got {probe.shape}")
+        if probe.shape[0] == 1:
+            return probe
+        return probe[:1, ...]
+
     def _zero_pad_to_target(self, image: np.ndarray, target_size: int) -> np.ndarray:
         """
         Zero-pad a 2D image to target size, keeping the original centered.
@@ -389,6 +403,7 @@ class PtychographyDataset(Dataset):
         probe_data = self.para_handle['probe']
         if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
             probe = probe_data[...]
+            probe = self._normalize_probe_shape(probe)
             # Pad probe to (1, max_probe_modes, H, W) if needed
             probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
             # Upsample probe to target size if needed
@@ -428,6 +443,7 @@ class PtychographyDataset(Dataset):
             probe = self._cached_probe
         else:
             probe = para_handle['probe'][...]
+            probe = self._normalize_probe_shape(probe)
             # Pad probe to (1, max_probe_modes, H, W) if needed
             probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
             # Upsample probe to target size if needed
