@@ -20,18 +20,27 @@ from prefetcher import CUDAPrefetcher
 
 import wandb
 
-def load_config(config_path='config.yaml'):
-    """Load configuration from YAML file."""
-    # If path is relative, look relative to script directory
+def resolve_config_path(config_path):
+    """Resolve configuration path (relative to script directory)."""
     if not os.path.isabs(config_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(script_dir, config_path)
+    return config_path
+
+def load_config(config_path='config.yaml'):
+    """Load configuration from YAML file."""
+    config_path = resolve_config_path(config_path)
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='PtychoViT Training Script')
+parser.add_argument(
+    '--config',
+    default='config.yaml',
+    help='Path to config YAML file (default: config.yaml relative to script)',
+)
 parser.add_argument('--debug', action='store_true', 
                     help='Enable debug logging to verify CSV usage and shuffling')
 args = parser.parse_args()
@@ -119,7 +128,8 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 # Load configuration
-config = load_config()
+config_path = resolve_config_path(args.config)
+config = load_config(config_path)
 
 # Training parameters
 MODE = config['training']['mode']
@@ -541,7 +551,7 @@ if is_main_process and config['wandb']['enabled']:
     # Upload config.yaml to wandb as artifact at the start of training
     import shutil
     config_copy_path = './config_copy.yaml'
-    shutil.copy('config.yaml', config_copy_path)
+    shutil.copy(config_path, config_copy_path)
     artifact = wandb.Artifact(name="config", type="file")
     artifact.add_file(local_path="config_copy.yaml", name="training_config")
     artifact.save()
@@ -565,7 +575,7 @@ try:
 
         # Save config to run path at epoch 0
         if epoch == 0 and is_main_process:
-            trainer.save_config('config.yaml')
+            trainer.save_config(config_path)
             print('Saved config to run path', flush=True)
 
         # Log epoch start with timestamp
