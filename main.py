@@ -1,6 +1,9 @@
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['PMI_LOCAL_RANK']
+from mpi4py import MPI
+size = MPI.COMM_WORLD.Get_size()
+rank = MPI.COMM_WORLD.Get_rank()
+os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['PMI_LOCAL_RANK'] if "PMI_LOCAL_RANK" in os.environ else str(rank % 4)
 
 import argparse
 import numpy as np
@@ -55,11 +58,11 @@ DEBUG_MODE = args.debug
 # ────────────────────────────────────────────────────────────────────────────────
 def ensure_env_from_launcher():
     """Populate torchrun-style env vars from SLURM or MPI if missing."""
-    local_rank = os.environ['PMI_LOCAL_RANK']
     size = MPI.COMM_WORLD.Get_size()
     rank = MPI.COMM_WORLD.Get_rank()
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(size)
+    local_rank = os.environ['PMI_LOCAL_RANK'] if 'PMI_LOCAL_RANK' in os.environ else rank % 4
 
     if rank == 0:
         master_addr = socket.gethostname()
