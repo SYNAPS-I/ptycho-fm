@@ -1,4 +1,7 @@
 import os
+
+os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['PMI_LOCAL_RANK']
+
 import argparse
 import numpy as np
 import torch
@@ -10,6 +13,7 @@ import torch.distributed as dist
 import pickle
 import yaml
 import socket
+from mpi4py import MPI
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from model.model import PtychoViT
@@ -49,14 +53,22 @@ DEBUG_MODE = args.debug
 # ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
 # ────────────────────────────────────────────────────────────────────────────────
-def ensure_env_from_slurm():
-    """Populate torchrun-style env vars from SLURM if missing."""
-    if "RANK" not in os.environ and "SLURM_PROCID" in os.environ:
-        os.environ["RANK"] = os.environ["SLURM_PROCID"]
-    if "WORLD_SIZE" not in os.environ and "SLURM_NTASKS" in os.environ:
-        os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
-    if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
-        os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+def ensure_env_from_launcher():
+    """Populate torchrun-style env vars from SLURM or MPI if missing."""
+    local_rank = os.environ['PMI_LOCAL_RANK']
+    size = MPI.COMM_WORLD.Get_size()
+    rank = MPI.COMM_WORLD.Get_rank()
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(size)
+
+    if rank == 0:
+        master_addr = socket.gethostname()
+    else:
+        master_addr = None
+
+    master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = str(2345)
 
 
 def init_distributed():
@@ -64,44 +76,14 @@ def init_distributed():
     Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
     respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
     """
-    ensure_env_from_slurm()
+    ensure_env_from_launcher()
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
     rank_env = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
 
-    # Set MASTER_ADDR and MASTER_PORT if not already set
-    if "MASTER_ADDR" not in os.environ:
-        if "SLURM_JOB_NODELIST" in os.environ:
-            import subprocess
-            import socket
-            nodelist = os.environ["SLURM_JOB_NODELIST"]
-            try:
-                result = subprocess.run(
-                    ["scontrol", "show", "hostnames", nodelist],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    first_node = result.stdout.strip().split('\n')[0]
-                    os.environ["MASTER_ADDR"] = first_node
-                else:
-                    os.environ["MASTER_ADDR"] = socket.gethostname()
-            except Exception:
-                os.environ["MASTER_ADDR"] = socket.gethostname()
-        else:
-            import socket
-            os.environ["MASTER_ADDR"] = socket.gethostname()
+    dist.init_process_group('nccl', init_method='env://')
     
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = "29500"
-
-    if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
-        dist.init_process_group(backend="nccl", init_method="env://")
-
-    # Map LOCAL_RANK to a valid CUDA device index after any device masking.
-    # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
     if torch.cuda.is_available():
         nvis = torch.cuda.device_count()
         # For single-process (world_size=1), always use GPU 0
