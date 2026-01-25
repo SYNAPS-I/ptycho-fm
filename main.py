@@ -1,10 +1,5 @@
 import os
 
-from mpi4py import MPI
-size = MPI.COMM_WORLD.Get_size()
-rank = MPI.COMM_WORLD.Get_rank()
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['PMI_LOCAL_RANK'] if "PMI_LOCAL_RANK" in os.environ else str(rank % 4)
-
 import argparse
 import numpy as np
 import torch
@@ -63,6 +58,7 @@ def ensure_env_from_launcher():
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(size)
     local_rank = os.environ['PMI_LOCAL_RANK'] if 'PMI_LOCAL_RANK' in os.environ else rank % 4
+    os.environ["LOCAL_RANK"] = local_rank
 
     if rank == 0:
         master_addr = socket.gethostname()
@@ -82,8 +78,8 @@ def init_distributed():
     ensure_env_from_launcher()
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
-    rank_env = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+    local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
+    rank_env = int(os.environ.get("RANK", "0")
 
     dist.init_process_group('nccl', init_method='env://')
     
