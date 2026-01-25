@@ -58,7 +58,7 @@ def ensure_env_from_launcher():
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(size)
     local_rank = os.environ['PMI_LOCAL_RANK'] if 'PMI_LOCAL_RANK' in os.environ else rank % 4
-    os.environ["LOCAL_RANK"] = local_rank
+    os.environ["LOCAL_RANK"] = str(local_rank)
 
     if rank == 0:
         master_addr = socket.gethostname()
