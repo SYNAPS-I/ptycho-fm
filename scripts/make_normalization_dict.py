@@ -7,9 +7,9 @@ import pickle
 
 # Add parent directory to path to import data module
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from data import PtychographyDataset
+from data import CombinedDataset
 
-data_path = '/scratch/aileenluo/ptycho-vit/amp_data'
+data_path = '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-2/31ide_2025-06-12/'
 
 def find_paired_files(directory):
     """
@@ -28,15 +28,14 @@ def find_paired_files(directory):
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
 
-    # Find all _dp.hdf5 files
-    dp_files = list(directory.glob('*_dp.hdf5'))
+    # Find all _dp.hdf5 files (recursive)
+    dp_files = list(directory.rglob('*_dp.hdf5'))
 
     # Verify each has a matching _para.hdf5 file
     paired_files = []
     for dp_file in sorted(dp_files):
-        # Extract object name
-        object_name = dp_file.stem[:-3]  # Remove '_dp' suffix
-        para_file = directory / f"{object_name}_para.hdf5"
+        base_name = dp_file.stem[:-3]  # Remove '_dp' suffix
+        para_file = dp_file.with_name(f"{base_name}_para.hdf5")
 
         if para_file.exists():
             paired_files.append(dp_file)
@@ -48,7 +47,7 @@ def find_paired_files(directory):
 
     print(f"Found {len(paired_files)} paired dataset(s) in {directory}", flush=True)
     for f in paired_files:
-        object_name = f.stem[:-3]
+        object_name = CombinedDataset.derive_object_name(f, directory)
         print(f"  - {object_name}", flush=True)
 
     return paired_files
@@ -58,9 +57,9 @@ files = find_paired_files(data_path) # This list has only the DP files!
 probe_shapes = []
 norm_dict = {}
 for file_path in files:
-    dataset = PtychographyDataset(file_path)
-    object_name = dataset.object_name
-    with h5py.File(os.path.join(data_path, object_name + '_para.hdf5'), 'r') as f:
+    object_name = CombinedDataset.derive_object_name(file_path, Path(data_path))
+    para_file = Path(file_path).with_name(f"{Path(file_path).stem[:-3]}_para.hdf5")
+    with h5py.File(para_file, 'r') as f:
         probe = f['probe'][:]
     probe_shapes.append(probe.shape)
     with h5py.File(file_path, 'r') as f:

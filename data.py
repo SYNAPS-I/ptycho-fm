@@ -37,7 +37,8 @@ class PtychographyDataset(Dataset):
         apply_noise: bool = True,
         cache_object: bool = True,
         max_probe_modes: int = 8,
-        target_size: Optional[int] = 256
+        target_size: Optional[int] = 256,
+        object_name: Optional[str] = None
     ):
         self.file_path = Path(file_path)
         self.scale = scale
@@ -71,9 +72,13 @@ class PtychographyDataset(Dataset):
         # Load data and get dimensions (uses persistent handles)
         self._load_file_info()
 
-        # Extract object name from file path
+        # Extract object name from file path unless provided
         # Assumes format: .../object_name/object_name_dp.hdf5
-        self.object_name = self.dp_file.stem[:-3]  # Remove '_dp' suffix
+        if object_name is not None:
+            self.object_name = object_name
+        else:
+            stem = self.dp_file.stem
+            self.object_name = stem[:-3] if stem.endswith('_dp') else stem
 
         # Load normalization factor
         self._load_normalization()
@@ -549,6 +554,24 @@ class CombinedDataset(Dataset):
 
         return paired_files
 
+    @staticmethod
+    def derive_object_name(file_path: Path, base_dir: Optional[Path]) -> str:
+        """Derive a unique object name from a file path relative to base_dir."""
+        file_path = Path(file_path)
+        if base_dir is not None:
+            try:
+                rel = file_path.resolve().relative_to(Path(base_dir).resolve())
+                rel_no_suffix = rel.with_suffix('')
+                rel_name = rel_no_suffix.name
+                if rel_name.endswith('_dp'):
+                    rel_no_suffix = rel_no_suffix.with_name(rel_name[:-3])
+                return rel_no_suffix.as_posix()
+            except Exception:
+                pass
+
+        stem = file_path.stem
+        return stem[:-3] if stem.endswith('_dp') else stem
+
     def __init__(self, file_paths, rank=0, world_size=1, debug=False, max_files=None, **dataset_kwargs):
         """
         Initialize CombinedDataset with sequential global indexing.
@@ -575,6 +598,10 @@ class CombinedDataset(Dataset):
             self.file_paths = self.file_paths[:max_files]
 
         self.data_dir = data_dir
+        self.file_object_names: Dict[Path, str] = {}
+        for file_path in self.file_paths:
+            object_name = self.derive_object_name(file_path, self.data_dir)
+            self.file_object_names[file_path] = object_name
 
         self.dataset_kwargs = dataset_kwargs
         self.rank = rank
@@ -686,7 +713,11 @@ class CombinedDataset(Dataset):
                 # Fallback: create dataset to get num_patterns (opens HDF5 files)
                 # Disable caching here too to prevent memory issues
                 fallback_kwargs = dataset_kwargs.copy()
-                dataset = PtychographyDataset(str(file_path), **fallback_kwargs)
+                dataset = PtychographyDataset(
+                    str(file_path),
+                    object_name=self.file_object_names.get(file_path),
+                    **fallback_kwargs
+                )
                 num_patterns = len(dataset)
                 # Don't keep fallback dataset in cache - we'll recreate lazily
 
@@ -758,7 +789,11 @@ class CombinedDataset(Dataset):
             lazy_kwargs = self.dataset_kwargs.copy()
             # Disable object caching for lazily created datasets to prevent memory accumulation
             # Objects will be loaded on-demand from HDF5 files instead
-            dataset = PtychographyDataset(str(file_path), **lazy_kwargs)
+            dataset = PtychographyDataset(
+                str(file_path),
+                object_name=self.file_object_names.get(file_path),
+                **lazy_kwargs
+            )
             
             # Add to cache, removing oldest if cache is full (LRU eviction)
             if len(self.dataset_cache) >= self.max_cached_datasets:
