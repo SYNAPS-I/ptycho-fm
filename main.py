@@ -399,7 +399,8 @@ if is_main_process:
         file_path=config['data']['test_path'],
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('test_normalization'),
-        apply_noise=False,  # Don't add noise to test data
+        apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
+        default_normalization=config['data'].get('default_normalization', 100000.0),
         max_probe_modes=config['data'].get('max_probe_modes', 8),
         target_size=config['data'].get('target_size', 256)
     )
