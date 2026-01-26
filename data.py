@@ -248,6 +248,20 @@ class PtychographyDataset(Dataset):
 
         return padded_probe
 
+    def _normalize_probe_shape(self, probe: np.ndarray) -> np.ndarray:
+        """
+        Normalize probe array to shape (1, N, H, W).
+
+        Accepted input shapes:
+            - (1, N, H, W): already normalized
+            - (A, N, H, W): drop to first A slice
+        """
+        if probe.ndim != 4:
+            raise ValueError(f"Expected 4D probe array (A, N, H, W), got {probe.shape}")
+        if probe.shape[0] == 1:
+            return probe
+        return probe[:1, ...]
+
     def _zero_pad_to_target(self, image: np.ndarray, target_size: int) -> np.ndarray:
         """
         Zero-pad a 2D image to target size, keeping the original centered.
@@ -389,6 +403,7 @@ class PtychographyDataset(Dataset):
         probe_data = self.para_handle['probe']
         if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
             probe = probe_data[...]
+            probe = self._normalize_probe_shape(probe)
             # Pad probe to (1, max_probe_modes, H, W) if needed
             probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
             # Upsample probe to target size if needed
@@ -428,6 +443,7 @@ class PtychographyDataset(Dataset):
             probe = self._cached_probe
         else:
             probe = para_handle['probe'][...]
+            probe = self._normalize_probe_shape(probe)
             # Pad probe to (1, max_probe_modes, H, W) if needed
             probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
             # Upsample probe to target size if needed
@@ -495,15 +511,15 @@ class CombinedDataset(Dataset):
         if not directory.is_dir():
             raise ValueError(f"Not a directory: {directory}")
 
-        # Find all _dp.hdf5 files
-        dp_files = list(directory.glob('*_dp.hdf5'))
+        # Find all _dp.hdf5 files recursively
+        dp_files = list(directory.rglob('*_dp.hdf5'))
 
         # Verify each has a matching _para.hdf5 file
         paired_files = []
         for dp_file in sorted(dp_files):
             # Extract object name
             object_name = dp_file.stem[:-3]  # Remove '_dp' suffix
-            para_file = directory / f"{object_name}_para.hdf5"
+            para_file = dp_file.with_name(f"{object_name}_para.hdf5")
 
             if para_file.exists():
                 paired_files.append(dp_file)
@@ -517,16 +533,19 @@ class CombinedDataset(Dataset):
         # Only print first 10 and last 10 to avoid huge output files
         if len(paired_files) > 20:
             for f in paired_files[:10]:
+                rel_path = f.relative_to(directory)
                 object_name = f.stem[:-3]
-                print(f"  - {object_name}", flush=True)
+                print(f"  - {rel_path} ({object_name})", flush=True)
             print(f"  ... ({len(paired_files) - 20} more datasets) ...", flush=True)
             for f in paired_files[-10:]:
+                rel_path = f.relative_to(directory)
                 object_name = f.stem[:-3]
-                print(f"  - {object_name}", flush=True)
+                print(f"  - {rel_path} ({object_name})", flush=True)
         else:
             for f in paired_files:
+                rel_path = f.relative_to(directory)
                 object_name = f.stem[:-3]
-                print(f"  - {object_name}", flush=True)
+                print(f"  - {rel_path} ({object_name})", flush=True)
 
         return paired_files
 
@@ -574,19 +593,56 @@ class CombinedDataset(Dataset):
                     print(f"[Rank {rank}] Loading index.csv to avoid opening all HDF5 files...", flush=True)
                     self.index_df = pd.read_csv(index_csv_path)
                     
-                    # Create a fast lookup: map filename to n_dps
+                    # Create a fast lookup: map absolute/relative paths to n_dps
                     # This is much faster than nested loops
                     csv_lookup = {}
                     for _, row in self.index_df.iterrows():
                         csv_path = Path(row['dp_path'])
-                        # Get just the filename for fast matching
-                        filename = csv_path.name
-                        csv_lookup[filename] = int(row['n_dps'])
+                        n_dps = int(row['n_dps'])
+                        candidates = set()
+                        if csv_path.is_absolute():
+                            try:
+                                resolved = csv_path.resolve()
+                            except Exception:
+                                resolved = csv_path
+                            candidates.add(resolved)
+                            try:
+                                candidates.add(resolved.relative_to(self.data_dir.resolve()))
+                            except Exception:
+                                pass
+                        else:
+                            candidates.add(csv_path)
+                            candidates.add((self.data_dir / csv_path))
+                            try:
+                                candidates.add((self.data_dir / csv_path).resolve())
+                            except Exception:
+                                pass
+
+                        for key in candidates:
+                            csv_lookup[key] = n_dps
                     
                     # Match our file_paths to CSV entries
                     for file_path in self.file_paths:
-                        if file_path.name in csv_lookup:
-                            self.pattern_counts[file_path] = csv_lookup[file_path.name]
+                        resolved = None
+                        try:
+                            resolved = file_path.resolve()
+                        except Exception:
+                            resolved = file_path
+
+                        matched = False
+                        if resolved in csv_lookup:
+                            self.pattern_counts[file_path] = csv_lookup[resolved]
+                            matched = True
+                        if not matched:
+                            try:
+                                rel = resolved.relative_to(self.data_dir.resolve())
+                                if rel in csv_lookup:
+                                    self.pattern_counts[file_path] = csv_lookup[rel]
+                                    matched = True
+                            except Exception:
+                                pass
+                        if not matched and file_path in csv_lookup:
+                            self.pattern_counts[file_path] = csv_lookup[file_path]
                     
                     print(f"[Rank {rank}] Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
                     if debug:

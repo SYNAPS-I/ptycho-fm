@@ -1,5 +1,10 @@
 import os
+from typing import Literal
 import argparse
+import pickle
+import yaml
+import socket
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,9 +12,10 @@ import torch.optim as optim
 from torchinfo import summary
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
-import pickle
-import yaml
-import socket
+try:
+    from mpi4py import MPI
+except ImportError:
+    MPI = None
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from model.model import PtychoViT
@@ -20,18 +26,27 @@ from prefetcher import CUDAPrefetcher
 
 import wandb
 
-def load_config(config_path='config.yaml'):
-    """Load configuration from YAML file."""
-    # If path is relative, look relative to script directory
+def resolve_config_path(config_path):
+    """Resolve configuration path (relative to script directory)."""
     if not os.path.isabs(config_path):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(script_dir, config_path)
+    return config_path
+
+def load_config(config_path='config.yaml'):
+    """Load configuration from YAML file."""
+    config_path = resolve_config_path(config_path)
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='PtychoViT Training Script')
+parser.add_argument(
+    '--config',
+    default='config.yaml',
+    help='Path to config YAML file (default: config.yaml relative to script)',
+)
 parser.add_argument('--debug', action='store_true', 
                     help='Enable debug logging to verify CSV usage and shuffling')
 args = parser.parse_args()
@@ -40,6 +55,27 @@ DEBUG_MODE = args.debug
 # ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
 # ────────────────────────────────────────────────────────────────────────────────
+def ensure_env_from_polaris():
+    """Populate torchrun-style env vars from SLURM or MPI if missing."""
+    if MPI is None:
+        raise ImportError("MPI is not installed. Please install MPI to use this function.")
+    size = MPI.COMM_WORLD.Get_size()
+    rank = MPI.COMM_WORLD.Get_rank()
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(size)
+    local_rank = os.environ['PMI_LOCAL_RANK'] if 'PMI_LOCAL_RANK' in os.environ else rank % 4
+    os.environ["LOCAL_RANK"] = str(local_rank)
+
+    if rank == 0:
+        master_addr = socket.gethostname()
+    else:
+        master_addr = None
+
+    master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = str(2345)
+    
+
 def ensure_env_from_slurm():
     """Populate torchrun-style env vars from SLURM if missing."""
     if "RANK" not in os.environ and "SLURM_PROCID" in os.environ:
@@ -48,9 +84,49 @@ def ensure_env_from_slurm():
         os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
     if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
         os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+        
+
+def init_distributed(platform: str = Literal['polaris', 'slurm']):
+    if platform == 'polaris':
+        return init_distributed_polaris()
+    elif platform == 'slurm':
+        return init_distributed_slurm()
+    else:
+        raise ValueError(f"Invalid platform: {platform}. Must be 'polaris' or 'slurm'")
 
 
-def init_distributed():
+def init_distributed_polaris():
+    """
+    Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
+    respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
+    """
+    ensure_env_from_polaris()
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
+    rank_env = int(os.environ.get("RANK", "0"))
+
+    dist.init_process_group('nccl', init_method='env://')
+    
+    if torch.cuda.is_available():
+        nvis = torch.cuda.device_count()
+        # For single-process (world_size=1), always use GPU 0
+        # For distributed training, map local_rank to available GPUs
+        if world_size == 1:
+            mapped_local = 0
+        else:
+            mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
+        torch.cuda.set_device(mapped_local)
+        device = torch.device(f"cuda:{mapped_local}")
+        os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
+    else:
+        mapped_local = 0
+        device = torch.device("cpu")
+
+    return rank_env, world_size, mapped_local, device
+
+
+def init_distributed_slurm():
     """
     Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
     respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
@@ -110,6 +186,7 @@ def init_distributed():
 
     return rank_env, world_size, mapped_local, device
 
+
 def cleanup_distributed():
     if dist.is_available() and dist.is_initialized():
         try:
@@ -119,7 +196,8 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 # Load configuration
-config = load_config()
+config_path = resolve_config_path(args.config)
+config = load_config(config_path)
 
 # Training parameters
 MODE = config['training']['mode']
@@ -137,7 +215,7 @@ checkpoint_freq = int(config['training'].get('checkpoint_freq', 0))  # 0 disable
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed init (Code A style)
 # ────────────────────────────────────────────────────────────────────────────────
-rank, world_size, local_rank, DEVICE = init_distributed()
+rank, world_size, local_rank, DEVICE = init_distributed(config['training'].get('platform', 'slurm'))
 is_main_process = rank == 0
 
 # Normalize DataLoader pinned-memory usage.
@@ -172,7 +250,7 @@ full_dataset = CombinedDataset(
     world_size=world_size,
     scale=config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path'),
-    apply_noise=True,
+    apply_noise=config['data'].get('apply_noise', True),
     cache_object=config['data'].get('cache_object', False),
     max_probe_modes=config['data'].get('max_probe_modes', 8),
     target_size=config['data'].get('target_size', 256),
@@ -541,7 +619,7 @@ if is_main_process and config['wandb']['enabled']:
     # Upload config.yaml to wandb as artifact at the start of training
     import shutil
     config_copy_path = './config_copy.yaml'
-    shutil.copy('config.yaml', config_copy_path)
+    shutil.copy(config_path, config_copy_path)
     artifact = wandb.Artifact(name="config", type="file")
     artifact.add_file(local_path="config_copy.yaml", name="training_config")
     artifact.save()
@@ -565,7 +643,7 @@ try:
 
         # Save config to run path at epoch 0
         if epoch == 0 and is_main_process:
-            trainer.save_config('config.yaml')
+            trainer.save_config(config_path)
             print('Saved config to run path', flush=True)
 
         # Log epoch start with timestamp
