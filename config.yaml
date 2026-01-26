@@ -23,6 +23,8 @@ data:
   # Created by scripts/create_normalization.py - normalizes each scan by max photon count
   normalization_dict_path: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data/normalization.pkl'
   test_normalization: '/gdata/dm/CAI/synaps_i/data/converted/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/flat_data/normalization.pkl'
+  # Fallback normalization when object name is missing from the dict
+  default_normalization: 100000.0
 
   cache_object: true
   max_probe_modes: 10  # Maximum number of probe modes to pad to

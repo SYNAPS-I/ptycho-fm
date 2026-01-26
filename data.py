@@ -24,6 +24,7 @@ class PtychographyDataset(Dataset):
         file_path (str): Path to data file or corresponding parameters file(*_dp.hdf5 or *_para.hdf5)
         scale (float): Factor by which to scale all diffraction intensity to
         normalization_dict_path (str): Path to .pkl file containing dict of {object_name: normalization_factor}
+        default_normalization (float): Fallback normalization value when object not found (default: 100000.0)
         apply_noise (bool): Whether to simulate noise by sampling from a Poisson distribution (set to False for experimental data)
         cache_object (bool): Whether to cache object and probe data in memory
         max_probe_modes (int): Maximum number of probe modes to pad to (default: 8)
@@ -34,6 +35,7 @@ class PtychographyDataset(Dataset):
         file_path: str,
         scale: float = 100000.,
         normalization_dict_path: Optional[str] = None,
+        default_normalization: float = 100000.0,
         apply_noise: bool = True,
         cache_object: bool = True,
         max_probe_modes: int = 8,
@@ -43,6 +45,7 @@ class PtychographyDataset(Dataset):
         self.file_path = Path(file_path)
         self.scale = scale
         self.normalization_dict_path = normalization_dict_path
+        self.default_normalization = default_normalization
         self.apply_noise = apply_noise
         self.cache_object = cache_object
         self.max_probe_modes = max_probe_modes
@@ -91,8 +94,6 @@ class PtychographyDataset(Dataset):
         the normalization factor using self.object_name as the key.
         Falls back to a default value if key not found or file not provided.
         """
-        default_normalization = 100000.0  # Default fallback value
-
         if self.normalization_dict_path is not None:
             try:
                 with open(self.normalization_dict_path, 'rb') as f:
@@ -106,20 +107,20 @@ class PtychographyDataset(Dataset):
                     self.normalization = normalization_dict[self.object_name]
                 else:
                     print(f"Warning: Object '{self.object_name}' not found in normalization dictionary. "
-                          f"Using default: {default_normalization}", flush=True)
-                    self.normalization = default_normalization
+                          f"Using default: {self.default_normalization}", flush=True)
+                    self.normalization = self.default_normalization
 
             except FileNotFoundError:
                 print(f"Warning: Normalization file not found at {self.normalization_dict_path}. "
-                      f"Using default: {default_normalization}", flush=True)
-                self.normalization = default_normalization
+                      f"Using default: {self.default_normalization}", flush=True)
+                self.normalization = self.default_normalization
             except Exception as e:
                 print(f"Warning: Error loading normalization file: {e}. "
-                      f"Using default: {default_normalization}", flush=True)
-                self.normalization = default_normalization
+                      f"Using default: {self.default_normalization}", flush=True)
+                self.normalization = self.default_normalization
         else:
             # No normalization dict provided, use default
-            self.normalization = default_normalization
+            self.normalization = self.default_normalization
 
     def _find_hdf5_pair(self):
         """Find the paired HDF5 files (*_dp.hdf5 and *_para.hdf5)."""

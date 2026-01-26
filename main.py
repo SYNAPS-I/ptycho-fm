@@ -250,6 +250,7 @@ full_dataset = CombinedDataset(
     world_size=world_size,
     scale=config['data']['scale'],
     normalization_dict_path=config['data'].get('normalization_dict_path'),
+    default_normalization=config['data'].get('default_normalization', 100000.0),
     apply_noise=config['data'].get('apply_noise', True),
     cache_object=config['data'].get('cache_object', False),
     max_probe_modes=config['data'].get('max_probe_modes', 8),
