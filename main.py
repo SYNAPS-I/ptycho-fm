@@ -1,6 +1,10 @@
 import os
-
+from typing import Literal
 import argparse
+import pickle
+import yaml
+import socket
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,10 +12,10 @@ import torch.optim as optim
 from torchinfo import summary
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
-import pickle
-import yaml
-import socket
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except ImportError:
+    MPI = None
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from model.model import PtychoViT
@@ -51,8 +55,10 @@ DEBUG_MODE = args.debug
 # ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
 # ────────────────────────────────────────────────────────────────────────────────
-def ensure_env_from_launcher():
+def ensure_env_from_polaris():
     """Populate torchrun-style env vars from SLURM or MPI if missing."""
+    if MPI is None:
+        raise ImportError("MPI is not installed. Please install MPI to use this function.")
     size = MPI.COMM_WORLD.Get_size()
     rank = MPI.COMM_WORLD.Get_rank()
     os.environ["RANK"] = str(rank)
@@ -68,14 +74,33 @@ def ensure_env_from_launcher():
     master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(2345)
+    
+
+def ensure_env_from_slurm():
+    """Populate torchrun-style env vars from SLURM if missing."""
+    if "RANK" not in os.environ and "SLURM_PROCID" in os.environ:
+        os.environ["RANK"] = os.environ["SLURM_PROCID"]
+    if "WORLD_SIZE" not in os.environ and "SLURM_NTASKS" in os.environ:
+        os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+    if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
+        os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+        
+
+def init_distributed(platform: str = Literal['polaris', 'slurm']):
+    if platform == 'polaris':
+        return init_distributed_polaris()
+    elif platform == 'slurm':
+        return init_distributed_slurm()
+    else:
+        raise ValueError(f"Invalid platform: {platform}. Must be 'polaris' or 'slurm'")
 
 
-def init_distributed():
+def init_distributed_polaris():
     """
     Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
     respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
     """
-    ensure_env_from_launcher()
+    ensure_env_from_polaris()
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
@@ -99,6 +124,68 @@ def init_distributed():
         device = torch.device("cpu")
 
     return rank_env, world_size, mapped_local, device
+
+
+def init_distributed_slurm():
+    """
+    Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
+    respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
+    """
+    ensure_env_from_slurm()
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+    rank_env = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+
+    # Set MASTER_ADDR and MASTER_PORT if not already set
+    if "MASTER_ADDR" not in os.environ:
+        if "SLURM_JOB_NODELIST" in os.environ:
+            import subprocess
+            import socket
+            nodelist = os.environ["SLURM_JOB_NODELIST"]
+            try:
+                result = subprocess.run(
+                    ["scontrol", "show", "hostnames", nodelist],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    first_node = result.stdout.strip().split('\n')[0]
+                    os.environ["MASTER_ADDR"] = first_node
+                else:
+                    os.environ["MASTER_ADDR"] = socket.gethostname()
+            except Exception:
+                os.environ["MASTER_ADDR"] = socket.gethostname()
+        else:
+            import socket
+            os.environ["MASTER_ADDR"] = socket.gethostname()
+    
+    if "MASTER_PORT" not in os.environ:
+        os.environ["MASTER_PORT"] = "29500"
+
+    if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
+        dist.init_process_group(backend="nccl", init_method="env://")
+
+    # Map LOCAL_RANK to a valid CUDA device index after any device masking.
+    # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
+    if torch.cuda.is_available():
+        nvis = torch.cuda.device_count()
+        # For single-process (world_size=1), always use GPU 0
+        # For distributed training, map local_rank to available GPUs
+        if world_size == 1:
+            mapped_local = 0
+        else:
+            mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
+        torch.cuda.set_device(mapped_local)
+        device = torch.device(f"cuda:{mapped_local}")
+        os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
+    else:
+        mapped_local = 0
+        device = torch.device("cpu")
+
+    return rank_env, world_size, mapped_local, device
+
 
 def cleanup_distributed():
     if dist.is_available() and dist.is_initialized():
@@ -128,7 +215,7 @@ checkpoint_freq = int(config['training'].get('checkpoint_freq', 0))  # 0 disable
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed init (Code A style)
 # ────────────────────────────────────────────────────────────────────────────────
-rank, world_size, local_rank, DEVICE = init_distributed()
+rank, world_size, local_rank, DEVICE = init_distributed(config['training'].get('platform', 'slurm'))
 is_main_process = rank == 0
 
 # Normalize DataLoader pinned-memory usage.
