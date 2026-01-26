@@ -79,7 +79,7 @@ def init_distributed():
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
-    rank_env = int(os.environ.get("RANK", "0")
+    rank_env = int(os.environ.get("RANK", "0"))
 
     dist.init_process_group('nccl', init_method='env://')
     
