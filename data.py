@@ -556,19 +556,26 @@ class CombinedDataset(Dataset):
         return paired_files
 
     @staticmethod
+    def derive_relative_path(file_path: Path, base_dir: Optional[Path]) -> Optional[Path]:
+        """Return file_path relative to base_dir when possible."""
+        if base_dir is None:
+            return None
+        try:
+            return Path(file_path).resolve().relative_to(Path(base_dir).resolve())
+        except Exception:
+            return None
+
+    @staticmethod
     def derive_object_name(file_path: Path, base_dir: Optional[Path]) -> str:
         """Derive a unique object name from a file path relative to base_dir."""
         file_path = Path(file_path)
-        if base_dir is not None:
-            try:
-                rel = file_path.resolve().relative_to(Path(base_dir).resolve())
-                rel_no_suffix = rel.with_suffix('')
-                rel_name = rel_no_suffix.name
-                if rel_name.endswith('_dp'):
-                    rel_no_suffix = rel_no_suffix.with_name(rel_name[:-3])
-                return rel_no_suffix.as_posix()
-            except Exception:
-                pass
+        rel = CombinedDataset.derive_relative_path(file_path, base_dir)
+        if rel is not None:
+            rel_no_suffix = rel.with_suffix('')
+            rel_name = rel_no_suffix.name
+            if rel_name.endswith('_dp'):
+                rel_no_suffix = rel_no_suffix.with_name(rel_name[:-3])
+            return rel_no_suffix.as_posix()
 
         stem = file_path.stem
         return stem[:-3] if stem.endswith('_dp') else stem
@@ -621,56 +628,32 @@ class CombinedDataset(Dataset):
                     print(f"[Rank {rank}] Loading index.csv to avoid opening all HDF5 files...", flush=True)
                     self.index_df = pd.read_csv(index_csv_path)
                     
-                    # Create a fast lookup: map absolute/relative paths to n_dps
-                    # This is much faster than nested loops
+                    # Create a fast lookup: map relative paths to n_dps
                     csv_lookup = {}
                     for _, row in self.index_df.iterrows():
                         csv_path = Path(row['dp_path'])
-                        n_dps = int(row['n_dps'])
-                        candidates = set()
                         if csv_path.is_absolute():
-                            try:
-                                resolved = csv_path.resolve()
-                            except Exception:
-                                resolved = csv_path
-                            candidates.add(resolved)
-                            try:
-                                candidates.add(resolved.relative_to(self.data_dir.resolve()))
-                            except Exception:
-                                pass
-                        else:
-                            candidates.add(csv_path)
-                            candidates.add((self.data_dir / csv_path))
-                            try:
-                                candidates.add((self.data_dir / csv_path).resolve())
-                            except Exception:
-                                pass
-
-                        for key in candidates:
-                            csv_lookup[key] = n_dps
+                            raise ValueError(
+                                f"index.csv dp_path must be relative to data_dir, got absolute path: {csv_path}"
+                            )
+                        n_dps = int(row['n_dps'])
+                        full_path = self.data_dir / csv_path
+                        if not full_path.exists():
+                            raise FileNotFoundError(
+                                f"index.csv dp_path not found under data_dir: {csv_path}"
+                            )
+                        rel_path = self.derive_relative_path(full_path, self.data_dir)
+                        if rel_path is None:
+                            raise ValueError(
+                                f"Unable to resolve dp_path relative to data_dir: {csv_path}"
+                            )
+                        csv_lookup[rel_path] = n_dps
                     
                     # Match our file_paths to CSV entries
                     for file_path in self.file_paths:
-                        resolved = None
-                        try:
-                            resolved = file_path.resolve()
-                        except Exception:
-                            resolved = file_path
-
-                        matched = False
-                        if resolved in csv_lookup:
-                            self.pattern_counts[file_path] = csv_lookup[resolved]
-                            matched = True
-                        if not matched:
-                            try:
-                                rel = resolved.relative_to(self.data_dir.resolve())
-                                if rel in csv_lookup:
-                                    self.pattern_counts[file_path] = csv_lookup[rel]
-                                    matched = True
-                            except Exception:
-                                pass
-                        if not matched and file_path in csv_lookup:
-                            self.pattern_counts[file_path] = csv_lookup[file_path]
+                        rel = self.derive_relative_path(file_path, self.data_dir)
+                        if rel in csv_lookup:
+                            self.pattern_counts[file_path] = csv_lookup[rel]
                     
                     print(f"[Rank {rank}] Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
                     if debug:
