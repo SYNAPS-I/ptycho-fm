@@ -34,7 +34,7 @@ training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 32  
   learning_rate: 1.0e-4
-  epochs: 5  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 200  # Total epochs to train for (not additional epochs when resuming)
 
   # Individual learning rates for model components (optional)
   # If not specified, will use the default learning_rate above
@@ -50,9 +50,9 @@ training:
     threshold: 0.0    # Pixels below this value are ignored
     alpha: 1.0        # Weight exponent (alpha=1 → inverse weighting (1/intensity), alpha=0 → uniform weighting)
 
-  validation_plot_freq: 10  # Plot validation results every N epochs
-  test_plot_freq: 20 # Plot stitched test results every M epochs
-  resume_from_checkpoint: false # Set to true to resume training from checkpoint
+  validation_plot_freq: 1  # Plot validation results every N epochs
+  test_plot_freq: 2 # Plot stitched test results every M epochs
+  resume_from_checkpoint: True # Set to true to resume training from checkpoint
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -102,4 +102,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: '5_pc_32'
+  run_num: '5_pc_bs32'

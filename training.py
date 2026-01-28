@@ -43,6 +43,7 @@ class Trainer(object):
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
             # Average across all processes
             loss_tensor /= dist.get_world_size()
+            print(f"sync'd from all reduce op : {loss_tensor.item()}")
             return loss_tensor.item()
         return loss_value
 
@@ -328,7 +329,8 @@ class Trainer(object):
                     # For subsequent batches, time from end of previous batch to now
                     # This includes the DataLoader fetch time (the 2-4 second gap you're seeing)
                     io_time = time.time() - train_end_time
-            
+            #else:
+            #    break
             # Print when first batch is loaded and for first 10 batches
             if batch_idx == 0 and self.is_main_process:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] First batch loaded! Starting training... (batch 1/{total_batches})", flush=True)
@@ -539,7 +541,7 @@ class Trainer(object):
         
         if self.is_main_process:
             from datetime import datetime
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed avg_val_loss:{avg_val_loss}", flush=True)
 
         # Synchronize losses across all ranks for DDP
         avg_val_loss = self.synchronize_loss(avg_val_loss)
@@ -555,6 +557,7 @@ class Trainer(object):
         metrics['validation_loss'].append(avg_val_loss)
         metrics['val_amp_loss'].append(avg_val_amp_loss)
         metrics['val_ph_loss'].append(avg_val_ph_loss)
+
 
         if plot and self.is_main_process and last_input_diff is not None:
             # Extract first item from batch (handle batch_size=1 case properly)
@@ -577,7 +580,7 @@ class Trainer(object):
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})
-
+        
         # Check if this is the best model (use synchronized validation loss)
         # Only save on main process to avoid multiple saves
         if avg_val_loss < metrics['best_val_loss']:

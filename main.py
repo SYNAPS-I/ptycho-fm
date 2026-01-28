@@ -142,7 +142,7 @@ def init_device():
         backend='nccl'
     elif torch.xpu.is_available():
         device = torch.device('xpu')
-        local_rank = rank % torch.xpu.device_count()
+        local_rank = os.environ.get('PALS_LOCAL_RANKID') #rank % torch.xpu.device_count()
         torch.xpu.set_device(int(local_rank))
         backend='xccl'
     else:
@@ -640,12 +640,17 @@ try:
 
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
+            print(f"[DEBUG Rank {rank}] ========== Done Validation (Epoch {epoch + 1}) generate plot ==========", flush=True)
             trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
 
         if is_main_process:
             from datetime import datetime
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} in {time.time() - train_epoch_time} ==========", flush=True)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
+            trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
+            run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+            with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
+                pickle.dump(metrics, file)
 finally:
     cleanup_distributed()
 
@@ -654,10 +659,10 @@ end_train = time.time()
 # Save final checkpoint only on main process
 # ────────────────────────────────────────────────────────────────────────────────
 if is_main_process:
-    trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
-    run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
-    with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
-        pickle.dump(metrics, file)
+    #trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
+    #run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+    #with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
+    #    pickle.dump(metrics, file)
     print(f'\nFinished Training! {EPOCHS} epochs in {end_train - st_train}s', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
