@@ -313,10 +313,11 @@ class Trainer(object):
         pred_ph_object = torch.zeros(object_size, device='cpu')
         buffer = torch.zeros(object_size, device='cpu')
 
+        central_crop = 64
         pred_amp_object = place_patches_fourier_shift(
             pred_amp_object,
             positions,
-            pred_amp[:, 64:-64, 64:-64],
+            pred_amp[:, central_crop:-central_crop, central_crop:-central_crop],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -324,7 +325,7 @@ class Trainer(object):
         pred_ph_object = place_patches_fourier_shift(
             pred_ph_object,
             positions,
-            pred_ph[:, 64:-64, 64:-64],
+            pred_ph[:, central_crop:-central_crop, central_crop:-central_crop],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -332,7 +333,7 @@ class Trainer(object):
         buffer = place_patches_fourier_shift(
             buffer,
             positions,
-            torch.ones_like(pred_ph[:, 64:-64, 64:-64]),
+            torch.ones_like(pred_ph[:, central_crop:-central_crop, central_crop:-central_crop]),
             op="add",
             adjoint_mode=False,
             pad=32
@@ -343,7 +344,7 @@ class Trainer(object):
         gt_amp_object = place_patches_fourier_shift(
             gt_amp_object,
             positions,
-            gt_amp[:, 64:-64, 64:-64],
+            gt_amp[:, central_crop:-central_crop, central_crop:-central_crop],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -351,7 +352,7 @@ class Trainer(object):
         gt_ph_object = place_patches_fourier_shift(
             gt_ph_object,
             positions,
-            gt_ph[:, 64:-64, 64:-64],
+            gt_ph[:, central_crop:-central_crop, central_crop:-central_crop],
             op="add",
             adjoint_mode=False,
             pad=32
