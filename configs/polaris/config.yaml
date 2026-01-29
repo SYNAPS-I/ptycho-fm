@@ -1,0 +1,208 @@
+# PtychoViT Training Configuration
+
+# Data Configuration
+data:
+  # Option 1: Specify a list of specific files to use
+  #datafiles:
+  #   - '/pscratch/sd/e/edey/aileen/data/eagle256_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/cameraman256_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/brick256_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/grass256_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/gravel256_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/astronaut_dp.hdf5'
+  #   - '/pscratch/sd/e/edey/aileen/data/rocket_dp.hdf5'    #test probe is simillar as those
+  #   - '/pscratch/sd/e/edey/aileen/data/coffee_dp.hdf5'
+
+  # Option 2: Specify a directory - will auto-discover all paired files
+  # (comment out 'datafiles' above and uncomment this to use)
+  # data_path: '/eagle/SYNAPS-I/data/lamni/2025-2/31ide_2025-06-12_subset/'
+  data_path: '/eagle/SYNAPS-I/data/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm_subset5_rerecon'
+  # test_path: '/lus/eagle/projects/SYNAPS-I/data/lamni/2025-2/31ide_2025-06-12_testset/S03999/ptychodus_dp.hdf5'
+  test_path: '/eagle/SYNAPS-I/data/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/eiger_4/S04000-04999/S04480/ptychodus_dp.hdf5'
+  test_dataset_object_name: "eiger_4/S04000-04999/S04480/ptychodus"
+  scale: 10000.0
+
+  # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
+  # If not specified or file not found, will use default normalization value
+  normalization_dict_path: '/eagle/SYNAPS-I/data/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/normalization_31ide_2025-11-18_SparkPixRT2_130nm.pkl'
+  # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'
+  # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization.pkl'
+  # test_normalization: '/eagle/SYNAPS-I/data/lamni/2025-2/31ide_2025-06-12/normalization_31ide_2025-06-12.pkl'
+  test_normalization: '/eagle/SYNAPS-I/data/lamni/2025-3/31ide_2025-11-18/SparkPixRT2_130nm/normalization_31ide_2025-11-18_SparkPixRT2_130nm.pkl'
+
+  train_split: 0.95  # Fraction of data for training (remainder used for validation)
+  random_seed: 8
+
+  max_probe_modes: 10
+  max_OPR_modes: 1
+
+  # DataLoader Configuration
+  num_workers: 1
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+  apply_noise: false
+  default_normalization: 30000.0
+
+# Training Configuration
+training:
+  mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
+  batch_size: 16
+  learning_rate: 1.0e-4
+  epochs: 50  # Total epochs to train for (not additional epochs when resuming)
+  ngpus: 2
+  loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
+
+  platform: "polaris"
+
+  # Weighted loss configuration (only used when loss_function='weighted')
+  weighted_loss:
+    loss_type: 'mae'  # Options: 'mse' or 'mae'
+    threshold: 0.0    # Pixels below this value are ignored
+    alpha: 0.0        # Weight exponent (1.0 = inverse weighting, 0.0 = uniform)
+  validation_plot_freq: 1  # Plot validation results every N epochs
+  test_plot_freq: 5
+  resume_from_checkpoint: false  # Leave false to avoid loading old optimizer state
+  finetune_from_model: '/lus/eagle/projects/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/best_model.pth'  # set to your pretrained weights
+
+  checkpoint_freq: 1
+
+# Model Architecture
+model:
+  # Model type selection: 'vit', 'cnn', 'cnn256', or 'vit256'
+  model_type: 'vit256'  # Options: 'vit' (ViT for 512x512), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256), 'vit256' (ViT with CNN decoders for 256x256)
+  amp_scale: 0.2
+  ph_scale: 3.14159
+  amp_offset: 1.0
+
+  # ViT Model Configuration for 512x512 images (used when model_type='vit')
+  vit:
+    encoder:
+      img_size: 512
+      patch_size: 16
+      in_channels: 1
+      embed_dim: 192
+      depth: 12
+      num_heads: 3
+      mlp_ratio: 4.0
+      use_cls_token: false
+      dropout: 0.1
+      attn_dropout: 0.0
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 192     # Must match encoder embed_dim
+      num_stages: 5       # 32x32 -> 512x512
+      use_batchnorm: true
+      dropout: 0.0
+
+  # CNN Model Configuration for 512x512 images (used when model_type='cnn')
+  cnn:
+    encoder:
+      in_channels: 1
+      base_channels: 32
+      latent_dim: 256
+      num_stages: 5       # 512 -> 16
+      use_batchnorm: true
+      dropout: 0.1
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 32
+      latent_dim: 256
+      num_stages: 5
+      use_batchnorm: true
+      dropout: 0.1
+
+  # CNN Model Configuration for 256x256 images (used when model_type='cnn256')
+  cnn256:
+    encoder:
+      in_channels: 1
+      base_channels: 64
+      latent_dim: 1024
+      num_stages: 5       # 256 -> 8
+      use_batchnorm: true
+      dropout: 0.1
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 1024
+      num_stages: 5
+      use_batchnorm: true
+      dropout: 0.1
+
+  # ViT with CNN Decoders for 256x256 images (used when model_type='vit256')
+  vit256:
+    encoder:
+      img_size: 256
+      patch_size: 16
+      in_channels: 1
+      embed_dim: 512
+      depth: 12
+      num_heads: 8
+      mlp_ratio: 4.0
+      use_cls_token: false
+      dropout: 0.1
+      attn_dropout: 0.0
+    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
+      base_channels: 64
+      latent_dim: 512     # Must match encoder embed_dim
+      num_stages: 4       # 16x16 -> 256x256
+      use_batchnorm: true
+      dropout: 0.1
+  # model_type: 'vit'  # Options: 'vit' (Vision Transformer), 'cnn' (Convolutional Neural Network)
+
+  # Vision Transformer Encoder (used when model_type='vit')
+
+  pretrained256:
+    encoder:
+      img_size: 256
+      patch_size: 32
+      in_channels: 1
+      embed_dim: 1024
+      depth: 24
+      num_heads: 16
+      mlp_ratio: 4.0
+      use_cls_token: false
+      dropout: 0.1  # Dropout for positional embedding and MLP layers
+      attn_dropout: 0.0  # Dropout for attention weights
+      timm_model_name: 'vit_large_patch32_224'
+      timm_kwargs:
+        pretrained: false                # <-- change this to false
+        checkpoint_path: 'model.safetensors'
+        # checkpoint_kwargs:
+            # strict: true 
+        # pretrained: true  # Set to true if pretrained weights are cached/available
+
+  # Amplitude Decoder
+    amp_decoder:
+      embed_dim: 1024
+      out_channels: 1
+      # hidden_dims: [512, 256, 128, 64, 32]
+      num_stages: 5
+      activation: 'custom'
+      dropout: 0.1  # Dropout after each conv block
+
+  # Phase Decoder
+    ph_decoder:
+      embed_dim: 1024
+      out_channels: 1
+      # hidden_dims: [512, 256, 128, 64, 32]
+      num_stages: 5
+      activation: 'custom'
+      dropout: 0.1  # Dropout after each conv block
+
+      
+# Paths
+paths:
+  model_save_path: '/lus/eagle/projects/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/finetuned_model'
+
+# WandB Configuration
+wandb:
+  enabled: true
+  entity: 'SYNAPS-I'
+  project: 'PtychoViT'
+  dataset_name: 'SparkPixRT2_130nm_subset5_rerecon'
+  notes: 'finetune from 360k'
+  resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
+
+# Trainer Configuration
+trainer:
+  run_num: 7
