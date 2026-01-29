@@ -402,7 +402,8 @@ if is_main_process:
         apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
         default_normalization=config['data'].get('default_normalization', 100000.0),
         max_probe_modes=config['data'].get('max_probe_modes', 8),
-        target_size=config['data'].get('target_size', 256)
+        target_size=config['data'].get('target_size', 256),
+        object_name=config['data'].get('test_dataset_object_name', None),
     )
 
     test_loader = DataLoader(
