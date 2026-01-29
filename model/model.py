@@ -126,22 +126,27 @@ class PtychoViT(nn.Module):
         self.log_scale_ph = nn.Parameter(torch.tensor(math.log(config.get("ph_scale", math.pi)), dtype=torch.float32), requires_grad=False)
 
         self.amp_offset = config.get("amp_offset", 1.0)
+        
+        self.subtract_probe_intensity = config.get("subtract_probe_intensity", False)
 
     def forward(self, x, probe, normalization, scale):
         x = 2 * torch.log10(x + 1e-1)
 
         # FFT probe
         probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
-        # probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
-        # probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
+        if self.subtract_probe_intensity:
+            probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
+            probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
 
         # Normalization
         normalization = normalization.view(normalization.shape[0], 1, 1)
         scale = scale.view(scale.shape[0], 1, 1)
-        # probe_intensity = (probe_intensity / normalization) * scale
+        if self.subtract_probe_intensity:
+            probe_intensity = (probe_intensity / normalization) * scale
 
         # Subtract probe contribution to total intensity
-        # x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
+        if self.subtract_probe_intensity:
+            x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
         # Apply log-polar coordinate transform
         # H, W = x.shape[-2], x.shape[-1]
