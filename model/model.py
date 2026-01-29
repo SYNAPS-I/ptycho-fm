@@ -122,8 +122,8 @@ class PtychoViT(nn.Module):
         self._logpolar_hw = None
 
         # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.1), dtype=torch.float32), requires_grad=False)
-        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(math.pi), dtype=torch.float32), requires_grad=False)
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(config.get("amp_scale", 0.2)), dtype=torch.float32), requires_grad=False)
+        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(config.get("ph_scale", math.pi)), dtype=torch.float32), requires_grad=False)
 
     def forward(self, x, probe, normalization, scale):
         x = 2 * torch.log10(x + 1e-1)
@@ -156,7 +156,7 @@ class PtychoViT(nn.Module):
         constrained_ph = self.ph_decoder(x).squeeze(1)
 
         # Scale the constrained outputs 
-        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + 0.975
+        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + config.get("amp_offset", 1.0)
         ph = constrained_ph * torch.exp(self.log_scale_ph)
 
         # Complex object and diffraction
