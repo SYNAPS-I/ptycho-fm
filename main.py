@@ -697,10 +697,13 @@ try:
                 if hasattr(val_dataset, 'debug_call_count'):
                     val_dataset.debug_call_count = 0  # Reset counter for validation
         
+        if is_main_process:
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
         trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
 
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
+            print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
             trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
 
         # Optional per-epoch saving
