@@ -122,10 +122,10 @@ class PtychoViT(nn.Module):
         self._logpolar_hw = None
 
         # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(config.get("amp_scale", 0.2)), dtype=torch.float32), requires_grad=False)
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(config.get("amp_scale", 0.1)), dtype=torch.float32), requires_grad=False)
         self.log_scale_ph = nn.Parameter(torch.tensor(math.log(config.get("ph_scale", math.pi)), dtype=torch.float32), requires_grad=False)
 
-        self.amp_offset = config.get("amp_offset", 1.0)
+        self.amp_offset = config.get("amp_offset", 0.975)
         
         self.subtract_probe_intensity = config.get("subtract_probe_intensity", False)
 
