@@ -49,7 +49,7 @@ data:
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 16
-  learning_rate: 1.0e-4
+  learning_rate: 1.0e-5
   epochs: 50  # Total epochs to train for (not additional epochs when resuming)
   ngpus: 2
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
