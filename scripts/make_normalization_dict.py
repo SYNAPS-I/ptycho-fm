@@ -26,8 +26,14 @@ parser.add_argument(
     "data_path",
     help="Root directory to scan for paired *_dp/_para HDF5 files",
 )
+parser.add_argument(
+    "--output-path",
+    default="normalization.pkl",
+    help="Output path (including filename) for the normalization pickle",
+)
 args = parser.parse_args()
 data_path = args.data_path
+output_path = Path(args.output_path)
 
 
 def _init_dist():
@@ -118,11 +124,11 @@ if rank == 0:
     for shapes in gathered_probe_shapes:
         merged_probe_shapes.extend(shapes)
 
-    filename = "normalization.pkl"
-    with open(filename, 'wb') as f:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'wb') as f:
         pickle.dump(merged_norm_dict, f)
 
-    with open(filename, 'rb') as f:
+    with open(output_path, 'rb') as f:
         test = pickle.load(f)
     for key, value in test.items():
         print(f"{key}: {value}")
