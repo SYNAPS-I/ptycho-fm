@@ -613,7 +613,11 @@ if is_main_process and config['wandb']['enabled']:
                 "epochs": EPOCHS,
                 "notes": config['wandb']['notes'],
                 "encoder_type": config['model'].get('encoder_type', 'custom'),
-                "model_config": config['model']
+                "model_config": config['model'],
+                "data_config": config['data'],
+                "trainer_config": config['trainer'],
+                "wandb_config": config['wandb'],
+                "model_save_path": config['paths'].get('model_save_path', 'N/A')
             }
         )
         wandb_run_id = run.id
