@@ -767,6 +767,7 @@ if is_main_process and config['wandb']['enabled']:
                 "model_config": config['model'],
                 "data_config": config['data'],
                 "trainer_config": config['trainer'],
+                "training_config": config['training'],
                 "wandb_config": config['wandb'],
                 "model_save_path": config['paths'].get('model_save_path', 'N/A')
             }
