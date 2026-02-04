@@ -21,7 +21,7 @@ from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
 from training import Trainer
-from torch.utils.data import DataLoader, random_split, DistributedSampler
+from torch.utils.data import DataLoader, random_split, DistributedSampler, Subset
 from prefetcher import CUDAPrefetcher
 
 import wandb
@@ -244,7 +244,7 @@ data_dir = config['data']['data_path']
 
 # Create full dataset with sequential indices
 # Shuffling is handled by random_split with a deterministic seed
-full_dataset = CombinedDataset(
+base_dataset = CombinedDataset(
     file_paths=data_dir,
     rank=rank,
     world_size=world_size,
@@ -259,10 +259,30 @@ full_dataset = CombinedDataset(
     debug=DEBUG_MODE
 )
 
+# Optionally take only the first N samples from the full dataset
+full_dataset = base_dataset
+total_size = len(base_dataset)
+subset_fraction = config['data'].get('subset_fraction')
+if subset_fraction is not None:
+    if not (0.0 < subset_fraction <= 1.0):
+        raise ValueError("Config 'data.subset_fraction' must be in the range (0, 1].")
+    subset_size = int(total_size * subset_fraction)
+    if subset_size < 1:
+        raise ValueError(
+            f"Config 'data.subset_fraction'={subset_fraction} results in 0 samples. "
+            "Increase subset_fraction or use a larger dataset."
+        )
+    full_dataset = Subset(base_dataset, list(range(subset_size)))
+    total_size = subset_size
+    if is_main_process:
+        print(
+            f"Using subset_fraction={subset_fraction} -> {subset_size}/{len(base_dataset)} samples",
+            flush=True,
+        )
+
 # Split into train and validation using PyTorch's random_split
 # This ensures mutually exclusive splits and follows PyTorch best practices
 train_split = config['data']['train_split']
-total_size = len(full_dataset)
 train_size = int(total_size * train_split)
 val_size = total_size - train_size
 
@@ -428,7 +448,8 @@ if is_main_process:
     print(f"Epochs: {EPOCHS} | World Size (GPUs): {world_size}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
     print(f"Data directory: {data_dir}", flush=True)
-    print(f"Number of paired files: {len(full_dataset.file_paths)}", flush=True)
+    print(f"Number of paired files: {len(base_dataset.file_paths)}", flush=True)
+    print(f"Total patterns (after subset_fraction): {len(full_dataset)}", flush=True)
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
@@ -678,8 +699,8 @@ try:
                 if hasattr(val_dataset, 'debug_call_count'):
                     val_dataset.debug_call_count = 0
                 # Also reset the underlying CombinedDataset debug counter
-                if hasattr(full_dataset, 'debug_call_count'):
-                    full_dataset.debug_call_count = 0
+                if hasattr(base_dataset, 'debug_call_count'):
+                    base_dataset.debug_call_count = 0
 
         # Training loop
         model.train()

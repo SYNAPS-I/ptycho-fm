@@ -32,6 +32,8 @@ data:
 
   train_split: 0.80  # Fraction of data for training (20% held out for validation/test)
   random_seed: 8
+  # Optional: use only the first fraction of samples from the full dataset (0 < fraction <= 1)
+  # subset_fraction: 0.1
 
   # Distributed data loading strategy:
   sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
