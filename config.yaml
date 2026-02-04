@@ -54,6 +54,11 @@ training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 256
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  # Optional: learning rate scheduler
+  # lr_scheduler:
+  #   enabled: false
+  #   scheduler_class: 'CyclicLR'
+  #   kwargs: {}
   # Optional: per-epoch subsetting of the training set only (validation unaffected)
   # data_subsetting_schedule:
   #   enabled: true

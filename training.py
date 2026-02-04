@@ -680,6 +680,7 @@ class Trainer(object):
         metrics['val_ph_ssim'].append(avg_ph_ssim)
         metrics['val_ph_psnr'].append(avg_ph_psnr)
 
+
         if plot and self.is_main_process and last_input_diff is not None:
             input_diff_np = last_input_diff[0, 0].detach().cpu().numpy()
             output_diff_np = last_output_diff[0, 0].detach().cpu().numpy()
@@ -699,6 +700,8 @@ class Trainer(object):
 
         if scheduler:
             scheduler.step(avg_val_loss)
+            if 'lr' not in metrics:
+                metrics['lr'] = []
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})

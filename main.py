@@ -670,6 +670,21 @@ param_groups = [
 
 optimizer = optim.Adam(param_groups)
 
+# Optional learning rate scheduler
+scheduler = None
+lr_sched_cfg = config['training'].get('lr_scheduler', {})
+if lr_sched_cfg.get('enabled', False):
+    sched_name = lr_sched_cfg.get('scheduler_class')
+    if not sched_name:
+        raise ValueError("training.lr_scheduler.scheduler_class must be provided when lr_scheduler.enabled is True.")
+    sched_cls = getattr(torch.optim.lr_scheduler, sched_name, None)
+    if sched_cls is None:
+        raise ValueError(f"Unknown lr scheduler class: {sched_name}")
+    sched_kwargs = lr_sched_cfg.get('kwargs', {})
+    if not isinstance(sched_kwargs, dict):
+        raise ValueError("training.lr_scheduler.kwargs must be a dictionary.")
+    scheduler = sched_cls(optimizer=optimizer, **sched_kwargs)
+
 if is_main_process:
     print(f"\nOptimizer learning rates:", flush=True)
     print(f"  Encoder: {encoder_lr}", flush=True)
@@ -717,7 +732,7 @@ if config['training'].get('resume_from_checkpoint', False):
             model.load_state_dict(torch.load(model_checkpoint, map_location=DEVICE))
 
         # Load optimizer, metrics, and wandb run ID
-        start_epoch, metrics, optimizer, wandb_run_id, _ = trainer.load_state_checkpoint(optimizer, scheduler=None)
+        start_epoch, metrics, optimizer, wandb_run_id, scheduler = trainer.load_state_checkpoint(optimizer, scheduler=scheduler)
 
         # Use manually specified run ID if checkpoint doesn't have one (for old checkpoints)
         if wandb_run_id is None and config['wandb'].get('resume_run_id') is not None:
@@ -888,7 +903,7 @@ try:
         
         if is_main_process:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
-        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
+        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch, scheduler=scheduler)
 
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
@@ -900,7 +915,7 @@ try:
         if do_checkpoint:
             if dist.is_initialized():
                 dist.barrier()
-            trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
+            trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=scheduler)
             if dist.is_initialized():
                 dist.barrier()
         elif is_main_process and save_epoch_models:
@@ -917,7 +932,7 @@ finally:
 # Save final checkpoint only on main process
 # ────────────────────────────────────────────────────────────────────────────────
 if is_main_process:
-    trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=None)
+    trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=scheduler)
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
     with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
         pickle.dump(metrics, file)
