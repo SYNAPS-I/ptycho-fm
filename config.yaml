@@ -54,6 +54,11 @@ training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 256
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  # Optional: per-epoch subsetting of the training set only (validation unaffected)
+  # data_subsetting_schedule:
+  #   enabled: true
+  #   epochs: [0, 3, 5]
+  #   fractions: [0.05, 0.2, 1.0]
 
   # Individual learning rates for model components (optional)
   # If not specified, will use the default learning_rate above

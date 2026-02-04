@@ -53,6 +53,167 @@ args = parser.parse_args()
 DEBUG_MODE = args.debug
 
 # ────────────────────────────────────────────────────────────────────────────────
+# Data subsetting schedule helpers
+# ────────────────────────────────────────────────────────────────────────────────
+def _validate_data_subsetting_schedule(schedule_cfg):
+    if schedule_cfg is None:
+        return None
+    enabled = bool(schedule_cfg.get('enabled', False))
+    if not enabled:
+        return None
+
+    epochs = schedule_cfg.get('epochs')
+    fractions = schedule_cfg.get('fractions')
+    if not isinstance(epochs, list) or not isinstance(fractions, list):
+        raise ValueError("training.data_subsetting_schedule.epochs and fractions must be lists.")
+    if len(epochs) == 0 or len(fractions) == 0 or len(epochs) != len(fractions):
+        raise ValueError("training.data_subsetting_schedule.epochs and fractions must be non-empty and the same length.")
+    if epochs[0] != 0:
+        raise ValueError("training.data_subsetting_schedule.epochs must start with 0.")
+    if any(not isinstance(e, int) or e < 0 for e in epochs):
+        raise ValueError("training.data_subsetting_schedule.epochs must be a list of non-negative integers.")
+    if any(epochs[i] >= epochs[i + 1] for i in range(len(epochs) - 1)):
+        raise ValueError("training.data_subsetting_schedule.epochs must be strictly increasing.")
+    if any(not isinstance(f, (int, float)) or not (0.0 < float(f) <= 1.0) for f in fractions):
+        raise ValueError("training.data_subsetting_schedule.fractions must be floats in (0, 1].")
+
+    return {
+        'epochs': epochs,
+        'fractions': [float(f) for f in fractions],
+    }
+
+def _fraction_for_epoch(schedule, epoch):
+    # schedule is validated; pick the last fraction whose epoch <= current epoch
+    idx = 0
+    for i, start_epoch in enumerate(schedule['epochs']):
+        if start_epoch <= epoch:
+            idx = i
+        else:
+            break
+    return schedule['fractions'][idx]
+
+def _subset_training_subset(train_subset_base, fraction):
+    total = len(train_subset_base)
+    subset_size = int(total * fraction)
+    if subset_size < 1:
+        raise ValueError(
+            f"training.data_subsetting_schedule fraction {fraction} results in 0 samples. "
+            "Increase the fraction or use a larger dataset."
+        )
+    if hasattr(train_subset_base, 'indices'):
+        base_indices = train_subset_base.indices
+        if isinstance(base_indices, torch.Tensor):
+            base_indices = base_indices.tolist()
+        return Subset(train_subset_base.dataset, base_indices[:subset_size])
+    return Subset(train_subset_base, list(range(subset_size)))
+
+def _build_train_loader(
+    fraction: float,
+    train_subset_base: Subset,
+    sharding_strategy: str,
+    rank: int,
+    world_size: int,
+    debug_mode: bool,
+    train_dataloader_kwargs_base: dict,
+    random_seed: int,
+    device: torch.device,
+    use_cuda_prefetcher: bool,
+):
+    train_subset_epoch = _subset_training_subset(train_subset_base, fraction)
+
+    if sharding_strategy == 'static':
+        train_dataset = RankShardedSubset(
+            train_subset_epoch,
+            rank,
+            world_size,
+            debug=debug_mode,
+            subset_type='train'
+        )
+        train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
+        train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+        train_sampler = None
+    elif sharding_strategy == 'dynamic':
+        train_dataset = train_subset_epoch
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=random_seed,
+            drop_last=False
+        )
+        train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
+        train_dataloader_kwargs['sampler'] = train_sampler
+        train_dataloader_kwargs['shuffle'] = False
+        train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    else:
+        raise ValueError(
+            f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'"
+        )
+
+    if torch.cuda.is_available() and use_cuda_prefetcher:
+        train_prefetcher = CUDAPrefetcher(train_loader, device)
+    else:
+        train_prefetcher = train_loader
+
+    return (
+        train_dataset,
+        train_loader,
+        train_sampler,
+        train_prefetcher,
+        train_subset_epoch,
+        train_dataloader_kwargs,
+    )
+
+def _build_val_loader(
+    val_subset: Subset,
+    sharding_strategy: str,
+    rank: int,
+    world_size: int,
+    debug_mode: bool,
+    val_dataloader_kwargs_base: dict,
+    random_seed: int,
+    device: torch.device,
+    use_cuda_prefetcher: bool,
+):
+    if sharding_strategy == 'static':
+        val_dataset = RankShardedSubset(
+            val_subset,
+            rank,
+            world_size,
+            debug=debug_mode,
+            subset_type='val'
+        )
+        val_sampler = None
+        val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
+        val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+    elif sharding_strategy == 'dynamic':
+        val_dataset = val_subset
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            seed=random_seed,
+            drop_last=False
+        )
+        val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
+        val_dataloader_kwargs['sampler'] = val_sampler
+        val_dataloader_kwargs['shuffle'] = False
+        val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+    else:
+        raise ValueError(
+            f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'"
+        )
+
+    if torch.cuda.is_available() and use_cuda_prefetcher:
+        val_prefetcher = CUDAPrefetcher(val_loader, device)
+    else:
+        val_prefetcher = val_loader
+
+    return val_dataset, val_loader, val_sampler, val_prefetcher, val_dataloader_kwargs
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Minimal, robust distributed setup for SLURM or torchrun
 # ────────────────────────────────────────────────────────────────────────────────
 def ensure_env_from_polaris():
@@ -206,6 +367,9 @@ LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 FINETUNE_PATH = config['training'].get('finetune_from_model')
+data_subsetting_schedule = _validate_data_subsetting_schedule(
+    config['training'].get('data_subsetting_schedule')
+)
 
 # Saving / checkpointing
 save_epoch_models = bool(config['training'].get('save_epoch_models', False))
@@ -288,130 +452,96 @@ val_size = total_size - train_size
 
 generator = torch.Generator().manual_seed(config['data']['random_seed'])
 train_subset, val_subset = random_split(full_dataset, [train_size, val_size], generator=generator)
+train_subset_base = train_subset
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed Data Loading Strategy
 # ────────────────────────────────────────────────────────────────────────────────
 sharding_strategy = config['data'].get('sharding_strategy', 'static')
-
 if sharding_strategy == 'static':
-    # Static sharding: Use RankShardedSubset, each rank gets fixed samples across all epochs
     if is_main_process:
         print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
         print("  - Each rank processes fixed samples across all epochs", flush=True)
-
-    train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
-    val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
-
-    # Base DataLoader kwargs
-    train_dataloader_kwargs = {
-        'batch_size': BATCH_SIZE,
-        'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': pin_memory,
-        'shuffle': True,  # Per-epoch local shuffling within each rank's shard
-    }
-
-    val_dataloader_kwargs = {
-        'batch_size': BATCH_SIZE,
-        'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': pin_memory,
-        'shuffle': False,
-    }
-
-    # Add prefetch settings if using workers
-    if train_dataloader_kwargs['num_workers'] > 0:
-        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-    if val_dataloader_kwargs['num_workers'] > 0:
-        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-
-    # No samplers needed - set to None for later reference
-    train_sampler = None
-    val_sampler = None
-
 elif sharding_strategy == 'dynamic':
-    # Dynamic sharding: Use DistributedSampler, each rank gets different samples each epoch (better diversity)
     if is_main_process:
         print("\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
         print("  - Each rank sees different samples each epoch", flush=True)
-
-    # Use the subsets directly (no RankShardedSubset wrapper)
-    train_dataset = train_subset
-    val_dataset = val_subset
-
-    # Create DistributedSamplers
-    train_sampler = DistributedSampler(
-        train_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=True,  # Global shuffle + dynamic sharding
-        seed=config['data']['random_seed'],
-        drop_last=False
-    )
-
-    val_sampler = DistributedSampler(
-        val_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,  # No shuffle for validation
-        seed=config['data']['random_seed'],
-        drop_last=False
-    )
-
-    # Base DataLoader kwargs (NO shuffle when using sampler!)
-    train_dataloader_kwargs = {
-        'batch_size': BATCH_SIZE,
-        'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': pin_memory,
-        'sampler': train_sampler,  # Sampler handles sharding and shuffling
-        'shuffle': False,  # MUST be False when sampler is provided
-    }
-
-    val_dataloader_kwargs = {
-        'batch_size': BATCH_SIZE,
-        'num_workers': config['data'].get('num_workers', 0),
-        'pin_memory': pin_memory,
-        'sampler': val_sampler,
-        'shuffle': False,
-    }
-
-    # Add prefetch settings if using workers
-    if train_dataloader_kwargs['num_workers'] > 0:
-        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-    if val_dataloader_kwargs['num_workers'] > 0:
-        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-
 else:
     raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
 
-# Wrap loaders with CUDAPrefetcher for async data transfer
+# Base DataLoader kwargs
+train_dataloader_kwargs_base = {
+    'batch_size': BATCH_SIZE,
+    'num_workers': config['data'].get('num_workers', 0),
+    'pin_memory': pin_memory,
+    'shuffle': True,
+}
+
+val_dataloader_kwargs_base = {
+    'batch_size': BATCH_SIZE,
+    'num_workers': config['data'].get('num_workers', 0),
+    'pin_memory': pin_memory,
+    'shuffle': False,
+}
+
+# Add prefetch settings if using workers
+if train_dataloader_kwargs_base['num_workers'] > 0:
+    train_dataloader_kwargs_base['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+    train_dataloader_kwargs_base['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+if val_dataloader_kwargs_base['num_workers'] > 0:
+    val_dataloader_kwargs_base['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+    val_dataloader_kwargs_base['persistent_workers'] = config['data'].get('persistent_workers', False)
+
 # Only use prefetcher if CUDA is available AND enabled in config
 use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
-if torch.cuda.is_available() and use_cuda_prefetcher:
-    train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
-    val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
-    if is_main_process:
+
+# Build initial train/val loaders (full training set)
+(
+    train_dataset,
+    train_loader,
+    train_sampler,
+    train_prefetcher,
+    _train_subset_epoch,
+    train_dataloader_kwargs,
+) = _build_train_loader(
+    fraction=1.0,
+    train_subset_base=train_subset_base,
+    sharding_strategy=sharding_strategy,
+    rank=rank,
+    world_size=world_size,
+    debug_mode=DEBUG_MODE,
+    train_dataloader_kwargs_base=train_dataloader_kwargs_base,
+    random_seed=config['data']['random_seed'],
+    device=DEVICE,
+    use_cuda_prefetcher=use_cuda_prefetcher,
+)
+
+(
+    val_dataset,
+    val_loader,
+    val_sampler,
+    val_prefetcher,
+    val_dataloader_kwargs,
+) = _build_val_loader(
+    val_subset=val_subset,
+    sharding_strategy=sharding_strategy,
+    rank=rank,
+    world_size=world_size,
+    debug_mode=DEBUG_MODE,
+    val_dataloader_kwargs_base=val_dataloader_kwargs_base,
+    random_seed=config['data']['random_seed'],
+    device=DEVICE,
+    use_cuda_prefetcher=use_cuda_prefetcher,
+)
+
+if is_main_process:
+    if torch.cuda.is_available() and use_cuda_prefetcher:
         print("Using CUDAPrefetcher for async data transfer", flush=True)
-else:
-    # Fallback to regular loaders (training.py handles device transfers)
-    train_prefetcher = train_loader
-    val_prefetcher = val_loader
-    if is_main_process:
-        if torch.cuda.is_available():
-            print("Using standard DataLoader (CUDAPrefetcher disabled, manual device transfers)", flush=True)
-        else:
-            print("Using standard DataLoader on CPU", flush=True)
+    elif torch.cuda.is_available():
+        print("Using standard DataLoader (CUDAPrefetcher disabled, manual device transfers)", flush=True)
+    else:
+        print("Using standard DataLoader on CPU", flush=True)
 
 # Create test dataset and loader only on main process
 if is_main_process:
@@ -664,10 +794,43 @@ if is_main_process:
 # ────────────────────────────────────────────────────────────────────────────────
 try:
     for epoch in range(start_epoch, EPOCHS):
+        # Optionally apply per-epoch training subsetting schedule
+        if data_subsetting_schedule is not None:
+            fraction = _fraction_for_epoch(data_subsetting_schedule, epoch)
+            (
+                train_dataset,
+                train_loader,
+                train_sampler,
+                train_prefetcher,
+                train_subset_epoch,
+                train_dataloader_kwargs,
+            ) = _build_train_loader(
+                fraction=fraction,
+                train_subset_base=train_subset_base,
+                sharding_strategy=sharding_strategy,
+                rank=rank,
+                world_size=world_size,
+                debug_mode=DEBUG_MODE,
+                train_dataloader_kwargs_base=train_dataloader_kwargs_base,
+                random_seed=config['data']['random_seed'],
+                device=DEVICE,
+                use_cuda_prefetcher=use_cuda_prefetcher,
+            )
+
+            if is_main_process:
+                print(
+                    f"Data subsetting schedule: epoch {epoch} -> "
+                    f"{fraction * 100:.2f}% of training set "
+                    f"({len(train_subset_epoch)} samples before sharding)",
+                    flush=True,
+                )
+
         # Set epoch for DistributedSampler (dynamic sharding only)
-        if sharding_strategy == 'dynamic' and train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-            val_sampler.set_epoch(epoch)
+        if sharding_strategy == 'dynamic':
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch)
 
         # Save config to run path at epoch 0
         if epoch == 0 and is_main_process:
