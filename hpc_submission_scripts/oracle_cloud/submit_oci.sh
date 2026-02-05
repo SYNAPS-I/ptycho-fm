@@ -16,8 +16,8 @@ NUM_NODES=0
 LOG_DIR="/fss/projects/synaps-i/mingdu/ptycho-vit/workspace/logs"
 TMUX_SESSION_BASE="ptycho_train"
 # Optional: set to a file with one hostname per line to bypass mgmt query
-# NODELIST_FILE="${WORKDIR}/workspace/node_list.txt"
 NODELIST_FILE=""
+# NODELIST_FILE="${WORKDIR}/workspace/node_list.txt"
 
 if [[ ! -d "${WORKDIR}" ]]; then
   echo "ERROR: WORKDIR not found: ${WORKDIR}"
@@ -148,6 +148,7 @@ export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,ENV
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 tmux new-session -d -s "${session_name}" "bash -lc 'source \"${WORKDIR}/.venv/bin/activate\"; torchrun \
   --nnodes ${NNODES} \
   --nproc_per_node ${NPROC_PER_NODE} \
