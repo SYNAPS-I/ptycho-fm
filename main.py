@@ -370,6 +370,11 @@ FINETUNE_PATH = config['training'].get('finetune_from_model')
 data_subsetting_schedule = _validate_data_subsetting_schedule(
     config['training'].get('data_subsetting_schedule')
 )
+skip_batch_if_grad_norm_greater_than = config['training'].get('skip_batch_if_grad_norm_greater_than')
+if skip_batch_if_grad_norm_greater_than is not None:
+    skip_batch_if_grad_norm_greater_than = float(skip_batch_if_grad_norm_greater_than)
+    if skip_batch_if_grad_norm_greater_than <= 0:
+        raise ValueError("training.skip_batch_if_grad_norm_greater_than must be > 0 or null.")
 
 # Saving / checkpointing
 save_epoch_models = bool(config['training'].get('save_epoch_models', False))
@@ -711,7 +716,9 @@ trainer = Trainer(
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
     use_ddp=(world_size > 1),
-    wandb_enabled=config['wandb']['enabled']
+    wandb_enabled=config['wandb']['enabled'],
+    debug_mode=DEBUG_MODE,
+    skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than
 )
 
 # ────────────────────────────────────────────────────────────────────────────────

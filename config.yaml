@@ -73,6 +73,8 @@ training:
 
   epochs: 11  # Total epochs to train for (not additional epochs when resuming)
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
+  # Skip batch update if grad norm exceeds this value (null disables)
+  skip_batch_if_grad_norm_greater_than: null
 
   # Weighted loss configuration (only used when loss_function: 'weighted')
   weighted_loss:

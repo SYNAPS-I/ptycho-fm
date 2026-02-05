@@ -141,7 +141,8 @@ def compute_ssim(
 
 class Trainer(object):
     def __init__(self, model, mode, run_num, device, model_save_path,
-                 is_main_process=True, use_ddp=False, wandb_enabled=True):
+                 is_main_process=True, use_ddp=False, wandb_enabled=True, debug_mode=False,
+                 skip_batch_if_grad_norm_greater_than=None):
         super().__init__()
         self.model = model
         self.mode = mode
@@ -151,6 +152,8 @@ class Trainer(object):
         self.is_main_process = is_main_process
         self.use_ddp = use_ddp
         self.wandb_enabled = wandb_enabled
+        self.debug_mode = debug_mode
+        self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -470,7 +473,43 @@ class Trainer(object):
 
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+
+            total_norm = None
+            global_max_norm = None
+            need_grad_norm = (
+                self.debug_mode
+                or (self.skip_batch_if_grad_norm_greater_than is not None)
+            )
+            if need_grad_norm:
+                total_norm_sq = 0.0
+                for param in self.model.parameters():
+                    if param.grad is None:
+                        continue
+                    grad_norm = param.grad.detach().float().norm(2)
+                    total_norm_sq += float(grad_norm) ** 2
+                total_norm = total_norm_sq ** 0.5
+                global_max_norm = total_norm
+
+                if self.use_ddp and dist.is_initialized() and self.skip_batch_if_grad_norm_greater_than is not None:
+                    norm_tensor = torch.tensor(total_norm, device=self.device)
+                    dist.all_reduce(norm_tensor, op=dist.ReduceOp.MAX)
+                    global_max_norm = float(norm_tensor.item())
+
+                if self.debug_mode and self.is_main_process and self.wandb_enabled:
+                    wandb.log({"grad_norm": global_max_norm})
+
+            skip_threshold = self.skip_batch_if_grad_norm_greater_than
+            if skip_threshold is not None and global_max_norm is not None and global_max_norm > skip_threshold:
+                if self.is_main_process:
+                    from datetime import datetime
+                    print(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"[Skip Batch] Grad norm {global_max_norm:.2f} > {skip_threshold} "
+                        f"(batch {batch_idx + 1}/{total_batches})",
+                        flush=True
+                    )
+            else:
+                optimizer.step()
 
             train_end_time = time.time()
 
