@@ -738,7 +738,11 @@ class Trainer(object):
                 wandb.log({"val_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Epoch {epoch}")})
 
         if scheduler:
-            scheduler.step(avg_val_loss)
+            # Only ReduceLROnPlateau expects a monitored metric; others use epoch progression.
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_val_loss)
+            else:
+                scheduler.step()
             if 'lr' not in metrics:
                 metrics['lr'] = []
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
