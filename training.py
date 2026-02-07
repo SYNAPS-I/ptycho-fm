@@ -280,7 +280,7 @@ class Trainer(object):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
-    def generate_test_plot(self, dataloader, epoch, filename):
+    def generate_test_plot(self, dataloader, epoch, filename, central_crop=64, ph_crop=180):
         total_scan_points = len(dataloader.dataset)
         pred_amp = torch.zeros((total_scan_points, dataloader.dataset.pattern_shape[0], dataloader.dataset.pattern_shape[1]), device='cpu')
         pred_ph = torch.zeros(pred_amp.shape, device='cpu')
@@ -316,7 +316,9 @@ class Trainer(object):
         pred_ph_object = torch.zeros(object_size, device='cpu')
         buffer = torch.zeros(object_size, device='cpu')
 
-        central_crop = 64
+        central_crop = int(central_crop)
+        if central_crop <= 0:
+            raise ValueError("test_plot central_crop must be a positive integer.")
         pred_amp_object = place_patches_fourier_shift(
             pred_amp_object,
             positions,
@@ -366,8 +368,11 @@ class Trainer(object):
         gt_amp_object = gt_amp_object / torch.clip(buffer, min=1)
         gt_ph_object = gt_ph_object / torch.clip(buffer, min=1)
 
-        vmin_ph = torch.mean(pred_ph_object[180:-180, 180:-180]) - (2 * torch.std(pred_ph_object[180:-180, 180:-180]))
-        vmax_ph = torch.mean(pred_ph_object[180:-180, 180:-180]) + (2 * torch.std(pred_ph_object[180:-180, 180:-180]))
+        ph_crop = int(ph_crop)
+        if ph_crop <= 0:
+            raise ValueError("test_plot ph_crop must be a positive integer.")
+        vmin_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) - (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
+        vmax_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) + (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
 
         f, ax = plt.subplots(figsize=(9, 8), ncols=2, nrows=2)
 

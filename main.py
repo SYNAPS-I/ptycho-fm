@@ -915,7 +915,13 @@ try:
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
-            trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
+            trainer.generate_test_plot(
+                test_loader,
+                epoch,
+                'test_epoch' + str(epoch) + '.png',
+                central_crop=config['training'].get('test_plot_central_crop', 64),
+                ph_crop=config['training'].get('test_plot_ph_crop', 180),
+            )
 
         # Optional per-epoch saving
         do_checkpoint = checkpoint_freq > 0 and ((epoch + 1) % checkpoint_freq == 0)
