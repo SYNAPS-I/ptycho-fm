@@ -5,19 +5,19 @@ To run with multiple processes, use torchrun, e.g.:
 """
 
 import os
-import sys
 import numpy as np
 from pathlib import Path
 import h5py
 import pickle
-import tqdm
 import argparse
-import torch
-import torch.distributed as dist
-
-# Add parent directory to path to import data module
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data import CombinedDataset
+try:
+    import tqdm
+except Exception:
+    tqdm = None
+try:
+    import torch.distributed as dist
+except Exception:
+    dist = None
 
 parser = argparse.ArgumentParser(
     description="Create normalization dict from paired *_dp/_para HDF5 files."
@@ -37,18 +37,51 @@ output_path = Path(args.output_path)
 
 
 def _init_dist():
+    if dist is None:
+        return 0, 1
     if not dist.is_available():
         return 0, 1
     if dist.is_initialized():
         return dist.get_rank(), dist.get_world_size()
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        # Use gloo to avoid NCCL GPU affinity issues for this CPU-bound script.
-        dist.init_process_group(backend="gloo", init_method="env://")
-        return dist.get_rank(), dist.get_world_size()
+        try:
+            # Use gloo to avoid NCCL GPU affinity issues for this CPU-bound script.
+            dist.init_process_group(backend="gloo", init_method="env://")
+            return dist.get_rank(), dist.get_world_size()
+        except Exception as e:
+            print(f"Warning: Failed to initialize torch.distributed ({e}). Falling back to single process.", flush=True)
+            return 0, 1
     return 0, 1
 
 
 rank, n_ranks = _init_dist()
+
+
+def derive_object_name(file_path: Path, base_dir: Path) -> str:
+    """Derive object name from file_path relative to base_dir, stripping _dp/_para suffix."""
+    file_path = Path(file_path)
+    base_dir = Path(base_dir)
+
+    try:
+        rel = file_path.resolve().relative_to(base_dir.resolve())
+    except Exception:
+        rel = None
+
+    if rel is not None:
+        rel_no_suffix = rel.with_suffix("")
+        rel_name = rel_no_suffix.name
+        if rel_name.endswith("_dp"):
+            rel_no_suffix = rel_no_suffix.with_name(rel_name[:-3])
+        elif rel_name.endswith("_para"):
+            rel_no_suffix = rel_no_suffix.with_name(rel_name[:-5])
+        return rel_no_suffix.as_posix()
+
+    stem = file_path.stem
+    if stem.endswith("_dp"):
+        return stem[:-3]
+    if stem.endswith("_para"):
+        return stem[:-5]
+    return stem
 
 def find_paired_files(directory):
     """
@@ -86,7 +119,7 @@ def find_paired_files(directory):
 
     print(f"Found {len(paired_files)} paired dataset(s) in {directory}", flush=True)
     for f in paired_files:
-        object_name = CombinedDataset.derive_object_name(f, directory)
+        object_name = derive_object_name(f, directory)
         print(f"  - {object_name}", flush=True)
 
     return paired_files
@@ -95,8 +128,11 @@ files = find_paired_files(data_path) # This list has only the DP files!
 
 probe_shapes = []
 norm_dict = {}
-for file_path in tqdm.tqdm(files[rank::n_ranks], disable=rank != 0):
-    object_name = CombinedDataset.derive_object_name(file_path, Path(data_path))
+file_iter = files[rank::n_ranks]
+if tqdm is not None:
+    file_iter = tqdm.tqdm(file_iter, disable=rank != 0)
+for file_path in file_iter:
+    object_name = derive_object_name(file_path, Path(data_path))
     para_file = Path(file_path).with_name(f"{Path(file_path).stem[:-3]}_para.hdf5")
     with h5py.File(para_file, 'r') as f:
         probe = f['probe'][:]
@@ -106,7 +142,7 @@ for file_path in tqdm.tqdm(files[rank::n_ranks], disable=rank != 0):
     max_intensity = np.max(data)
     norm_dict[object_name] = max_intensity
 
-if n_ranks > 1 and dist.is_available() and dist.is_initialized():
+if n_ranks > 1 and dist is not None and dist.is_available() and dist.is_initialized():
     gathered_dicts = [None for _ in range(n_ranks)]
     gathered_probe_shapes = [None for _ in range(n_ranks)]
     dist.all_gather_object(gathered_dicts, norm_dict)
@@ -137,6 +173,6 @@ if rank == 0:
     print("Max. OPR probe modes (index 0):", np.max(probe_shapes[:, 0]))
     print("Max. incoherent modes (index 1):", np.max(probe_shapes[:, 1]))
 
-if n_ranks > 1 and dist.is_available() and dist.is_initialized():
+if n_ranks > 1 and dist is not None and dist.is_available() and dist.is_initialized():
     dist.barrier()
     dist.destroy_process_group()
