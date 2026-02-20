@@ -326,7 +326,7 @@ class VisionTransformer(nn.Module):
 
         batch_size = x.shape[0]
         x = tokens.transpose(1, 2)  # (B, C, N)
-        x = x.reshape(batch_size, self.embed_dim, self.grid_size[0], self.grid_size[1])
+        x = x.reshape(batch_size, self.embed_dim, self.grid_size[0], self.grid_size[1]).contiguous()
         return x
 
     @property

@@ -620,8 +620,19 @@ if is_main_process:
     print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
     dummy_data = torch.randn((1, 1, img_size, img_size))
     dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
-    summary(model, input_data={'x': dummy_data, 'probe': dummy_probe,
-            'normalization': torch.randn((1, 1)), 'scale': torch.randn((1, 1))}, device='cpu')
+    try:
+        summary(
+            model,
+            input_data={
+                'x': dummy_data,
+                'probe': dummy_probe,
+                'normalization': torch.randn((1, 1)),
+                'scale': torch.randn((1, 1)),
+            },
+            device='cpu',
+        )
+    except Exception as e:
+        print(f"[Warning] torchinfo summary failed and will be skipped: {e}", flush=True)
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
@@ -699,7 +710,7 @@ if lr_sched_cfg.get('enabled', False):
     scheduler = sched_cls(optimizer=optimizer, **sched_kwargs)
 
 if is_main_process:
-    print(f"\nOptimizer learning rates:", flush=True)
+    print("\nOptimizer learning rates:", flush=True)
     print(f"  Encoder: {encoder_lr}", flush=True)
     print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
     print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
@@ -902,7 +913,7 @@ try:
 
         # Training loop
         model.train()
-        trainer.train(train_prefetcher, criterion, optimizer, metrics)
+        trainer.train(train_prefetcher, criterion, optimizer, metrics, epoch=epoch)
 
         # Validation loop
         model.eval()

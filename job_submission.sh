@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH -J pretrained256_full_variable_lr
+#SBATCH -J job_name
 #SBATCH -q regular
 #SBATCH -C gpu
-#SBATCH -N 4
+#SBATCH -N 256
 #SBATCH -c 8                    
-#SBATCH -t 08:00:00
-#SBATCH -A m5073_g
-#SBATCH -o exp3_%j.log
-#SBATCH -e exp3_%j.err
+#SBATCH -t 04:00:00
+#SBATCH -A amsc006_g
+#SBATCH -o exp1_%j.log
+#SBATCH -e exp1_%j.err
 
 # --- Modules ---
 module load pytorch/2.6.0

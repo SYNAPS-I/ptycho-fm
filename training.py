@@ -13,8 +13,6 @@ from utils.ptychi_utils import place_patches_fourier_shift
 import wandb
 
 
-
-
 def _move_to_cpu(obj):
     # Recursively detach and move Torch tensors to CPU (for safe serialization).
     if torch.is_tensor(obj):
@@ -140,9 +138,19 @@ def compute_ssim(
 
 
 class Trainer(object):
-    def __init__(self, model, mode, run_num, device, model_save_path,
-                 is_main_process=True, use_ddp=False, wandb_enabled=True, debug_mode=False,
-                 skip_batch_if_grad_norm_greater_than=None):
+    def __init__(
+        self, 
+        model, 
+        mode, 
+        run_num, 
+        device, 
+        model_save_path,
+        is_main_process=True, 
+        use_ddp=False, 
+        wandb_enabled=True, 
+        debug_mode=False,
+        skip_batch_if_grad_norm_greater_than=None
+    ):
         super().__init__()
         self.model = model
         self.mode = mode
@@ -290,7 +298,10 @@ class Trainer(object):
 
         with torch.no_grad():
             for i, batch in enumerate(dataloader):
-                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+                if isinstance(batch, (list, tuple)) and len(batch) == 8:
+                    diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
+                else:
+                    diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
                 batch_size = diff_amp.size(0)
 
                 input_diff = diff_amp.to(self.device, non_blocking=True)
@@ -410,17 +421,18 @@ class Trainer(object):
         if self.wandb_enabled:
             wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
 
-    def train(self, dataloader, criterion, optimizer, metrics):
+    def train(self, dataloader, criterion, optimizer, metrics, epoch=None):
         """
         Training loop.
 
         Args:
             dataloader: PyTorch DataLoader yielding batches of
-                       (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale)
+                       (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale[, meta])
         """
         running_loss = 0.0
         running_amp_loss = 0.0
         running_ph_loss = 0.0
+        processed_batches = 0
 
         total_batches = len(dataloader)
         progress_milestones = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
@@ -450,7 +462,10 @@ class Trainer(object):
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
 
             # ── Unpack ──────────────────────────────────────────────────────────
-            diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+            if isinstance(batch, (list, tuple)) and len(batch) == 8:
+                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
+            else:
+                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
 
             # ── FIX: move required tensors to device right after unpack ─────────
             # Works for both normal DataLoader (CPU) and CUDAPrefetcher (already GPU)
@@ -476,7 +491,7 @@ class Trainer(object):
             else:
                 loss = criterion(output_diff, input_diff)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
             total_norm = None
@@ -515,6 +530,7 @@ class Trainer(object):
                     )
             else:
                 optimizer.step()
+                processed_batches += 1
 
             train_end_time = time.time()
 
@@ -546,10 +562,17 @@ class Trainer(object):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                 next_milestone_idx += 1
 
-        num_batches = len(dataloader)
-        avg_train_loss = running_loss / num_batches
-        avg_amp_loss = running_amp_loss / num_batches
-        avg_ph_loss = running_ph_loss / num_batches
+        num_batches = processed_batches
+        if num_batches == 0:
+            if self.is_main_process:
+                print("[Warning] No training batches were processed.", flush=True)
+            avg_train_loss = float("inf")
+            avg_amp_loss = float("inf")
+            avg_ph_loss = float("inf")
+        else:
+            avg_train_loss = running_loss / num_batches
+            avg_amp_loss = running_amp_loss / num_batches
+            avg_ph_loss = running_ph_loss / num_batches
 
         if self.is_main_process:
             from datetime import datetime
@@ -586,6 +609,7 @@ class Trainer(object):
         val_ph_ssim = 0.0
         val_ph_psnr = 0.0
         num_samples = 0
+        processed_batches = 0
 
         total_batches = len(dataloader)
         progress_milestones = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -601,7 +625,10 @@ class Trainer(object):
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
-                diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
+                if isinstance(batch, (list, tuple)) and len(batch) == 8:
+                    diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
+                else:
+                    diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
 
                 # ── FIX: move required tensors to device right after unpack ─────────
                 diff_amp  = diff_amp.to(self.device, non_blocking=True)
@@ -628,6 +655,7 @@ class Trainer(object):
                 loss_ph  = criterion(output_ph.detach(), ph_patch)
                 val_amp_loss += loss_amp.item()
                 val_ph_loss += loss_ph.item()
+                processed_batches += 1
 
                 # SSIM/PSNR metrics (vectorized; average over samples)
                 batch_size = output_amp.size(0)
@@ -672,11 +700,18 @@ class Trainer(object):
                     last_ph_patch = ph_patch
                     last_output_ph = output_ph
 
-        num_batches = len(dataloader)
-        avg_val_loss = val_loss / num_batches
-        avg_val_amp_loss = val_amp_loss / num_batches
-        avg_val_ph_loss = val_ph_loss / num_batches
-
+        num_batches = processed_batches
+        if num_batches == 0:
+            if self.is_main_process:
+                print("[Warning] No validation batches were processed.", flush=True)
+            avg_val_loss = float("inf")
+            avg_val_amp_loss = float("inf")
+            avg_val_ph_loss = float("inf")
+        else:
+            avg_val_loss = val_loss / num_batches
+            avg_val_amp_loss = val_amp_loss / num_batches
+            avg_val_ph_loss = val_ph_loss / num_batches
+        
         # Average SSIM and PSNR
         avg_amp_ssim = val_amp_ssim / num_samples if num_samples > 0 else 0.0
         avg_amp_psnr = val_amp_psnr / num_samples if num_samples > 0 else 0.0
