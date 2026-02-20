@@ -426,7 +426,7 @@ param_groups = [
 optimizer = optim.Adam(param_groups)
 
 if is_main_process:
-    # print(f"\nOptimizer learning rates:", flush=True)
+    print("\nOptimizer learning rates:", flush=True)
     print(f"  Encoder: {encoder_lr}", flush=True)
     print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
     print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
