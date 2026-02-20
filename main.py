@@ -4,6 +4,7 @@ import argparse
 import pickle
 import yaml
 import socket
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -38,6 +39,9 @@ def load_config(config_path='config.yaml'):
     config_path = resolve_config_path(config_path)
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
+    if config.get('trainer', {}).get('run_num') is None:
+        # Ensure run folder name is "run_yyyymmdd_hhmmss"
+        config.setdefault('trainer', {})['run_num'] = datetime.now().strftime("_%Y%m%d_%H%M%S")
     return config
 
 # Parse command-line arguments
