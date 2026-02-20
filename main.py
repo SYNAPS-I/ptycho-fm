@@ -24,6 +24,7 @@ from custom_loss import WeightedLoss
 from training import Trainer
 from torch.utils.data import DataLoader, random_split, DistributedSampler, Subset
 from prefetcher import CUDAPrefetcher
+from utils.utils import compute_sha256
 
 import wandb
 
@@ -636,7 +637,10 @@ if world_size > 1:
         model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
 
 # Load pretrained weights for finetuning (fresh optimizer state)
+finetune_checkpoint_sha256 = None
 if FINETUNE_PATH:
+    if is_main_process:
+        finetune_checkpoint_sha256 = compute_sha256(FINETUNE_PATH)
     state = torch.load(FINETUNE_PATH, map_location=DEVICE)
     if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
         model.module.load_state_dict(state)
@@ -812,6 +816,10 @@ if is_main_process and config['wandb']['enabled']:
     if os.path.exists(config_copy_path):
         os.remove(config_copy_path)
     print('Uploaded config to wandb as artifact', flush=True)
+
+    if FINETUNE_PATH and finetune_checkpoint_sha256 is not None:
+        wandb.run.summary["finetune_checkpoint_sha256"] = finetune_checkpoint_sha256
+        print("Logged finetune checkpoint SHA256 to wandb", flush=True)
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
