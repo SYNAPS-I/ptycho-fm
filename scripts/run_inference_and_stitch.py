@@ -14,11 +14,11 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data import PtychographyDataset
-from model.model import PtychoViT
-from development_logs.model512 import PtychoViT as PtychoViT512
-from development_logs.model_cnn import PtychoCNN, PtychoCNN256
-from utils.ptychi_utils import place_patches_fourier_shift
+from data import PtychographyDataset  # noqa: E402
+from model.model import PtychoViT  # noqa: E402
+from development_logs.model512 import PtychoViT as PtychoViT512  # noqa: E402
+from development_logs.model_cnn import PtychoCNN, PtychoCNN256  # noqa: E402
+from utils.ptychi_utils import place_patches_fourier_shift  # noqa: E402
 
 
 def load_config(path: str) -> dict:

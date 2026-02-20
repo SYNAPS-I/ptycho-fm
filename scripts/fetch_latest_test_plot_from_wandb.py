@@ -77,14 +77,12 @@ def _pick_latest_run(
 
 def _find_latest_test_plot_path(run) -> str | None:
     latest_val = None
-    latest_step = None
 
     try:
         for row in run.scan_history(keys=["test_plot"]):
             val = row.get("test_plot")
             if val:
                 latest_val = val
-                latest_step = row.get("_step")
     except Exception:
         # History may be large or restricted; fall back to file scan.
         latest_val = None

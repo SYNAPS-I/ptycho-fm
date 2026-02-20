@@ -90,7 +90,7 @@ def test_data_loading(config, num_samples=3):
         sample = dataset[0]
         diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = sample
 
-        print(f"  Sample shapes:")
+        print("  Sample shapes:")
         print(f"    diff_amp: {diff_amp.shape}, dtype: {diff_amp.dtype}")
         print(f"    amp_patch: {amp_patch.shape}, range: [{amp_patch.min():.3f}, {amp_patch.max():.3f}]")
         print(f"    ph_patch: {ph_patch.shape}, range: [{ph_patch.min():.3f}, {ph_patch.max():.3f}]")
@@ -112,7 +112,7 @@ def test_model_loading(config):
 
     # Create model
     model = PtychoViT(config=config['model'])
-    print(f"Model created: PtychoViT")
+    print("Model created: PtychoViT")
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -161,14 +161,14 @@ def test_forward_pass(model, config):
     dummy_norm = torch.tensor([[100000.0]] * batch_size, device=device)
     dummy_scale = torch.tensor([[10000.0]] * batch_size, device=device)
 
-    print(f"Input shapes:")
+    print("Input shapes:")
     print(f"  diff: {dummy_diff.shape}")
     print(f"  probe: {dummy_probe.shape}")
 
     with torch.no_grad():
         output_diff, output_amp, output_ph = model(dummy_diff, dummy_probe, dummy_norm, dummy_scale)
 
-    print(f"Output shapes:")
+    print("Output shapes:")
     print(f"  output_diff: {output_diff.shape}")
     print(f"  output_amp: {output_amp.shape}, range: [{output_amp.min():.3f}, {output_amp.max():.3f}]")
     print(f"  output_ph: {output_ph.shape}, range: [{output_ph.min():.3f}, {output_ph.max():.3f}]")
@@ -193,7 +193,7 @@ def test_metrics():
     pred_identical = gt.clone()
     ssim_identical = compute_ssim(pred_identical.squeeze(), gt.squeeze())
     psnr_identical = compute_psnr(pred_identical.squeeze(), gt.squeeze())
-    print(f"Identical images:")
+    print("Identical images:")
     print(f"  SSIM: {ssim_identical:.4f} (expected: ~1.0)")
     print(f"  PSNR: {psnr_identical:.2f} dB (expected: very high/inf)")
 
@@ -202,7 +202,7 @@ def test_metrics():
     pred_noisy = gt + noise
     ssim_noisy = compute_ssim(pred_noisy.squeeze(), gt.squeeze())
     psnr_noisy = compute_psnr(pred_noisy.squeeze(), gt.squeeze())
-    print(f"Noisy image (10% noise):")
+    print("Noisy image (10% noise):")
     print(f"  SSIM: {ssim_noisy:.4f} (expected: < 1.0)")
     print(f"  PSNR: {psnr_noisy:.2f} dB (expected: ~20-30 dB)")
 
@@ -210,7 +210,7 @@ def test_metrics():
     pred_random = torch.rand_like(gt)
     ssim_random = compute_ssim(pred_random.squeeze(), gt.squeeze())
     psnr_random = compute_psnr(pred_random.squeeze(), gt.squeeze())
-    print(f"Random image:")
+    print("Random image:")
     print(f"  SSIM: {ssim_random:.4f} (expected: low)")
     print(f"  PSNR: {psnr_random:.2f} dB (expected: low)")
 
@@ -279,7 +279,7 @@ def test_real_inference(model, config):
     ssim_ph = compute_ssim(output_ph.squeeze(), ph_patch.squeeze())
     psnr_ph = compute_psnr(output_ph.squeeze(), ph_patch.squeeze())
 
-    print(f"\nMetrics vs ground truth reconstruction:")
+    print("\nMetrics vs ground truth reconstruction:")
     print(f"  Amplitude - SSIM: {ssim_amp:.4f}, PSNR: {psnr_amp:.2f} dB")
     print(f"  Phase     - SSIM: {ssim_ph:.4f}, PSNR: {psnr_ph:.2f} dB")
 

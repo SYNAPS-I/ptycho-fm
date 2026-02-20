@@ -76,14 +76,14 @@ def create_normalization_dict(
 
     # Print some statistics
     values = list(normalization_dict.values())
-    print(f"\nNormalization statistics:")
+    print("\nNormalization statistics:")
     print(f"  Min:    {min(values):.2f}")
     print(f"  Max:    {max(values):.2f}")
     print(f"  Mean:   {np.mean(values):.2f}")
     print(f"  Median: {np.median(values):.2f}")
 
     # Print a few examples
-    print(f"\nFirst 5 entries:")
+    print("\nFirst 5 entries:")
     for i, (name, val) in enumerate(list(normalization_dict.items())[:5]):
         print(f"  {name}: {val:.2f}")
 
