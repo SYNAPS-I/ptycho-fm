@@ -7,7 +7,6 @@ All models are fixed at 256x256 image size.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 from model.vit import CustomViT
 from model.vit_pretrained import VisionTransformer
