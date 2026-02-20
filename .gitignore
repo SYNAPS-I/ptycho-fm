@@ -1,0 +1,9 @@
+# python cache dirs
+__pycache__/
+.ipynb_checkpoints/
+
+# root-only workspace
+/workspace/
+
+# compiled python
+*.pyc
