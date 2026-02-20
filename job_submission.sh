@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH -J pretrained_vit256_exp_9
+#SBATCH -J job_name
 #SBATCH -q regular
 #SBATCH -C gpu
-#SBATCH -N 63
-#SBATCH -c 16                     
-#SBATCH -t 00:55:00
-#SBATCH -A m5073_g
-#SBATCH -o exp9_%j.log
-#SBATCH -e exp9_%j.err
+#SBATCH -N 256
+#SBATCH -c 8                    
+#SBATCH -t 04:00:00
+#SBATCH -A amsc006_g
+#SBATCH -o exp1_%j.log
+#SBATCH -e exp1_%j.err
 
 # --- Modules ---
 module load pytorch/2.6.0
@@ -25,7 +25,7 @@ export NCCL_SOCKET_IFNAME=^lo,docker0
 export NCCL_NET_GDR_LEVEL=2
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONFAULTHANDLER=1
-export OMP_NUM_THREADS=8
+export OMP_NUM_THREADS=1 #8 before
 export FI_CXI_DISABLE_CQ_HUGETLB=1
 export NCCL_CROSS_NIC=0
 
@@ -35,8 +35,8 @@ export MASTER_ADDR
 export MASTER_PORT=29500
 
 # --- Config path (script must accept --config) ---
-CFG="config.yaml"
+# CFG="config.yaml"
 
 # --- Launch (128 nodes × 4 tasks/node = 512 GPUs) ---
-srun -N 63 --ntasks-per-node=4 --ntasks=252 --gpus-per-task=1 --gpu-bind=none -l -u \
-    python main.py --config "$CFG"
+srun -N 256 --ntasks-per-node=4 --ntasks=1024 --gpus-per-task=1 --gpu-bind=none -l -u \
+    python main.py 

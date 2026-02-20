@@ -123,6 +123,7 @@ BATCH_SIZE = config['training']['batch_size']
 LR = config['training']['learning_rate']
 EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
+FINETUNE_PATH = config['training'].get('finetune_from_model')
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Distributed init (Code A style)
@@ -353,8 +354,19 @@ if is_main_process:
     print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
     dummy_data = torch.randn((1, 1, img_size, img_size))
     dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
-    summary(model, input_data={'x': dummy_data, 'probe': dummy_probe,
-            'normalization': torch.randn((1, 1)), 'scale': torch.randn((1, 1))}, device='cpu')
+    try:
+        summary(
+            model,
+            input_data={
+                'x': dummy_data,
+                'probe': dummy_probe,
+                'normalization': torch.randn((1, 1)),
+                'scale': torch.randn((1, 1)),
+            },
+            device='cpu',
+        )
+    except Exception as e:
+        print(f"[Warning] torchinfo summary failed and will be skipped: {e}", flush=True)
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
@@ -368,6 +380,16 @@ if world_size > 1:
         # For torchrun or other launchers, explicitly specify device
         dev_index = torch.cuda.current_device()
         model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
+
+# Load pretrained weights for finetuning (fresh optimizer state)
+if FINETUNE_PATH:
+    state = torch.load(FINETUNE_PATH, map_location=DEVICE)
+    if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+        model.module.load_state_dict(state)
+    else:
+        model.load_state_dict(state)
+    if is_main_process:
+        print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)        
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Loss, optimizer, metrics, trainer
@@ -404,7 +426,7 @@ param_groups = [
 optimizer = optim.Adam(param_groups)
 
 if is_main_process:
-    print(f"\nOptimizer learning rates:", flush=True)
+    print("\nOptimizer learning rates:", flush=True)
     print(f"  Encoder: {encoder_lr}", flush=True)
     print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
     print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
@@ -416,6 +438,11 @@ metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'vali
 start_epoch = 0
 wandb_run_id = None
 
+# If finetuning weights are provided, skip optimizer state resume to keep optimizer fresh
+if FINETUNE_PATH:
+    if is_main_process:
+        print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
+    
 trainer = Trainer(
     model,
     MODE,
@@ -424,7 +451,7 @@ trainer = Trainer(
     MODEL_SAVE_PATH,
     is_main_process=is_main_process,
     use_ddp=(world_size > 1),
-    wandb_enabled=config['wandb']['enabled']
+    wandb_enabled=config['wandb']['enabled'],
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -558,7 +585,7 @@ try:
 
         # Training loop
         model.train()
-        trainer.train(train_prefetcher, criterion, optimizer, metrics)
+        trainer.train(train_prefetcher, criterion, optimizer, metrics, epoch=epoch)
 
         # Validation loop
         model.eval()

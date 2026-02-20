@@ -50,6 +50,29 @@ class PtychoViT(nn.Module):
         # Determine encoder type
         encoder_type = config.get('encoder_type', 'custom')
         encoder_config = config.get('encoder', {})
+        init_config = config.get('init', {})
+        init_enabled = bool(init_config.get('enabled', False))
+        init_method = init_config.get('method', 'trunc_normal')
+        init_mean = float(init_config.get('mean', 0.0))
+        init_std = float(init_config.get('std', 0.02))
+        kaiming_cfg = init_config.get('kaiming', {}) or {}
+        kaiming_distribution = kaiming_cfg.get('distribution', 'uniform')
+        kaiming_mode = kaiming_cfg.get('mode', 'fan_in')
+        kaiming_nonlinearity = kaiming_cfg.get('nonlinearity', 'relu')
+        kaiming_a = float(kaiming_cfg.get('a', 0.0))
+        apply_to = init_config.get('apply_to', ['encoder', 'decoders'])
+        if isinstance(apply_to, str):
+            apply_to = [apply_to]
+        apply_to = set(apply_to)
+        override_pretrained = bool(init_config.get('override_pretrained', False))
+        if init_enabled and init_method not in ['trunc_normal', 'kaiming']:
+            raise ValueError(f"Unknown init method: {init_method}. Use 'trunc_normal' or 'kaiming'.")
+        if init_enabled and init_method == 'kaiming':
+            if kaiming_distribution not in ['uniform', 'normal']:
+                raise ValueError(
+                    f"Unknown kaiming distribution: {kaiming_distribution}. "
+                    "Use 'uniform' or 'normal'."
+                )
 
         # Vision Transformer Encoder
         if encoder_type == 'pretrained':
@@ -85,7 +108,14 @@ class PtychoViT(nn.Module):
                 mlp_ratio=encoder_config.get('mlp_ratio', 4.0),
                 dropout=encoder_config.get('dropout', 0.1),
                 attn_dropout=encoder_config.get('attn_dropout', 0.0),
-                use_cls_token=encoder_config.get('use_cls_token', False)
+                use_cls_token=encoder_config.get('use_cls_token', False),
+                init_mean=init_mean if init_enabled and 'encoder' in apply_to else 0.0,
+                init_std=init_std if init_enabled and 'encoder' in apply_to else 0.02,
+                init_method=init_method if init_enabled and 'encoder' in apply_to else 'trunc_normal',
+                kaiming_a=kaiming_a,
+                kaiming_mode=kaiming_mode,
+                kaiming_nonlinearity=kaiming_nonlinearity,
+                kaiming_distribution=kaiming_distribution
             )
 
         # Decoder configuration
@@ -117,15 +147,77 @@ class PtychoViT(nn.Module):
             num_stages=decoder_config.get('num_stages', 4)
         )
 
+        if init_enabled:
+            if 'decoders' in apply_to:
+                if init_method == 'kaiming':
+                    self._init_module_kaiming(
+                        self.amp_decoder,
+                        kaiming_a,
+                        kaiming_mode,
+                        kaiming_nonlinearity,
+                        kaiming_distribution,
+                    )
+                    self._init_module_kaiming(
+                        self.ph_decoder,
+                        kaiming_a,
+                        kaiming_mode,
+                        kaiming_nonlinearity,
+                        kaiming_distribution,
+                    )
+                else:
+                    self._init_module_trunc_normal(self.amp_decoder, init_mean, init_std)
+                    self._init_module_trunc_normal(self.ph_decoder, init_mean, init_std)
+            if encoder_type == 'pretrained' and 'encoder' in apply_to and override_pretrained:
+                if init_method == 'kaiming':
+                    self._init_module_kaiming(
+                        self.encoder,
+                        kaiming_a,
+                        kaiming_mode,
+                        kaiming_nonlinearity,
+                        kaiming_distribution,
+                    )
+                else:
+                    self._init_module_trunc_normal(self.encoder, init_mean, init_std)
+
         # cache for log-polar grid
         self._logpolar_grid = None
         self._logpolar_hw = None
 
         # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.025), dtype=torch.float32), requires_grad=False)
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.1), dtype=torch.float32), requires_grad=False)
         self.log_scale_ph = nn.Parameter(torch.tensor(math.log(math.pi), dtype=torch.float32), requires_grad=False)
 
+    @staticmethod
+    def _init_module_trunc_normal(module, mean, std):
+        for m in module.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+                nn.init.trunc_normal_(m.weight, mean=mean, std=std)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, nn.BatchNorm1d)):
+                if hasattr(m, "weight") and m.weight is not None:
+                    nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+    @staticmethod
+    def _init_module_kaiming(module, a, mode, nonlinearity, distribution):
+        for m in module.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
+                if distribution == "normal":
+                    nn.init.kaiming_normal_(m.weight, a=a, mode=mode, nonlinearity=nonlinearity)
+                else:
+                    nn.init.kaiming_uniform_(m.weight, a=a, mode=mode, nonlinearity=nonlinearity)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d, nn.BatchNorm1d)):
+                if hasattr(m, "weight") and m.weight is not None:
+                    nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
     def forward(self, x, probe, normalization, scale):
+        eps = 1e-6
         x = 2 * torch.log10(x + 1e-1)
 
         # FFT probe
@@ -166,7 +258,6 @@ class PtychoViT(nn.Module):
 
         # Normalization
         intensity = (intensity.float() / normalization) * scale
-
-        pred_diff_amp = torch.sqrt(intensity)
+        pred_diff_amp = torch.sqrt(intensity + eps)
 
         return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1)
