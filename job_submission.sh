@@ -38,5 +38,7 @@ export MASTER_PORT=29500
 # CFG="config.yaml"
 
 # --- Launch (128 nodes × 4 tasks/node = 512 GPUs) ---
-srun -N 256 --ntasks-per-node=4 --ntasks=1024 --gpus-per-task=1 --gpu-bind=none -l -u \
+srun -N 4 --ntasks-per-node=4 --ntasks=16 --gpus-per-task=1 --gpu-bind=none -l -u \
     python main.py 
+    
+    # --config "$CFG"

@@ -184,8 +184,12 @@ class PtychoViT(nn.Module):
         self._logpolar_hw = None
 
         # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.1), dtype=torch.float32), requires_grad=False)
-        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(math.pi), dtype=torch.float32), requires_grad=False)
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(config.get("amp_scale", 0.1)), dtype=torch.float32), requires_grad=False)
+        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(config.get("ph_scale", math.pi)), dtype=torch.float32), requires_grad=False)
+
+        self.amp_offset = config.get("amp_offset", 0.975)
+        
+        self.subtract_probe_intensity = config.get("subtract_probe_intensity", False)
 
     @staticmethod
     def _init_module_trunc_normal(module, mean, std):
@@ -222,16 +226,19 @@ class PtychoViT(nn.Module):
 
         # FFT probe
         probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
-        # probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
-        # probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
+        if self.subtract_probe_intensity:
+            probe_intensity = torch.fft.fftshift(torch.fft.fft2(probe), dim=(-2, -1))
+            probe_intensity = (probe_intensity.abs()**2).sum(2)[:, 0]
 
         # Normalization
         normalization = normalization.view(normalization.shape[0], 1, 1)
         scale = scale.view(scale.shape[0], 1, 1)
-        # probe_intensity = (probe_intensity / normalization) * scale
+        if self.subtract_probe_intensity:
+            probe_intensity = (probe_intensity / normalization) * scale
 
         # Subtract probe contribution to total intensity
-        # x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
+        if self.subtract_probe_intensity:
+            x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
         # Apply log-polar coordinate transform
         # H, W = x.shape[-2], x.shape[-1]
@@ -248,7 +255,7 @@ class PtychoViT(nn.Module):
         constrained_ph = self.ph_decoder(x).squeeze(1)
 
         # Scale the constrained outputs 
-        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + 0.975
+        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + self.amp_offset
         ph = constrained_ph * torch.exp(self.log_scale_ph)
 
         # Complex object and diffraction

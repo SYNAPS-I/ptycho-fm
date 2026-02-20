@@ -2,6 +2,12 @@
 __pycache__/
 .ipynb_checkpoints/
 
+# environment
+.venv/
+
+# logging
+wandb/
+
 # root-only workspace
 /workspace/
 
