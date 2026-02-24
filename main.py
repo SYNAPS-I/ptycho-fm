@@ -468,13 +468,15 @@ if config['training'].get('resume_from_checkpoint', False):
 # ────────────────────────────────────────────────────────────────────────────────
 if is_main_process and config['wandb']['enabled']:
     wandb.login()
+    run_name = config['wandb']['run_name']
     if wandb_run_id is not None:
         # Resume existing wandb run
         run = wandb.init(
             entity=config['wandb']['entity'],
             project=config['wandb']['project'],
             id=wandb_run_id,
-            resume='must'
+            resume='must',
+            name=run_name,
         )
         print(f'Resumed wandb run: {wandb_run_id}', flush=True)
     else:
@@ -482,6 +484,7 @@ if is_main_process and config['wandb']['enabled']:
         run = wandb.init(
             entity=config['wandb']['entity'],
             project=config['wandb']['project'],
+            name=run_name,
             config={
                 "learning_rate": LR,
                 "encoder_lr": encoder_lr,
@@ -558,11 +561,12 @@ try:
 
         # Training loop
         model.train()
-        trainer.train(train_prefetcher, criterion, optimizer, metrics)
+        profile = config['training'].get('profile', False)
+        trainer.train(train_prefetcher, criterion, optimizer, metrics, profile=profile, epoch=epoch)
 
         # Validation loop
         model.eval()
-        plot = (epoch % config['training']['validation_plot_freq'] == 0)
+        plot = (epoch % config['training']['validation_plot_freq'] == 0) and (not profile)
         
         # Debug logging for validation in first epoch
         if DEBUG_MODE and epoch == 0:
@@ -576,10 +580,10 @@ try:
                 if hasattr(val_dataset, 'debug_call_count'):
                     val_dataset.debug_call_count = 0  # Reset counter for validation
         
-        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch)
+        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch, profile=profile)
 
         # Generate test plot only on main process
-        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
+        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and (not profile):
             trainer.generate_test_plot(test_loader, epoch, 'test_epoch' + str(epoch) + '.png')
 
         if is_main_process:

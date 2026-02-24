@@ -13,7 +13,7 @@ data:
   test_normalization: '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl' 
 
   cache_object: true
-  max_probe_modes: 4  # Maximum number of probe modes to pad to
+  max_probe_modes: 10  # Maximum number of probe modes to pad to
 
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8
@@ -23,10 +23,10 @@ data:
 
   # DataLoader Configuration
   num_workers: 4
-  prefetch_factor: 10
+  prefetch_factor: 2
   pin_memory: true  # Required for CUDAPrefetcher async transfer
   persistent_workers: true  # Keep workers alive across epochs
-  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
+  use_cuda_prefetcher: true  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
@@ -49,9 +49,11 @@ training:
     threshold: 0.0    # Pixels below this value are ignored
     alpha: 1.0        # Weight exponent (alpha=1 → inverse weighting (1/intensity), alpha=0 → uniform weighting)
 
-  validation_plot_freq: 10  # Plot validation results every N epochs
-  test_plot_freq: 20 # Plot stitched test results every M epochs
+  validation_plot_freq: 1  # Plot validation results every N epochs
+  test_plot_freq: 1 # Plot stitched test results every M epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
+
+  profile: false
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -89,7 +91,7 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/scratch/aileenluo/ptycho-vit/models'
+  model_save_path: '/pscratch/sd/s/shas1693/data/ptycho/models'
 
 # WandB Configuration
 wandb:
@@ -98,8 +100,9 @@ wandb:
   project: 'PtychoViT'
   dataset_name: 'mouse kidney confocal fluorescence'
   notes: 'amp series, log_scale_amp=0.5, tanh'
+  run_name: 'base'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 165
+  run_num: 0
