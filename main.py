@@ -553,10 +553,10 @@ if is_main_process:
     else:
         print("Using standard DataLoader on CPU", flush=True)
 
-# Create test dataset and loader only on main process
-if is_main_process:
+# Create test dataset and loader only on main process when test_path is configured
+if is_main_process and config['data'].get('test_path') is not None:
     test_dataset = PtychographyDataset(
-        file_path=config['data']['test_path'],
+        file_path=config['data'].get('test_path'),
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('test_normalization'),
         apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
@@ -577,6 +577,8 @@ if is_main_process:
     print(f"Test dataset: {len(test_dataset)} patterns", flush=True)
 else:
     test_loader = None
+    if is_main_process:
+        print("Test plotting disabled: data.test_path is null", flush=True)
 
 # Print configuration only on main process
 if is_main_process:
@@ -936,7 +938,7 @@ try:
         trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch, scheduler=scheduler)
 
         # Generate test plot only on main process
-        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process:
+        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and test_loader is not None:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
             trainer.generate_test_plot(
                 test_loader,
