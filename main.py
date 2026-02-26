@@ -145,7 +145,7 @@ def _build_train_loader(
             rank=rank,
             shuffle=True,
             seed=random_seed,
-            drop_last=False
+            drop_last=True 
         )
         train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
         train_dataloader_kwargs['sampler'] = train_sampler
@@ -200,7 +200,7 @@ def _build_val_loader(
             rank=rank,
             shuffle=False,
             seed=random_seed,
-            drop_last=False
+            drop_last=True 
         )
         val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
         val_dataloader_kwargs['sampler'] = val_sampler
@@ -485,6 +485,7 @@ train_dataloader_kwargs_base = {
     'num_workers': config['data'].get('num_workers', 0),
     'pin_memory': pin_memory,
     'shuffle': True,
+    'drop_last': True, 
 }
 
 val_dataloader_kwargs_base = {
@@ -492,6 +493,7 @@ val_dataloader_kwargs_base = {
     'num_workers': config['data'].get('num_workers', 0),
     'pin_memory': pin_memory,
     'shuffle': False,
+    'drop_last': True, 
 }
 
 # Add prefetch settings if using workers
