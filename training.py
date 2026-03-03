@@ -1,5 +1,6 @@
 import os
 import shutil
+from contextlib import contextmanager
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,6 +30,159 @@ def _atomic_torch_save(obj, path):
     tmp_path = f"{path}.tmp"
     torch.save(obj, tmp_path)
     os.replace(tmp_path, path)
+
+
+def _normalize_test_plot_mc_config(training_cfg: dict) -> dict:
+    enabled = bool(training_cfg.get("test_plot_mc_enabled", False))
+    ensemble_size = int(training_cfg.get("test_plot_mc_ensemble_size", 30))
+    frame_stride = int(training_cfg.get("test_plot_mc_frame_stride", 8))
+    frame_offset = int(training_cfg.get("test_plot_mc_frame_offset", 0))
+    phase_std_vmax_raw = training_cfg.get("test_plot_mc_phase_std_vmax", None)
+    phase_std_vmax = None if phase_std_vmax_raw is None else float(phase_std_vmax_raw)
+
+    if ensemble_size < 2:
+        raise ValueError("ensemble_size must be >= 2")
+    if frame_stride <= 0:
+        raise ValueError("frame_stride must be > 0")
+    if frame_offset < 0 or frame_offset >= frame_stride:
+        raise ValueError("0 <= frame_offset < frame_stride")
+    if phase_std_vmax is not None and phase_std_vmax <= 0:
+        raise ValueError("phase_std_vmax must be > 0 when provided")
+
+    return {
+        "enabled": enabled,
+        "ensemble_size": ensemble_size,
+        "frame_stride": frame_stride,
+        "frame_offset": frame_offset,
+        "phase_std_vmax": phase_std_vmax,
+    }
+
+
+def _select_mc_indices(global_start: int, batch_size: int, frame_stride: int, frame_offset: int) -> list[int]:
+    selected = []
+    for local_idx in range(batch_size):
+        if (global_start + local_idx) % frame_stride == frame_offset:
+            selected.append(local_idx)
+    return selected
+
+
+@contextmanager
+def _mc_stochastic_eval_context(model: nn.Module):
+    model.eval()
+    for module in model.modules():
+        if isinstance(module, (nn.Dropout, nn.Dropout1d, nn.Dropout2d, nn.AlphaDropout)):
+            module.train()
+        elif module.__class__.__name__ == "DropPath":
+            module.train()
+
+    try:
+        yield
+    finally:
+        model.eval()
+
+
+def _mc_mean_std_from_samples(samples: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return samples.mean(dim=0), samples.std(dim=0, unbiased=True)
+
+
+def _stitch_mc_uncertainty(
+    object_size: tuple[int, int],
+    positions: torch.Tensor,
+    patches: torch.Tensor,
+    selected_idx: torch.Tensor,
+    pad: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    stitched = torch.zeros(object_size, device="cpu")
+    mc_buffer = torch.zeros(object_size, device="cpu")
+
+    if selected_idx.numel() == 0:
+        return stitched, mc_buffer
+
+    selected_idx = selected_idx.to(dtype=torch.long, device="cpu")
+    sel_positions = positions.index_select(0, selected_idx.to(device=positions.device))
+    sel_patches = patches.index_select(0, selected_idx)
+
+    stitched = place_patches_fourier_shift(
+        stitched,
+        sel_positions,
+        sel_patches,
+        op="add",
+        adjoint_mode=False,
+        pad=pad,
+    )
+    mc_buffer = place_patches_fourier_shift(
+        mc_buffer,
+        sel_positions,
+        torch.ones_like(sel_patches),
+        op="add",
+        adjoint_mode=False,
+        pad=pad,
+    )
+    stitched = stitched / torch.clip(mc_buffer, min=1)
+    return stitched, mc_buffer
+
+
+def _save_test_plot_mc_figure(
+    amp_mean: torch.Tensor,
+    ph_mean: torch.Tensor,
+    amp_std: torch.Tensor,
+    ph_std: torch.Tensor,
+    out_path: str,
+    crop: int = 180,
+    phase_std_vmax: float | None = None,
+) -> None:
+    crop = int(crop)
+    if crop <= 0:
+        raise ValueError("MC plot crop must be a positive integer.")
+
+    def _crop_view(img: torch.Tensor) -> torch.Tensor:
+        if 2 * crop >= min(img.shape[-2], img.shape[-1]):
+            return img
+        return img[crop:-crop, crop:-crop]
+
+    amp_mean_view = _crop_view(amp_mean)
+    ph_mean_view = _crop_view(ph_mean)
+    amp_std_view = _crop_view(amp_std)
+    ph_std_view = _crop_view(ph_std)
+
+    ph_center = torch.mean(ph_mean_view)
+    ph_spread = torch.std(ph_mean_view)
+    vmin_ph = ph_center - (2 * ph_spread)
+    vmax_ph = ph_center + (2 * ph_spread)
+
+    fig, ax = plt.subplots(figsize=(9, 8), ncols=2, nrows=2)
+
+    amp_m = ax[0, 0].imshow(amp_mean_view, interpolation="none", vmin=0.9, vmax=1.0)
+    divider = make_axes_locatable(ax[0, 0])
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    fig.colorbar(amp_m, cax=cax, orientation="vertical")
+    ax[0, 0].set_title("Predicted amplitude")
+
+    ph_m = ax[0, 1].imshow(ph_mean_view, interpolation="none", vmin=vmin_ph, vmax=vmax_ph, cmap="magma")
+    divider = make_axes_locatable(ax[0, 1])
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    fig.colorbar(ph_m, cax=cax, orientation="vertical")
+    ax[0, 1].set_title("Predicted phase")
+
+    amp_s = ax[1, 0].imshow(amp_std_view, interpolation="none", cmap="jet")
+    divider = make_axes_locatable(ax[1, 0])
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    fig.colorbar(amp_s, cax=cax, orientation="vertical")
+    ax[1, 0].set_title("Amplitude uncertainty (std)")
+
+    phase_std_kwargs = {}
+    if phase_std_vmax is not None:
+        phase_std_kwargs = {"vmin": 0.0, "vmax": float(phase_std_vmax)}
+    ph_s = ax[1, 1].imshow(ph_std_view, interpolation="none", cmap="jet", **phase_std_kwargs)
+    divider = make_axes_locatable(ax[1, 1])
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    fig.colorbar(ph_s, cax=cax, orientation="vertical")
+    ax[1, 1].set_title("Phase uncertainty (std)")
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", transparent=True)
+    plt.close(fig)
 
 
 def compute_psnr(
@@ -288,12 +442,21 @@ class Trainer(object):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
-    def generate_test_plot(self, dataloader, epoch, filename, central_crop=64, ph_crop=180):
+    def generate_test_plot(self, dataloader, epoch, filename, central_crop=64, ph_crop=180, mc_cfg=None):
         total_scan_points = len(dataloader.dataset)
         pred_amp = torch.zeros((total_scan_points, dataloader.dataset.pattern_shape[0], dataloader.dataset.pattern_shape[1]), device='cpu')
         pred_ph = torch.zeros(pred_amp.shape, device='cpu')
         gt_amp = torch.zeros(pred_amp.shape, device='cpu')
         gt_ph = torch.zeros(pred_amp.shape, device='cpu')
+        mc_cfg = mc_cfg or _normalize_test_plot_mc_config({})
+        mc_enabled = bool(mc_cfg.get("enabled", False))
+        mc_ensemble_size = int(mc_cfg.get("ensemble_size", 30))
+        mc_frame_stride = int(mc_cfg.get("frame_stride", 8))
+        mc_frame_offset = int(mc_cfg.get("frame_offset", 0))
+        mc_phase_std_vmax = mc_cfg.get("phase_std_vmax", None)
+        pred_amp_std = torch.zeros(pred_amp.shape, device="cpu") if mc_enabled else None
+        pred_ph_std = torch.zeros(pred_amp.shape, device="cpu") if mc_enabled else None
+        selected_global_indices = []
         scan_idx = 0
 
         with torch.no_grad():
@@ -314,6 +477,38 @@ class Trainer(object):
                 pred_ph[scan_idx:scan_idx + batch_size] = output_ph.squeeze().detach().cpu()
                 gt_amp[scan_idx:scan_idx + batch_size] = amp_patch.squeeze().detach().cpu()
                 gt_ph[scan_idx:scan_idx + batch_size] = ph_patch.squeeze().detach().cpu()
+
+                if mc_enabled:
+                    selected_local_indices = _select_mc_indices(scan_idx, batch_size, mc_frame_stride, mc_frame_offset)
+                    if selected_local_indices:
+                        selected_global_indices.extend(scan_idx + idx for idx in selected_local_indices)
+                        selected_local_tensor = torch.tensor(selected_local_indices, device=input_diff.device, dtype=torch.long)
+                        selected_diff = input_diff.index_select(0, selected_local_tensor)
+                        selected_probe = input_probe.index_select(0, selected_local_tensor)
+                        selected_norm = input_norm.index_select(0, selected_local_tensor)
+                        selected_scale = input_scale.index_select(0, selected_local_tensor)
+
+                        amp_samples = []
+                        ph_samples = []
+                        with _mc_stochastic_eval_context(self.model):
+                            for _ in range(mc_ensemble_size):
+                                _mc_output_diff, mc_amp, mc_ph = self.model(
+                                    selected_diff,
+                                    selected_probe,
+                                    selected_norm,
+                                    selected_scale,
+                                )
+                                amp_samples.append(mc_amp.detach().cpu())
+                                ph_samples.append(mc_ph.detach().cpu())
+
+                        amp_samples_tensor = torch.stack(amp_samples, dim=0)
+                        ph_samples_tensor = torch.stack(ph_samples, dim=0)
+                        _, amp_std = _mc_mean_std_from_samples(amp_samples_tensor)
+                        _, ph_std = _mc_mean_std_from_samples(ph_samples_tensor)
+
+                        for sample_idx, local_idx in enumerate(selected_local_indices):
+                            pred_amp_std[scan_idx + local_idx] = amp_std[sample_idx, 0]
+                            pred_ph_std[scan_idx + local_idx] = ph_std[sample_idx, 0]
 
                 scan_idx += batch_size
 
@@ -420,6 +615,53 @@ class Trainer(object):
 
         if self.wandb_enabled:
             wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
+
+        if mc_enabled:
+            num_selected = len(selected_global_indices)
+            if num_selected == 0:
+                print("[Info] No test frames selected for MC dropout; skipping test_plot_mc generation.", flush=True)
+            else:
+                selected_idx = torch.tensor(selected_global_indices, dtype=torch.long, device="cpu")
+                amp_std_patches = pred_amp_std[:, central_crop:-central_crop, central_crop:-central_crop]
+                ph_std_patches = pred_ph_std[:, central_crop:-central_crop, central_crop:-central_crop]
+
+                amp_std_object, _mc_buffer = _stitch_mc_uncertainty(
+                    object_size=object_size,
+                    positions=positions,
+                    patches=amp_std_patches,
+                    selected_idx=selected_idx,
+                    pad=32,
+                )
+                ph_std_object, _ = _stitch_mc_uncertainty(
+                    object_size=object_size,
+                    positions=positions,
+                    patches=ph_std_patches,
+                    selected_idx=selected_idx,
+                    pad=32,
+                )
+
+                mc_filename = f"test_mc_epoch{epoch}.png"
+                mc_path = os.path.join(run_path, mc_filename)
+                _save_test_plot_mc_figure(
+                    amp_mean=pred_amp_object,
+                    ph_mean=pred_ph_object,
+                    amp_std=amp_std_object,
+                    ph_std=ph_std_object,
+                    out_path=mc_path,
+                    crop=180,
+                    phase_std_vmax=mc_phase_std_vmax,
+                )
+
+                if self.wandb_enabled:
+                    wandb.log({"test_plot_mc": wandb.Image(mc_path, caption=f"Test MC: epoch {epoch}")})
+
+            if self.wandb_enabled:
+                wandb.log({
+                    "test_mc/selected_frames": int(num_selected),
+                    "test_mc/ensemble_size": int(mc_ensemble_size),
+                    "test_mc/frame_stride": int(mc_frame_stride),
+                    "test_mc/frame_offset": int(mc_frame_offset),
+                })
 
     def train(self, dataloader, criterion, optimizer, metrics, epoch=None):
         """

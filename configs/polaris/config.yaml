@@ -65,6 +65,10 @@ training:
     alpha: 0.0        # Weight exponent (1.0 = inverse weighting, 0.0 = uniform)
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 5
+  test_plot_mc_enabled: false
+  test_plot_mc_ensemble_size: 30
+  test_plot_mc_frame_stride: 8
+  test_plot_mc_frame_offset: 0
   resume_from_checkpoint: false  # Leave false to avoid loading old optimizer state
   finetune_from_model: '/lus/eagle/projects/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/best_model.pth'  # set to your pretrained weights
 

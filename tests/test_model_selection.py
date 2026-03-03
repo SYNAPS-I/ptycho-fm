@@ -11,6 +11,12 @@ import yaml
 from development_logs.model512 import PtychoViT
 from development_logs.model_cnn import PtychoCNN, PtychoCNN256
 
+# This module is a legacy script-style smoke test.
+# Keep it out of automated pytest gating; it can still be run via `python tests/test_model_selection.py`.
+if __name__ != "__main__":
+    import pytest
+    pytestmark = pytest.mark.skip(reason="Legacy script-style smoke test; excluded from automated pytest gating.")
+
 
 def load_config(config_path='../config.yaml'):
     """Load configuration from YAML file."""

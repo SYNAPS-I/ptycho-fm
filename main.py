@@ -21,7 +21,7 @@ except ImportError:
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
-from training import Trainer
+from training import Trainer, _normalize_test_plot_mc_config
 from torch.utils.data import DataLoader, random_split, DistributedSampler, Subset
 from prefetcher import CUDAPrefetcher
 from utils.utils import compute_sha256
@@ -364,6 +364,7 @@ def cleanup_distributed():
 # Load configuration
 config_path = resolve_config_path(args.config)
 config = load_config(config_path)
+test_plot_mc_cfg = _normalize_test_plot_mc_config(config["training"])
 
 # Training parameters
 MODE = config['training']['mode']
@@ -944,6 +945,7 @@ try:
                 'test_epoch' + str(epoch) + '.png',
                 central_crop=config['training'].get('test_plot_central_crop', 64),
                 ph_crop=config['training'].get('test_plot_ph_crop', 180),
+                mc_cfg=test_plot_mc_cfg,
             )
 
         # Optional per-epoch saving

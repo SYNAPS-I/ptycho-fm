@@ -71,6 +71,10 @@ training:
 
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 1 # Plot stitched test results every M epochs
+  test_plot_mc_enabled: false
+  test_plot_mc_ensemble_size: 30
+  test_plot_mc_frame_stride: 8
+  test_plot_mc_frame_offset: 0
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
   # Save model weights each epoch as model_epoch_XXX.pth
   save_epoch_models: true
