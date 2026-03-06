@@ -14,6 +14,7 @@ import yaml
 import socket
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
+from data_merged import CombinedMergedDataset
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
 from training import Trainer
@@ -47,6 +48,10 @@ parser.add_argument('--data-fraction', type=float, default=None,
 
 parser.add_argument('--config_file', type=str, default=None,
                     help='Override config_file name') 
+parser.add_argument('--use-merged', action='store_true',
+                    help='Use merged shard HDF5 files for training')
+parser.add_argument('--merged-data-dir', type=str, default=None,
+                    help='Directory containing merged shard files')
 args = parser.parse_args()
 DEBUG_MODE = args.debug
 
@@ -193,20 +198,38 @@ if 'data_path' not in config['data']:
     raise ValueError("Config must specify 'data_path' (directory containing paired HDF5 files)")
 
 data_dir = config['data']['data_path']
+merged_data_dir = args.merged_data_dir or config['data'].get('merged_data_path')
 
 # Create full dataset with sequential indices
 # Shuffling is handled by random_split with a deterministic seed
-full_dataset = CombinedDataset(
-    file_paths=data_dir,
-    rank=rank,
-    world_size=world_size,
-    scale=config['data']['scale'],
-    normalization_dict_path=config['data'].get('normalization_dict_path'),
-    apply_noise=True,
-    cache_object=config['data'].get('cache_object', False),
-    max_probe_modes=config['data'].get('max_probe_modes', 8),
-    debug=DEBUG_MODE,
-    data_fraction=config['data'].get('data_fraction', 1.0)
+if args.use_merged:
+    if merged_data_dir is None:
+        raise ValueError("--use-merged requires --merged-data-dir or data.merged_data_path in config")
+    full_dataset = CombinedMergedDataset(
+        file_paths=merged_data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        apply_noise=True,
+        cache_object=config['data'].get('cache_object', False),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        pixel_size_m=config['data'].get('pixel_size_m'),
+        debug=DEBUG_MODE,
+        data_fraction=config['data'].get('data_fraction', 1.0)
+    )
+else:
+    full_dataset = CombinedDataset(
+        file_paths=data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        apply_noise=True,
+        cache_object=config['data'].get('cache_object', False),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        debug=DEBUG_MODE,
+        data_fraction=config['data'].get('data_fraction', 1.0)
     )
 
 # Split into train and validation using PyTorch's random_split
@@ -376,7 +399,7 @@ if is_main_process:
     print(f"Batch size: {BATCH_SIZE} | Learning rate: {LR}", flush=True)
     print(f"Epochs: {EPOCHS} | World Size (GPUs): {world_size}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
-    print(f"Data directory: {data_dir}", flush=True)
+    print(f"Data directory: {merged_data_dir if args.use_merged else data_dir}", flush=True)
     print(f"Number of paired files: {len(full_dataset.file_paths)}", flush=True)
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
