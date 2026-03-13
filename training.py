@@ -304,17 +304,26 @@ class Trainer(object):
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Loading first batch... (this may take a while with lazy data loading)", flush=True)
 
         # Start timing for first batch (before DataLoader fetch)
-        batch_0_io_start = time.time()
+        batch_0_io_start = time.perf_counter()
         timing_window_start = 5
         timing_window_end = 15
         io_time_sum = 0.0
         data_move_time_sum = 0.0
         fwd_pass_time_sum = 0.0
+        loss_time_sum = 0.0
         bwd_pass_time_sum = 0.0
+        opt_step_time_sum = 0.0
         train_time_sum = 0.0
+        other_time_sum = 0.0
         timing_samples = 0
         train_end_time = None  # Will be set after each batch completes
         first_print = 0
+
+        def _sync_device():
+            if 'cuda' in str(self.device):
+                torch.cuda.synchronize(self.device)
+            elif 'xpu' in str(self.device):
+                torch.xpu.synchronize(self.device)
         if profiling:
             prof = torch.profiler.profile(activities=[
             torch.profiler.ProfilerActivity.CPU,
@@ -331,11 +340,11 @@ class Trainer(object):
             # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
             if batch_idx == 0:
                 # For first batch, we already started timing before the loop
-                io_time = time.time() - batch_0_io_start
+                io_time = time.perf_counter() - batch_0_io_start
             else:
                 # For subsequent batches, time from end of previous batch to now
                 # This includes the DataLoader fetch time (the 2-4 second gap you're seeing)
-                io_time = time.time() - train_end_time
+                io_time = time.perf_counter() - train_end_time
             #else:
             #    break
             # Print when first batch is loaded and for first 10 batches
@@ -345,7 +354,8 @@ class Trainer(object):
                 # Print first 10 batches with timestamps to confirm training is working
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
            
-            move_data = time.time()
+            _sync_device()
+            move_data = time.perf_counter()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
             
@@ -356,37 +366,59 @@ class Trainer(object):
             if self.use_prefetch == False:
                 ph_patch = ph_patch.to(self.device)
                 amp_patch = amp_patch.to(self.device)
-
-            fwd_pass_st =  time.time()
+            _sync_device()
+            fwd_pass_st = time.perf_counter()
             if profiling:
                 with torch.profiler.record_function("model_fwdpass"):
                     output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-                fwd_pass_end =  time.time()
+            else:
+                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+            _sync_device()
+            fwd_pass_end = time.perf_counter()
+
+            _sync_device()
+            loss_st = time.perf_counter()
+            if profiling:
                 with torch.profiler.record_function("compute_loss"):
                     if self.mode == 'supervised':
                         loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                     else:
                         loss = criterion(output_diff, input_diff)
-                with torch.profiler.record_function("model_backward"):
-                    optimizer.zero_grad()
-                    loss.backward()
-                with torch.profiler.record_function("optimizer_step"):
-                    optimizer.step()
-                prof.step()
             else:
-                output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-                fwd_pass_end =  time.time()
-
                 if self.mode == 'supervised':
                     loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                 else:
                     loss = criterion(output_diff, input_diff)
+            _sync_device()
+            loss_end = time.perf_counter()
+
+            _sync_device()
+            bwd_pass_st = time.perf_counter()
+            if profiling:
+                with torch.profiler.record_function("model_backward"):
+                    optimizer.zero_grad()
+                    loss.backward()
+            else:
                 optimizer.zero_grad()
                 loss.backward()
+            _sync_device()
+            bwd_pass_end = time.perf_counter()
+
+            _sync_device()
+            opt_step_st = time.perf_counter()
+            if profiling:
+                with torch.profiler.record_function("optimizer_step"):
+                    optimizer.step()
+            else:
                 optimizer.step()
+            _sync_device()
+            opt_step_end = time.perf_counter()
+
+            if profiling:
+                prof.step()
             
             # Time training completion - always track end time for IO timing of next batch
-            train_end_time = time.time()
+            train_end_time = time.perf_counter()
             if batch_idx == 10:
                 if 'cuda' in str(self.device):
                     max_mem_gb = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 3)
@@ -399,29 +431,40 @@ class Trainer(object):
                         print(f"[Batch {batch_idx + 1}] Peak GPU Memory: {max_mem_gb:.2f} GB", flush=True)
                     torch.xpu.reset_peak_memory_stats(device=self.device)
 
-            train_time = train_end_time - move_data 
-            fwd_pass_time = fwd_pass_end - fwd_pass_st
+            train_time = train_end_time - move_data
             data_move_time = fwd_pass_st - move_data
-            bwd_pass_time = train_end_time - fwd_pass_end
+            fwd_pass_time = fwd_pass_end - fwd_pass_st
+            loss_time = loss_end - loss_st
+            bwd_pass_time = bwd_pass_end - bwd_pass_st
+            opt_step_time = opt_step_end - opt_step_st
+            other_time = train_time - (data_move_time + fwd_pass_time + loss_time + bwd_pass_time + opt_step_time)
             if timing_window_start <= batch_idx <= timing_window_end:
                 io_time_sum += io_time
                 data_move_time_sum += data_move_time
                 fwd_pass_time_sum += fwd_pass_time
+                loss_time_sum += loss_time
                 bwd_pass_time_sum += bwd_pass_time
+                opt_step_time_sum += opt_step_time
                 train_time_sum += train_time
+                other_time_sum += other_time
                 timing_samples += 1
                 if batch_idx == timing_window_end:
                     avg_io_time = io_time_sum / timing_samples
                     avg_data_move_time = data_move_time_sum / timing_samples
                     avg_fwd_pass_time = fwd_pass_time_sum / timing_samples
+                    avg_loss_time = loss_time_sum / timing_samples
                     avg_bwd_pass_time = bwd_pass_time_sum / timing_samples
+                    avg_opt_step_time = opt_step_time_sum / timing_samples
                     avg_train_time = train_time_sum / timing_samples
+                    avg_other_time = other_time_sum / timing_samples
                     if self.is_main_process:
                         print(
                             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                             f"[Avg Timing Batches {timing_window_start + 1}-{timing_window_end + 1}] "
-                            f"IO: {avg_io_time:.3f}s | datamove: {avg_data_move_time:.3f}s | "
-                            f"fwdpass: {avg_fwd_pass_time:.3f}s | bwd: {avg_bwd_pass_time:.3f}s total_train: {avg_train_time:.3f}s",
+                            f"loader_wait: {avg_io_time:.3f}s | data_move: {avg_data_move_time:.3f}s | "
+                            f"fwd: {avg_fwd_pass_time:.3f}s | loss: {avg_loss_time:.3f}s | "
+                            f"bwd: {avg_bwd_pass_time:.3f}s | opt: {avg_opt_step_time:.3f}s | "
+                            f"other: {avg_other_time:.3f}s | total_train: {avg_train_time:.3f}s",
                             flush=True,
                         )
                     #break
