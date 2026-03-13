@@ -3,7 +3,7 @@ source ~/.bashrc
 export TMPDIR=/tmp/$USER
 mkdir -p $TMPDIR
 
-cd /flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit-scale
+cd /flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit-scale 
 module load frameworks 
 source /flare/datascience/vsastry/projects/ptcho_vit/venvs/pytcho_vit/bin/activate 
 NHOSTS=$(wc -l < "${PBS_NODEFILE}")
@@ -17,7 +17,10 @@ NGPUS="$((${NHOSTS}*${NGPU_PER_HOST}))"
 #export OMP_PLACES=cores
 #export OMP_PROC_BIND=close
 #export OMP_NUM_THREADS=8
-
+export CCL_PROCESS_LAUNCHER=pmix
+export CCL_ATL_TRANSPORT=mpi
+export FI_MR_CACHE_MONITOR=userfaultfd
+export CCL_KVS_MODE=mpi
 ## Option 1
 export CPU_BINDING1="list:4:9:14:19:20:25:56:61:66:71:74:79" # 12 ppn to 12 cores
 ## Option 2
@@ -30,12 +33,12 @@ export CPU_BINDING3="list:1-8:9-16:17-24:25-32:33-40:41-48:53-60:61-68:69-76:77-
 #unset CCL_WORKER_AFFINITY  # Default will pick up from the last 24 cores even if you didn't specify these in the binding.
 #EXT_ENV="--env FI_CXI_DEFAULT_CQ_SIZE=1048576"
 #export ONEDNN_VERBOSE=profile_exec,filter=conv\|matmul
-data_frac=0.05
+data_frac=1
 bs=32
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 config_file="config_${data_frac}_${bs}.yaml"
 log_file="output_pretrain_${data_frac}_bs${bs}_${NGPUS}-$TIMESTAMP.log"
-mpiexec -n $NGPUS -ppn $NGPU_PER_HOST --cpu-bind  $CPU_BINDING3 python main.py --config_file $config_file --data-fraction $data_frac > $log_file 2>&1
+mpiexec -n $NGPUS -ppn $NGPU_PER_HOST --cpu-bind  $CPU_BINDING3 python main.py --config_file $config_file --data-fraction $data_frac --use-merged > $log_file 2>&1
 
 
 #mpiexec -n $NGPUS -ppn $NGPU_PER_HOST -- iprof -- python main.py --use-random-data > output_${NGPUS}.log 2>&1

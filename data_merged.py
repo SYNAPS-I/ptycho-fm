@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, Subset
 import h5py
 import pickle
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 from collections import OrderedDict
 from utils.ptychi_utils import extract_patches_fourier_shift
 

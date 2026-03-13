@@ -168,6 +168,6 @@ class PtychoViT(nn.Module):
         # Normalization
         intensity = (intensity.float() / normalization) * scale
 
-        pred_diff_amp = torch.sqrt(intensity)
+        pred_diff_amp = torch.sqrt(intensity + 1e-6)
 
         return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1)

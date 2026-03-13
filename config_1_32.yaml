@@ -3,14 +3,15 @@
 # Data Configuration
 data:
   # Directory path - will auto-discover all paired *_dp.hdf5 and *_para.hdf5 files
-  data_path: '/lus/flare/projects/PPFL_FM/simulated_data' #'/lus/flare/projects/PPFL_FM/ptycho_data' #'/scratch/aileenluo/ptycho-vit/data'
+  data_path: '/flare/SYNAPS-I/simulated_data_cleanedProbe_2' #'/lus/flare/projects/PPFL_FM/simulated_data' #'/lus/flare/projects/PPFL_FM/ptycho_data' #'/scratch/aileenluo/ptycho-vit/data'
   #data_path: '/lus/flare/projects/PPFL_FM/ptycho_data' #'/scratch/aileenluo/ptycho-vit/data'
   test_path: '/lus/flare/projects/PPFL_FM/test_data/scan807_dp.hdf5' #'/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/scan807/scan807_dp.hdf5'
   scale: 10000.0
+  merged_data_path: '/flare/SYNAPS-I/simulated_data_cleanedProbe_2_merged/shards'
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization_fulldata.pkl' #normalization_fulldata.pkl' #normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  normalization_dict_path: '/flare/SYNAPS-I/simulated_data_cleanedProbe_2/normalization.pkl' #'/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization_fulldata.pkl' #normalization_fulldata.pkl' #normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   #normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   test_normalization: '/lus/flare/projects/PPFL_FM/test_data/test2probes_norm.pkl' 
   data_fraction: 0.05  # Fraction of data to use for training (for debugging purposes)
@@ -51,8 +52,8 @@ training:
     alpha: 1.0        # Weight exponent (alpha=1 → inverse weighting (1/intensity), alpha=0 → uniform weighting)
 
   validation_plot_freq: 1  # Plot validation results every N epochs
-  test_plot_freq: 2 # Plot stitched test results every M epochs
-  resume_from_checkpoint: False # Set to true to resume training from checkpoint
+  test_plot_freq: 1 # Plot stitched test results every M epochs
+  resume_from_checkpoint: True # Set to true to resume training from checkpoint
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -89,7 +90,7 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/scratch/models' #'/scratch/aileenluo/ptycho-vit/models'
+  model_save_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit-scale/scratch/models' #'/scratch/aileenluo/ptycho-vit/models'
 
 # WandB Configuration
 wandb:
