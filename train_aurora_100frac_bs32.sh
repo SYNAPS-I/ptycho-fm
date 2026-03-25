@@ -5,7 +5,7 @@ mkdir -p $TMPDIR
 
 cd /flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit-scale 
 module load frameworks 
-source /flare/datascience/vsastry/projects/ptcho_vit/venvs/pytcho_vit/bin/activate 
+source /flare/datascience/vsastry/projects/ptcho_vit/venvs/pt_latest/bin/activate 
 NHOSTS=$(wc -l < "${PBS_NODEFILE}")
 NGPU_PER_HOST=12
 NGPUS="$((${NHOSTS}*${NGPU_PER_HOST}))"
@@ -38,7 +38,7 @@ bs=32
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 config_file="config_${data_frac}_${bs}.yaml"
 log_file="output_pretrain_${data_frac}_bs${bs}_${NGPUS}-$TIMESTAMP.log"
-mpiexec -n $NGPUS -ppn $NGPU_PER_HOST --cpu-bind  $CPU_BINDING3 python main.py --config_file $config_file --data-fraction $data_frac --use-merged > $log_file 2>&1
+mpiexec -n $NGPUS -ppn $NGPU_PER_HOST --cpu-bind  $CPU_BINDING3 python main.py --config_file $config_file --data-fraction $data_frac  --synthetic-data --use-merged > $log_file 2>&1
 
 
 #mpiexec -n $NGPUS -ppn $NGPU_PER_HOST -- iprof -- python main.py --use-random-data > output_${NGPUS}.log 2>&1

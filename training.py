@@ -10,7 +10,8 @@ from torch.profiler import profile, ProfilerActivity, record_function
 from utils.ptychi_utils import place_patches_fourier_shift
 
 import wandb
-profiling = False #True #False
+profiling = True #False
+#profiling = False #True #False
 activities = [ProfilerActivity.CPU]
 if torch.cuda.is_available():
     device = "cuda"
@@ -275,9 +276,10 @@ class Trainer(object):
             wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
 
     def trace_handler(self,p):
-        if self.is_main_process:
-            print("tracing the profiler")
-            p.export_chrome_trace("./trace_" + str(p.step_num) + ".json")
+        #if self.is_main_process:
+        local_r = os.environ.get('PALS_LOCAL_RANKID')
+        print(f"tracing the profiler from {local_r}")
+        p.export_chrome_trace("./trace_" + str(p.step_num) + "_" + str(local_r) + ".json")
 
     def train(self, dataloader, criterion, optimizer, metrics):
         """
@@ -328,7 +330,7 @@ class Trainer(object):
             prof = torch.profiler.profile(activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.XPU ],
-            schedule=torch.profiler.schedule(wait=2, warmup=3, active=2, repeat=2),
+            schedule=torch.profiler.schedule(wait=5, warmup=5, active=2, repeat=1),
             on_trace_ready=self.trace_handler,
             record_shapes=True,
             profile_memory=True,
@@ -354,7 +356,7 @@ class Trainer(object):
                 # Print first 10 batches with timestamps to confirm training is working
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
            
-            _sync_device()
+            #_sync_device()
             move_data = time.perf_counter()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
@@ -366,17 +368,17 @@ class Trainer(object):
             if self.use_prefetch == False:
                 ph_patch = ph_patch.to(self.device)
                 amp_patch = amp_patch.to(self.device)
-            _sync_device()
+            #_sync_device()
             fwd_pass_st = time.perf_counter()
             if profiling:
                 with torch.profiler.record_function("model_fwdpass"):
                     output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
             else:
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-            _sync_device()
+            #_sync_device()
             fwd_pass_end = time.perf_counter()
 
-            _sync_device()
+            #_sync_device()
             loss_st = time.perf_counter()
             if profiling:
                 with torch.profiler.record_function("compute_loss"):
@@ -389,10 +391,10 @@ class Trainer(object):
                     loss = criterion(output_amp, amp_patch.to(self.device)) + criterion(output_ph, ph_patch.to(self.device))
                 else:
                     loss = criterion(output_diff, input_diff)
-            _sync_device()
+            #_sync_device()
             loss_end = time.perf_counter()
 
-            _sync_device()
+            #_sync_device()
             bwd_pass_st = time.perf_counter()
             if profiling:
                 with torch.profiler.record_function("model_backward"):
@@ -401,17 +403,17 @@ class Trainer(object):
             else:
                 optimizer.zero_grad()
                 loss.backward()
-            _sync_device()
+            #_sync_device()
             bwd_pass_end = time.perf_counter()
 
-            _sync_device()
+            #_sync_device()
             opt_step_st = time.perf_counter()
             if profiling:
                 with torch.profiler.record_function("optimizer_step"):
                     optimizer.step()
             else:
                 optimizer.step()
-            _sync_device()
+            #_sync_device()
             opt_step_end = time.perf_counter()
 
             if profiling:
