@@ -200,258 +200,187 @@ print(
 # ────────────────────────────────────────────────────────────────────────────────
 # Dataset & Dataloaders
 # ────────────────────────────────────────────────────────────────────────────────
+if not USE_SYNTHETIC_DATA and 'data_path' not in config['data']:
+    raise ValueError("Config must specify 'data_path' (directory containing paired HDF5 files)")
 
-class _SyntheticDatasetInfo:
-    def __init__(self, pattern_shape):
-        self.pattern_shape = pattern_shape
+data_dir = config['data'].get('data_path')
+merged_data_dir = args.merged_data_dir or config['data'].get('merged_data_path')
 
+synthetic_batches = int(config['training'].get('synthetic_batches', 100))
+synthetic_num_patterns = synthetic_batches * BATCH_SIZE if USE_SYNTHETIC_DATA else None
 
-class SyntheticLoader:
-    def __init__(self, device, batch_size, num_batches, img_size, max_probe_modes, scale_value, normalization_value=100000.0):
-        self.device = device
-        self.batch_size = batch_size
-        self.num_batches = num_batches
-        self.img_size = img_size
-        self.max_probe_modes = max_probe_modes
-        self.scale_value = float(scale_value)
-        self.normalization_value = float(normalization_value)
-        self.dataset = _SyntheticDatasetInfo((img_size, img_size))
+# Create full dataset with sequential indices
+# Shuffling is handled by random_split with a deterministic seed
+if args.use_merged:
+    if merged_data_dir is None and not USE_SYNTHETIC_DATA:
+        raise ValueError("--use-merged requires --merged-data-dir or data.merged_data_path in config")
+    full_dataset = CombinedMergedDataset(
+        file_paths=merged_data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        apply_noise=True,
+        cache_object=config['data'].get('cache_object', False),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        pixel_size_m=config['data'].get('pixel_size_m'),
+        debug=DEBUG_MODE,
+        data_fraction=config['data'].get('data_fraction', 1.0),
+        synthetic_data=USE_SYNTHETIC_DATA,
+        synthetic_num_patterns=synthetic_num_patterns,
+        synthetic_img_size=img_size,
+        synthetic_normalization=config['data'].get('synthetic_normalization', 100000.0)
+    )
+else:
+    full_dataset = CombinedDataset(
+        file_paths=data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        apply_noise=True,
+        cache_object=config['data'].get('cache_object', False),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        debug=DEBUG_MODE,
+        data_fraction=config['data'].get('data_fraction', 1.0)
+    )
 
-    def __len__(self):
-        return self.num_batches
+# Split into train and validation using PyTorch's random_split
+# This ensures mutually exclusive splits and follows PyTorch best practices
+train_split = config['data']['train_split']
+total_size = len(full_dataset)
+train_size = int(total_size * train_split)
+val_size = total_size - train_size
 
-    def __iter__(self):
-        import math
-        for _ in range(self.num_batches):
-            diff_amp = torch.rand(
-                (self.batch_size, 1, self.img_size, self.img_size),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            amp_patch = torch.rand(
-                (self.batch_size, 1, self.img_size, self.img_size),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            ph_patch = torch.rand(
-                (self.batch_size, 1, self.img_size, self.img_size),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            ph_patch = (ph_patch * (2.0 * math.pi)) - math.pi
+generator = torch.Generator().manual_seed(config['data']['random_seed'])
+train_subset, val_subset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
-            real = torch.randn(
-                (self.batch_size, 1, self.max_probe_modes, self.img_size, self.img_size),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            imag = torch.randn(
-                (self.batch_size, 1, self.max_probe_modes, self.img_size, self.img_size),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            probe = torch.complex(real, imag)
+# ────────────────────────────────────────────────────────────────────────────────
+# Distributed Data Loading Strategy
+# ────────────────────────────────────────────────────────────────────────────────
+sharding_strategy = config['data'].get('sharding_strategy', 'static')
 
-            probe_pos = torch.zeros((self.batch_size, 2), device=self.device, dtype=torch.float32)
-            norm = torch.full((self.batch_size,), self.normalization_value, device=self.device, dtype=torch.float32)
-            scale = torch.full((self.batch_size,), self.scale_value, device=self.device, dtype=torch.float32)
+if sharding_strategy == 'static':
+    # Static sharding: Use RankShardedSubset, each rank gets fixed samples across all epochs
+    if is_main_process:
+        print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
+        print("  - Each rank processes fixed samples across all epochs", flush=True)
 
-            yield diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale
+    train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
+    val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
 
-if USE_SYNTHETIC_DATA:
-    synthetic_batches = int(config['training'].get('synthetic_batches', 100))
-    max_probe_modes = int(config['data'].get('max_probe_modes', 8))
-    scale_value = float(config['data'].get('scale', 100000.0))
+    # Base DataLoader kwargs
+    train_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'shuffle': True,  # Per-epoch local shuffling within each rank's shard
+    }
 
-    train_loader = SyntheticLoader(DEVICE, BATCH_SIZE, synthetic_batches, img_size, max_probe_modes, scale_value)
-    val_loader = SyntheticLoader(DEVICE, BATCH_SIZE, synthetic_batches, img_size, max_probe_modes, scale_value)
+    val_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'shuffle': False,
+    }
+
+    # Add prefetch settings if using workers
+    if train_dataloader_kwargs['num_workers'] > 0:
+        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    if val_dataloader_kwargs['num_workers'] > 0:
+        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+
+    # No samplers needed - set to None for later reference
+    train_sampler = None
+    val_sampler = None
+
+elif sharding_strategy == 'dynamic':
+    # Dynamic sharding: Use DistributedSampler, each rank gets different samples each epoch (better diversity)
+    if is_main_process:
+        print("\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
+        print("  - Each rank sees different samples each epoch", flush=True)
+
+    # Use the subsets directly (no RankShardedSubset wrapper)
+    train_dataset = train_subset
+    val_dataset = val_subset
+
+    # Create DistributedSamplers
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,  # Global shuffle + dynamic sharding
+        seed=config['data']['random_seed'],
+        drop_last=False
+    )
+
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,  # No shuffle for validation
+        seed=config['data']['random_seed'],
+        drop_last=False
+    )
+
+    # Base DataLoader kwargs (NO shuffle when using sampler!)
+    train_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'sampler': train_sampler,  # Sampler handles sharding and shuffling
+        'shuffle': False,  # MUST be False when sampler is provided
+    }
+
+    val_dataloader_kwargs = {
+        'batch_size': BATCH_SIZE,
+        'num_workers': config['data'].get('num_workers', 0),
+        'pin_memory': config['data'].get('pin_memory', True),
+        'sampler': val_sampler,
+        'shuffle': False,
+    }
+
+    # Add prefetch settings if using workers
+    if train_dataloader_kwargs['num_workers'] > 0:
+        train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    if val_dataloader_kwargs['num_workers'] > 0:
+        val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
+        val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
+
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
+
+else:
+    raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
+
+# Wrap loaders with CUDAPrefetcher for async data transfer
+# Only use prefetcher if CUDA is available AND enabled in config
+use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
+if torch.cuda.is_available() and use_cuda_prefetcher:
+    train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
+    val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
+    cuda_prefetch = True
+    if is_main_process:
+        print("Using CUDAPrefetcher for async data transfer", flush=True)
+    cuda_prefetch = True
+else:
+    # Fallback to regular loaders (training.py handles device transfers)
     train_prefetcher = train_loader
     val_prefetcher = val_loader
     cuda_prefetch = False
-
-    full_dataset = None
-    train_dataset = None
-    val_dataset = None
-    train_sampler = None
-    val_sampler = None
-    sharding_strategy = None
-else:
-    if 'data_path' not in config['data']:
-        raise ValueError("Config must specify 'data_path' (directory containing paired HDF5 files)")
-
-    data_dir = config['data'].get('data_path')
-    merged_data_dir = args.merged_data_dir or config['data'].get('merged_data_path')
-
-    # Create full dataset with sequential indices
-    # Shuffling is handled by random_split with a deterministic seed
-    if args.use_merged:
-        if merged_data_dir is None:
-            raise ValueError("--use-merged requires --merged-data-dir or data.merged_data_path in config")
-        full_dataset = CombinedMergedDataset(
-            file_paths=merged_data_dir,
-            rank=rank,
-            world_size=world_size,
-            scale=config['data']['scale'],
-            normalization_dict_path=config['data'].get('normalization_dict_path'),
-            apply_noise=True,
-            cache_object=config['data'].get('cache_object', False),
-            max_probe_modes=config['data'].get('max_probe_modes', 8),
-            pixel_size_m=config['data'].get('pixel_size_m'),
-            debug=DEBUG_MODE,
-            data_fraction=config['data'].get('data_fraction', 1.0)
-        )
-    else:
-        full_dataset = CombinedDataset(
-            file_paths=data_dir,
-            rank=rank,
-            world_size=world_size,
-            scale=config['data']['scale'],
-            normalization_dict_path=config['data'].get('normalization_dict_path'),
-            apply_noise=True,
-            cache_object=config['data'].get('cache_object', False),
-            max_probe_modes=config['data'].get('max_probe_modes', 8),
-            debug=DEBUG_MODE,
-            data_fraction=config['data'].get('data_fraction', 1.0)
-        )
-
-if not USE_SYNTHETIC_DATA:
-    # Split into train and validation using PyTorch's random_split
-    # This ensures mutually exclusive splits and follows PyTorch best practices
-    train_split = config['data']['train_split']
-    total_size = len(full_dataset)
-    train_size = int(total_size * train_split)
-    val_size = total_size - train_size
-
-    generator = torch.Generator().manual_seed(config['data']['random_seed'])
-    train_subset, val_subset = random_split(full_dataset, [train_size, val_size], generator=generator)
-
-    # ────────────────────────────────────────────────────────────────────────────────
-    # Distributed Data Loading Strategy
-    # ────────────────────────────────────────────────────────────────────────────────
-    sharding_strategy = config['data'].get('sharding_strategy', 'static')
-
-    if sharding_strategy == 'static':
-        # Static sharding: Use RankShardedSubset, each rank gets fixed samples across all epochs
-        if is_main_process:
-            print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
-            print("  - Each rank processes fixed samples across all epochs", flush=True)
-
-        train_dataset = RankShardedSubset(train_subset, rank, world_size, debug=DEBUG_MODE, subset_type='train')
-        val_dataset = RankShardedSubset(val_subset, rank, world_size, debug=DEBUG_MODE, subset_type='val')
-
-        # Base DataLoader kwargs
-        train_dataloader_kwargs = {
-            'batch_size': BATCH_SIZE,
-            'num_workers': config['data'].get('num_workers', 0),
-            'pin_memory': config['data'].get('pin_memory', True),
-            'shuffle': True,  # Per-epoch local shuffling within each rank's shard
-        }
-
-        val_dataloader_kwargs = {
-            'batch_size': BATCH_SIZE,
-            'num_workers': config['data'].get('num_workers', 0),
-            'pin_memory': config['data'].get('pin_memory', True),
-            'shuffle': False,
-        }
-
-        # Add prefetch settings if using workers
-        if train_dataloader_kwargs['num_workers'] > 0:
-            train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-            train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-        if val_dataloader_kwargs['num_workers'] > 0:
-            val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-            val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-        train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-        val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-
-        # No samplers needed - set to None for later reference
-        train_sampler = None
-        val_sampler = None
-
-    elif sharding_strategy == 'dynamic':
-        # Dynamic sharding: Use DistributedSampler, each rank gets different samples each epoch (better diversity)
-        if is_main_process:
-            print("\nUsing DYNAMIC sharding (DistributedSampler)", flush=True)
-            print("  - Each rank sees different samples each epoch", flush=True)
-
-        # Use the subsets directly (no RankShardedSubset wrapper)
-        train_dataset = train_subset
-        val_dataset = val_subset
-
-        # Create DistributedSamplers
-        train_sampler = DistributedSampler(
-            train_dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,  # Global shuffle + dynamic sharding
-            seed=config['data']['random_seed'],
-            drop_last=False
-        )
-
-        val_sampler = DistributedSampler(
-            val_dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=False,  # No shuffle for validation
-            seed=config['data']['random_seed'],
-            drop_last=False
-        )
-
-        # Base DataLoader kwargs (NO shuffle when using sampler!)
-        train_dataloader_kwargs = {
-            'batch_size': BATCH_SIZE,
-            'num_workers': config['data'].get('num_workers', 0),
-            'pin_memory': config['data'].get('pin_memory', True),
-            'sampler': train_sampler,  # Sampler handles sharding and shuffling
-            'shuffle': False,  # MUST be False when sampler is provided
-        }
-
-        val_dataloader_kwargs = {
-            'batch_size': BATCH_SIZE,
-            'num_workers': config['data'].get('num_workers', 0),
-            'pin_memory': config['data'].get('pin_memory', True),
-            'sampler': val_sampler,
-            'shuffle': False,
-        }
-
-        # Add prefetch settings if using workers
-        if train_dataloader_kwargs['num_workers'] > 0:
-            train_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-            train_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-        if val_dataloader_kwargs['num_workers'] > 0:
-            val_dataloader_kwargs['prefetch_factor'] = config['data'].get('prefetch_factor', 2)
-            val_dataloader_kwargs['persistent_workers'] = config['data'].get('persistent_workers', False)
-
-        train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-        val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-
-    else:
-        raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
-
-if not USE_SYNTHETIC_DATA:
-    # Wrap loaders with CUDAPrefetcher for async data transfer
-    # Only use prefetcher if CUDA is available AND enabled in config
-    use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
-    if torch.cuda.is_available() and use_cuda_prefetcher:
-        train_prefetcher = CUDAPrefetcher(train_loader, DEVICE)
-        val_prefetcher = CUDAPrefetcher(val_loader, DEVICE)
-        cuda_prefetch = True
-        if is_main_process:
-            print("Using CUDAPrefetcher for async data transfer", flush=True)
-        cuda_prefetch = True
-    else:
-        # Fallback to regular loaders (training.py handles device transfers)
-        train_prefetcher = train_loader
-        val_prefetcher = val_loader
-        cuda_prefetch = False
-        if is_main_process:
-            if torch.cuda.is_available():
-                print("Using standard DataLoader (CUDAPrefetcher disabled, manual device transfers)", flush=True)
-            else:
-                print("Using standard DataLoader on CPU/XPU", flush=True)
+    if is_main_process:
+        if torch.cuda.is_available():
+            print("Using standard DataLoader (CUDAPrefetcher disabled, manual device transfers)", flush=True)
+        else:
+            print("Using standard DataLoader on CPU/XPU", flush=True)
 
 # Create test dataset and loader only on main process
 if is_main_process and not USE_SYNTHETIC_DATA:
@@ -484,7 +413,7 @@ if is_main_process:
     print(f"Epochs: {EPOCHS} | World Size (GPUs): {world_size}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
     if USE_SYNTHETIC_DATA:
-        print("Data source: synthetic (on-device)", flush=True)
+        print("Data source: synthetic (CPU-generated)", flush=True)
         print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
         print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
         print(f"Synthetic batches per epoch: {len(train_loader)}", flush=True)

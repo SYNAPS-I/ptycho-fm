@@ -200,7 +200,35 @@ class CombinedMergedDataset(Dataset):
             raise ValueError(f"No shard files found in {directory}")
         return shard_files
 
-    def __init__(self, file_paths, rank=0, world_size=1, debug=False, data_fraction=1.0, **dataset_kwargs):
+    def __init__(self, file_paths, rank=0, world_size=1, debug=False, data_fraction=1.0,
+                 synthetic_data=False, synthetic_num_patterns=None, synthetic_img_size=256,
+                 synthetic_normalization=100000.0, **dataset_kwargs):
+        self.synthetic_data = synthetic_data
+        self.synthetic_num_patterns = synthetic_num_patterns
+        self.synthetic_img_size = int(synthetic_img_size)
+        self.synthetic_normalization = float(synthetic_normalization)
+        self.synthetic_scale = float(dataset_kwargs.get('scale', 100000.0))
+        self.synthetic_max_probe_modes = int(dataset_kwargs.get('max_probe_modes', 8))
+        self.rank = rank
+        self.world_size = world_size
+        self.debug = debug
+        self.debug_call_count = 0
+
+        if self.synthetic_data:
+            if self.synthetic_num_patterns is None:
+                self.synthetic_num_patterns = 1000
+            self.file_paths = []
+            self.dataset_kwargs = dataset_kwargs
+            self.max_cached_datasets = 0
+            self.dataset_cache = OrderedDict()
+            self.file_offsets = [0]
+            self.file_map = []
+            self.total_patterns = int(self.synthetic_num_patterns)
+            self.current_indices = np.arange(self.total_patterns)
+            self.pattern_shape = (self.synthetic_img_size, self.synthetic_img_size)
+            self.object_shape = (self.synthetic_img_size, self.synthetic_img_size)
+            return
+
         data_dir = Path(file_paths)
         if not data_dir.is_dir():
             raise ValueError(f"file_paths must be a directory, got: {file_paths}")
@@ -220,10 +248,6 @@ class CombinedMergedDataset(Dataset):
             self.file_paths = all_file_paths
 
         self.dataset_kwargs = dataset_kwargs
-        self.rank = rank
-        self.world_size = world_size
-        self.debug = debug
-        self.debug_call_count = 0
 
         self.max_cached_datasets = 16
         self.dataset_cache = OrderedDict()
@@ -247,6 +271,9 @@ class CombinedMergedDataset(Dataset):
     def __getitem__(self, idx: int):
         if idx >= len(self.current_indices):
             raise IndexError(f"Index {idx} out of range for {len(self.current_indices)} patterns")
+
+        if self.synthetic_data:
+            return self._synthetic_sample()
 
         global_idx = self.current_indices[idx]
         import bisect
@@ -275,6 +302,19 @@ class CombinedMergedDataset(Dataset):
             self.dataset_cache[file_path] = dataset
 
         return dataset[local_idx]
+
+    def _synthetic_sample(self):
+        import math
+        img_size = self.synthetic_img_size
+        diff_amp = torch.rand((1, img_size, img_size), dtype=torch.float32)
+        amp_patch = torch.rand((1, img_size, img_size), dtype=torch.float32)
+        ph_patch = torch.rand((1, img_size, img_size), dtype=torch.float32)
+        ph_patch = (ph_patch * (2.0 * math.pi)) - math.pi
+        real = torch.randn((1, self.synthetic_max_probe_modes, img_size, img_size), dtype=torch.float32)
+        imag = torch.randn((1, self.synthetic_max_probe_modes, img_size, img_size), dtype=torch.float32)
+        probe = torch.complex(real, imag)
+        probe_pos = torch.zeros((2,), dtype=torch.float32)
+        return diff_amp, amp_patch, ph_patch, probe, probe_pos, self.synthetic_normalization, self.synthetic_scale
 
 
 class RankShardedSubset(Dataset):
