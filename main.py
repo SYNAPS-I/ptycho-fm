@@ -207,7 +207,7 @@ data_dir = config['data'].get('data_path')
 merged_data_dir = args.merged_data_dir or config['data'].get('merged_data_path')
 
 synthetic_batches = int(config['training'].get('synthetic_batches', 100))
-synthetic_num_patterns = synthetic_batches * BATCH_SIZE if USE_SYNTHETIC_DATA else None
+synthetic_num_patterns = (synthetic_batches * BATCH_SIZE * world_size) if USE_SYNTHETIC_DATA else None
 
 # Create full dataset with sequential indices
 # Shuffling is handled by random_split with a deterministic seed
