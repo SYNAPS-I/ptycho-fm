@@ -123,6 +123,7 @@ def _build_train_loader(
     random_seed: int,
     device: torch.device,
     use_cuda_prefetcher: bool,
+    drop_last: bool,
 ):
     train_subset_epoch = _subset_training_subset(train_subset_base, fraction)
 
@@ -145,7 +146,7 @@ def _build_train_loader(
             rank=rank,
             shuffle=True,
             seed=random_seed,
-            drop_last=True 
+            drop_last=drop_last,
         )
         train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
         train_dataloader_kwargs['sampler'] = train_sampler
@@ -180,6 +181,7 @@ def _build_val_loader(
     random_seed: int,
     device: torch.device,
     use_cuda_prefetcher: bool,
+    drop_last: bool,
 ):
     if sharding_strategy == 'static':
         val_dataset = RankShardedSubset(
@@ -200,7 +202,7 @@ def _build_val_loader(
             rank=rank,
             shuffle=False,
             seed=random_seed,
-            drop_last=True 
+            drop_last=drop_last,
         )
         val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
         val_dataloader_kwargs['sampler'] = val_sampler
@@ -468,6 +470,7 @@ train_subset_base = train_subset
 # Distributed Data Loading Strategy
 # ────────────────────────────────────────────────────────────────────────────────
 sharding_strategy = config['data'].get('sharding_strategy', 'static')
+drop_last = config['data'].get('drop_last', False)
 if sharding_strategy == 'static':
     if is_main_process:
         print("\nUsing STATIC sharding (RankShardedSubset)", flush=True)
@@ -479,13 +482,23 @@ elif sharding_strategy == 'dynamic':
 else:
     raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
 
+if (
+    is_main_process
+    and config['training'].get('platform', 'slurm') == 'polaris'
+    and not drop_last
+):
+    print(
+        "WARNING: data.drop_last is False on Polaris. Distributed training may crash during synchronization when ranks have uneven batch counts.",
+        flush=True,
+    )
+
 # Base DataLoader kwargs
 train_dataloader_kwargs_base = {
     'batch_size': BATCH_SIZE,
     'num_workers': config['data'].get('num_workers', 0),
     'pin_memory': pin_memory,
     'shuffle': True,
-    'drop_last': True, 
+    'drop_last': drop_last,
 }
 
 val_dataloader_kwargs_base = {
@@ -493,7 +506,7 @@ val_dataloader_kwargs_base = {
     'num_workers': config['data'].get('num_workers', 0),
     'pin_memory': pin_memory,
     'shuffle': False,
-    'drop_last': True, 
+    'drop_last': drop_last,
 }
 
 # Add prefetch settings if using workers
@@ -527,6 +540,7 @@ use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
     random_seed=config['data']['random_seed'],
     device=DEVICE,
     use_cuda_prefetcher=use_cuda_prefetcher,
+    drop_last=drop_last,
 )
 
 (
@@ -545,6 +559,7 @@ use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
     random_seed=config['data']['random_seed'],
     device=DEVICE,
     use_cuda_prefetcher=use_cuda_prefetcher,
+    drop_last=drop_last,
 )
 
 if is_main_process:
@@ -602,6 +617,7 @@ if is_main_process:
     print(f"  pin_memory: {train_dataloader_kwargs['pin_memory']}", flush=True)
     print(f"  train shuffle: {train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
     print(f"  val shuffle: {val_dataloader_kwargs['shuffle']}", flush=True)
+    print(f"  drop_last: {train_dataloader_kwargs['drop_last']}", flush=True)
     if train_dataloader_kwargs['num_workers'] > 0:
         print(f"  prefetch_factor: {train_dataloader_kwargs.get('prefetch_factor', 'N/A')}", flush=True)
         print(f"  persistent_workers: {train_dataloader_kwargs.get('persistent_workers', 'N/A')}", flush=True)
@@ -865,6 +881,7 @@ try:
                 random_seed=config['data']['random_seed'],
                 device=DEVICE,
                 use_cuda_prefetcher=use_cuda_prefetcher,
+                drop_last=drop_last,
             )
 
             if is_main_process:
