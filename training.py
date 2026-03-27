@@ -356,13 +356,16 @@ class Trainer(object):
                 # Print first 10 batches with timestamps to confirm training is working
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
            
+            
             #_sync_device()
             move_data = time.perf_counter()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
-            
+            print(f"diff_amp.device={diff_amp.device} probe.device={probe.device} norm.device={norm.device}, {self.device}", flush=True)
             input_diff = diff_amp.to(self.device)
+            print("got the input diff", flush=True)
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
+            print("got the probe", flush=True)
             input_norm = norm.to(self.device)
             input_scale = scale.to(self.device)
             if self.use_prefetch == False:
@@ -371,8 +374,10 @@ class Trainer(object):
             #_sync_device()
             fwd_pass_st = time.perf_counter()
             if profiling:
+                print("start_fwd_pass", flush=True)
                 with torch.profiler.record_function("model_fwdpass"):
                     output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                print("end_fwd_pass", flush=True)
             else:
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
             #_sync_device()
