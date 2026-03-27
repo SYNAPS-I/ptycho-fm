@@ -361,6 +361,12 @@ elif sharding_strategy == 'dynamic':
 else:
     raise ValueError(f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'")
 
+if len(train_dataset) == 0 or len(val_dataset) == 0:
+    raise ValueError(
+        f"Rank {rank} has empty dataset: train={len(train_dataset)} val={len(val_dataset)} "
+        f"(total={len(full_dataset)}, split={train_size}/{val_size}, world_size={world_size})"
+    )
+
 # Wrap loaders with CUDAPrefetcher for async data transfer
 # Only use prefetcher if CUDA is available AND enabled in config
 use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
