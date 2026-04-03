@@ -40,6 +40,7 @@ data:
   num_workers: 1
   prefetch_factor: 2
   pin_memory: true
+  drop_last: true
   persistent_workers: true
 
   apply_noise: false

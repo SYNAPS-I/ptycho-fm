@@ -33,6 +33,7 @@ data:
   num_workers: 4
   prefetch_factor: 2
   pin_memory: false  # Set true only when using CUDAPrefetcher
+  drop_last: false
   persistent_workers: false  # Disabled to avoid CUDA/HDF5 conflicts
   use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
