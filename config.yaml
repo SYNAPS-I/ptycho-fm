@@ -2,24 +2,33 @@
 
 # Data Configuration
 data:
-  # Directory path - will auto-discover all paired *_dp.hdf5 and *_para.hdf5 files
-  data_path: '/scratch/aileenluo/ptycho-vit/amp_data'
-  test_path: '/home/beams/AILEENLUO/ptycho_simulation_factory/outputs/scan807/scan807_dp.hdf5'
+  data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
+  packed: true # set to true if using packed data
+  test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
-  normalization_dict_path: '/scratch/aileenluo/ptycho-vit/amp_data/amp_norm.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  test_normalization: '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl' 
+  # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
+  normalization_dict_path: '/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl'
+  test_normalization: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/test2probes_norm.pkl'
+  default_normalization: 100000.0
 
   cache_object: true
   max_probe_modes: 10  # Maximum number of probe modes to pad to
+  target_size: 256  # Target size for diffraction patterns (pads smaller patterns, upsamples probe)
 
-  train_split: 0.95  # Fraction of data for training (remainder used for validation)
+  train_split: 0.80  # Fraction of data for training (20% held out for validation/test)
   random_seed: 8
+  # Optional: use only the first fraction of samples from the full dataset (0 < fraction <= 1)
+  # subset_fraction: 0.1
 
   # Distributed data loading strategy:
   sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
+
+  # Limit number of files to use (for faster testing). Set to null to use all files.
+  # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
+  max_files: null
 
   # DataLoader Configuration
   num_workers: 4
@@ -31,17 +40,29 @@ data:
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 128
-  learning_rate: 1.0e-4  # Default learning rate (used if individual rates not specified)
+  batch_size: 64
+  learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  # Optional: learning rate scheduler
+  lr_scheduler:
+    enabled: false
+    scheduler_class: 'CyclicLR'
+    kwargs: {}
+  # Optional: per-epoch subsetting of the training set only (validation unaffected)
+  data_subsetting_schedule:
+    enabled: false
+    epochs: [0, 3, 5]
+    fractions: [0.05, 0.2, 1.0]
 
   # Individual learning rates for model components (optional)
   # If not specified, will use the default learning_rate above
-  encoder_lr: 1.0e-4
-  amp_decoder_lr: 1.0e-4
-  ph_decoder_lr: 1.0e-4
+  # encoder_lr: 1.0e-7
+  # amp_decoder_lr: 1.0e-6
+  # ph_decoder_lr: 1.0e-6
 
-  epochs: 201  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 11  # Total epochs to train for (not additional epochs when resuming)
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
+  # Skip batch update if grad norm exceeds this value (null disables)
+  skip_batch_if_grad_norm_greater_than: null
 
   # Weighted loss configuration (only used when loss_function: 'weighted')
   weighted_loss:
@@ -52,15 +73,30 @@ training:
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 1 # Plot stitched test results every M epochs
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
+  # Save model weights each epoch as model_epoch_XXX.pth
+  save_epoch_models: true
+  # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
+  checkpoint_freq: 1
+  finetune_from_model: null
 
   profile: false
 
 # Model Architecture
 # All models are fixed at 256x256 image size
 model:
-  # Encoder type selection: 'custom' (train from scratch) or 'pretrained' (use pretrained encoder)
+  init:
+    enabled: false
+    method: 'trunc_normal'  # options: trunc_normal, kaiming
+    mean: 0.0
+    std: 0.02
+    apply_to: ['encoder', 'decoders']  # options: encoder, decoders
+    override_pretrained: false
+    kaiming:
+      distribution: 'uniform'  # options: uniform, normal
+      mode: 'fan_in'           # options: fan_in, fan_out
+      nonlinearity: 'relu'     # options: relu, leaky_relu, linear, etc.
+      a: 0.0                   # negative slope for leaky_relu
   encoder_type: 'custom'  # Options: 'custom', 'pretrained'
-
   # Encoder Configuration
   encoder:
     img_size: 256
@@ -73,19 +109,17 @@ model:
     use_cls_token: false
     dropout: 0.1
     attn_dropout: 0.0
-    # Additional options for pretrained encoder (only used when encoder_type: 'pretrained')
-    # timm_model_name: 'vit_large_patch32_224' 
-    # timm_kwargs: 
-      # 'pretrained': false     
-      # checkpoint_path: null 
-      # checkpoint_kwargs:                  
-        # strict: true                     
-
-  # Decoder Configuration (independent of encoder type)
+    # Pretrained source
+    timm_model_name: 'vit_large_patch32_224' #initialization with ViT_L_32 model weights'
+    timm_kwargs:
+      pretrained: false          # set true to download timm weights instead of local checkpoint
+    checkpoint_path: 'model.safetensors'  # local pretrained weights
+    checkpoint_kwargs:
+      strict: true
   decoder:
     base_channels: 64
-    latent_dim: null    # If null, automatically uses encoder.embed_dim
-    num_stages: 4       # Number of upsampling stages (depends on patch_size)
+    latent_dim: 512
+    num_stages: 4        # 8x8 → 256x256 for patch_size=32
     use_batchnorm: true
     dropout: 0.1
 
@@ -96,11 +130,11 @@ paths:
 # WandB Configuration
 wandb:
   enabled: true
-  entity: 'SYNAPS-I'
-  project: 'PtychoViT'
-  dataset_name: 'mouse kidney confocal fluorescence'
-  notes: 'amp series, log_scale_amp=0.5, tanh'
-  run_name: 'base'
+  entity: 'nersc-das'
+  project: 'ptycho-vit'
+  dataset_name: 'simulated full data'
+  notes: 'Custom ViT, 43M'
+  run_name: 'base-new'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration

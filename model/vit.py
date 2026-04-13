@@ -124,13 +124,27 @@ class CustomViT(nn.Module):
         mlp_ratio=4.0,
         dropout=0.1,
         attn_dropout=0.0,
-        use_cls_token=False
+        use_cls_token=False,
+        init_mean=0.0,
+        init_std=0.02,
+        init_method="trunc_normal",
+        kaiming_a=0.0,
+        kaiming_mode="fan_in",
+        kaiming_nonlinearity="relu",
+        kaiming_distribution="uniform"
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.img_size = img_size
         self.patch_size = patch_size
         self.use_cls_token = use_cls_token
+        self.init_mean = init_mean
+        self.init_std = init_std
+        self.init_method = init_method
+        self.kaiming_a = kaiming_a
+        self.kaiming_mode = kaiming_mode
+        self.kaiming_nonlinearity = kaiming_nonlinearity
+        self.kaiming_distribution = kaiming_distribution
 
         # Patch embedding
         self.patch_embed = PatchEmbedding(img_size, patch_size, in_channels, embed_dim)
@@ -161,16 +175,50 @@ class CustomViT(nn.Module):
 
     def _init_weights(self):
         # Initialize positional embeddings
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, mean=self.init_mean, std=self.init_std)
         if self.use_cls_token:
-            nn.init.trunc_normal_(self.cls_token, std=0.02)
+            nn.init.trunc_normal_(self.cls_token, mean=self.init_mean, std=self.init_std)
 
         # Initialize linear layers and layer norms
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
+                if self.init_method == "kaiming":
+                    if self.kaiming_distribution == "normal":
+                        nn.init.kaiming_normal_(
+                            m.weight,
+                            a=self.kaiming_a,
+                            mode=self.kaiming_mode,
+                            nonlinearity=self.kaiming_nonlinearity,
+                        )
+                    else:
+                        nn.init.kaiming_uniform_(
+                            m.weight,
+                            a=self.kaiming_a,
+                            mode=self.kaiming_mode,
+                            nonlinearity=self.kaiming_nonlinearity,
+                        )
+                else:
+                    nn.init.trunc_normal_(m.weight, mean=self.init_mean, std=self.init_std)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                if self.init_method == "kaiming":
+                    if self.kaiming_distribution == "normal":
+                        nn.init.kaiming_normal_(
+                            m.weight,
+                            a=self.kaiming_a,
+                            mode=self.kaiming_mode,
+                            nonlinearity=self.kaiming_nonlinearity,
+                        )
+                    else:
+                        nn.init.kaiming_uniform_(
+                            m.weight,
+                            a=self.kaiming_a,
+                            mode=self.kaiming_mode,
+                            nonlinearity=self.kaiming_nonlinearity,
+                        )
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.weight, 1.0)
                 nn.init.constant_(m.bias, 0)
@@ -206,6 +254,6 @@ class CustomViT(nn.Module):
         # (batch_size, n_patches, embed_dim) -> (batch_size, embed_dim, H, W)
         h = w = int(self.n_patches ** 0.5)
         x = x.transpose(1, 2)  # (batch_size, embed_dim, n_patches)
-        x = x.reshape(batch_size, self.embed_dim, h, w)
+        x = x.reshape(batch_size, self.embed_dim, h, w).contiguous()
 
         return x

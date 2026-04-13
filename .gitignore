@@ -1,0 +1,15 @@
+# python cache dirs
+__pycache__/
+.ipynb_checkpoints/
+
+# environment
+.venv/
+
+# logging
+wandb/
+
+# root-only workspace
+/workspace/
+
+# compiled python
+*.pyc
