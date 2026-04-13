@@ -569,7 +569,7 @@ class Trainer(object):
             running_ph_loss  += loss_ph.item()
 
             if batch_idx > 0 and self.is_main_process:
-                if batch_idx < 1000 and (batch_idx + 1) % 10 == 0:
+                if batch_idx < 1000 and (batch_idx + 1) % 1000 == 0:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
                 elif (batch_idx + 1) % 1000 == 0:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)

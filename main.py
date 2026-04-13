@@ -730,7 +730,7 @@ param_groups = [
     {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'}
 ]
 
-optimizer = optim.Adam(param_groups)
+optimizer = optim.Adam(param_groups, fused=True)
 
 # Optional learning rate scheduler
 scheduler = None

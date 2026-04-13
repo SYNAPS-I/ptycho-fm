@@ -2,7 +2,7 @@
 #SBATCH -J ptycho
 #SBATCH -q premium
 #SBATCH -C gpu
-#SBATCH --nodes=256
+#SBATCH --nodes=128
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
