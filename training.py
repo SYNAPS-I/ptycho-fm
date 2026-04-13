@@ -499,7 +499,7 @@ class Trainer(object):
 
             torch.cuda.nvtx.range_pop()  # copy in
 
-            torch.cuda.nvtx.range_push(f"forward")
+            torch.cuda.nvtx.range_push("forward")
 
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
@@ -547,7 +547,7 @@ class Trainer(object):
                         flush=True
                     )
             else:
-                torch.cuda.nvtx.range_push(f"optimizer")
+                torch.cuda.nvtx.range_push("optimizer")
                 optimizer.step()
                 torch.cuda.nvtx.range_pop()  # optimizer
                 processed_batches += 1

@@ -22,7 +22,7 @@ cmd="$PROFILE_CMD python main.py"
 
 nodes=4
 ngpu=4 # number of GPUs (single node)
-srun -u \
+srun -u --mpi=pmi2 \
   -N $nodes \
   --ntasks-per-node $ngpu \
   --cpus-per-task=32 \

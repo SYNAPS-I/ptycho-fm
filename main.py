@@ -13,10 +13,10 @@ import torch.optim as optim
 from torchinfo import summary
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
-# try:
-#     from mpi4py import MPI
-# except ImportError:
-#     MPI = None
+try:
+    from mpi4py import MPI
+except ImportError:
+    MPI = None
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from data_simple_pack import PtychographyDatasetPacked
@@ -671,21 +671,21 @@ model = PtychoViT(config=config['model'])
 if is_main_process:
     encoder_type = config['model'].get('encoder_type', 'custom')
     print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
-    # dummy_data = torch.randn((1, 1, img_size, img_size))
-    # dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
-    # try:
-    #     summary(
-    #         model,
-    #         input_data={
-    #             'x': dummy_data,
-    #             'probe': dummy_probe,
-    #             'normalization': torch.randn((1, 1)),
-    #             'scale': torch.randn((1, 1)),
-    #         },
-    #         device='cpu',
-    #     )
-    # except Exception as e:
-    #     print(f"[Warning] torchinfo summary failed and will be skipped: {e}", flush=True)
+    dummy_data = torch.randn((1, 1, img_size, img_size))
+    dummy_probe = torch.randn((1, 1, 10, img_size, img_size, 2))
+    try:
+        summary(
+            model,
+            input_data={
+                'x': dummy_data,
+                'probe': dummy_probe,
+                'normalization': torch.randn((1, 1)),
+                'scale': torch.randn((1, 1)),
+            },
+            device='cpu',
+        )
+    except Exception as e:
+        print(f"[Warning] torchinfo summary failed and will be skipped: {e}", flush=True)
 
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
