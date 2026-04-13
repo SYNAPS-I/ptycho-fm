@@ -5,17 +5,42 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
-
 import h5py
 import numpy as np
 from mpi4py import MPI
 
-from data_simple import PtychographyDatasetSimple
+
+def find_paired_files(directory: Path) -> List[Path]:
+    """Return sorted ``*_dp.hdf5`` paths that have a matching ``*_para.hdf5`` sibling."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise ValueError(f"Not a directory: {directory}")
+    out: List[Path] = []
+    for dp in sorted(directory.rglob("*_dp.hdf5")):
+        para = dp.with_name(f"{dp.stem[:-3]}_para{dp.suffix}")
+        if para.is_file():
+            out.append(dp)
+    if not out:
+        raise ValueError(f"No paired HDF5 files found in {directory}")
+    print(f"pack_hdf5: {len(out)} paired file(s) under {directory}", flush=True)
+    return out
+
+
+def derive_object_name(file_path: Path, base_dir: Path) -> str:
+    """Stable object id: relative path under ``base_dir`` without ``_dp`` suffix, else stem."""
+    fp, bd = file_path.resolve(), Path(base_dir).resolve()
+    if not fp.is_relative_to(bd):
+        stem = file_path.stem
+        return stem[:-3] if stem.endswith("_dp") else stem
+    rel = fp.relative_to(bd).with_suffix("")
+    name = rel.name
+    if name.endswith("_dp"):
+        rel = rel.with_name(name[:-3])
+    return rel.as_posix()
+
 
 SOURCE = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2")
-OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed")
+OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed_test")
 MAX_SHARDS = 500
 MAX_OBJECTS: Optional[int] = None  # e.g. 200 for a short test; None = full catalog
 MAX_PROBE_MODES = 10
@@ -62,7 +87,7 @@ def write_packed_shard(
     """
     meta = []
     for dp_path in chunk:
-        key = PtychographyDatasetSimple.derive_object_name(dp_path, source)
+        key = derive_object_name(dp_path, source)
         para = _para_path(dp_path)
         try:
             dpf = h5py.File(dp_path, "r")
@@ -228,7 +253,7 @@ if __name__ == "__main__":
     t_list = 0.0
     if rank == 0:
         t_list0 = time.perf_counter()
-        pairs_all = PtychographyDatasetSimple.find_paired_files(source)
+        pairs_all = find_paired_files(source)
         t_list = time.perf_counter() - t_list0
         n_total = len(pairs_all)
         paths_payload = [str(p) for p in pairs_all]
