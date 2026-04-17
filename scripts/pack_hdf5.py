@@ -40,7 +40,7 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
 
 
 SOURCE = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2")
-OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed_test")
+OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed")
 MAX_SHARDS = 500
 MAX_OBJECTS: Optional[int] = None  # e.g. 200 for a short test; None = full catalog
 MAX_PROBE_MODES = 10
