@@ -2,16 +2,16 @@
 
 # Data Configuration
 data:
-  data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
+  data_path: '/flare/SYNAPS-I/simulated_data_cleanedProbe_2_packed' #'/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
   packed: true # set to true if using packed data
-  test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
+  test_path: '/lus/flare/projects/PPFL_FM/test_data/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
   # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  normalization_dict_path: '/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl'
-  test_normalization: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/test2probes_norm.pkl'
+  normalization_dict_path: '/flare/SYNAPS-I/simulated_data_cleanedProbe_2_packed/normalization.pkl'
+  test_normalization: '/lus/flare/projects/PPFL_FM/test_data/test2probes_norm.pkl'
   default_normalization: 100000.0
 
   cache_object: true
@@ -32,16 +32,17 @@ data:
 
   # DataLoader Configuration
   num_workers: 4
-  prefetch_factor: 2
+  prefetch_factor: 1
   pin_memory: true  # Required for CUDAPrefetcher async transfer
   drop_last: true
   persistent_workers: true  # Keep workers alive across epochs
-  use_cuda_prefetcher: true  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
+  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
+  platform: aurora
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 64
+  batch_size: 32
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
   # Optional: learning rate scheduler
   lr_scheduler:
@@ -60,7 +61,7 @@ training:
   # amp_decoder_lr: 1.0e-6
   # ph_decoder_lr: 1.0e-6
 
-  epochs: 11  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 50  # Total epochs to train for (not additional epochs when resuming)
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
@@ -73,7 +74,7 @@ training:
 
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 1 # Plot stitched test results every M epochs
-  resume_from_checkpoint: false  # Set to true to resume training from checkpoint
+  resume_from_checkpoint: true  # Set to true to resume training from checkpoint
   # Save model weights each epoch as model_epoch_XXX.pth
   save_epoch_models: true
   # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
@@ -82,56 +83,91 @@ training:
 
   profile: false
 
-# Model Architecture
+# Model Architecturei -- custom 43M
+# All models are fixed at 256x256 image size
+#model:
+#  init:
+#    enabled: false
+#    method: 'trunc_normal'  # options: trunc_normal, kaiming
+#    mean: 0.0
+#    std: 0.02
+#    apply_to: ['encoder', 'decoders']  # options: encoder, decoders
+#    override_pretrained: false
+#    kaiming:
+#      distribution: 'uniform'  # options: uniform, normal
+#      mode: 'fan_in'           # options: fan_in, fan_out
+#      nonlinearity: 'relu'     # options: relu, leaky_relu, linear, etc.
+#      a: 0.0                   # negative slope for leaky_relu
+#  encoder_type: 'custom'  # Options: 'custom', 'pretrained'
+#  # Encoder Configuration
+#  encoder:
+#    img_size: 256
+#    patch_size: 16
+#    in_channels: 1
+#    embed_dim: 512
+#    depth: 12
+#    num_heads: 8
+#    mlp_ratio: 4.0
+#    use_cls_token: false
+#    dropout: 0.1
+#    attn_dropout: 0.0
+#    # Pretrained source
+#    timm_model_name: 'vit_large_patch32_224' #initialization with ViT_L_32 model weights'
+#    timm_kwargs:
+#      pretrained: false          # set true to download timm weights instead of local checkpoint
+#    checkpoint_path: 'model.safetensors'  # local pretrained weights
+#    checkpoint_kwargs:
+#      strict: true
+#  decoder:
+#    base_channels: 64
+#    latent_dim: 512
+#    num_stages: 4        # 8x8 → 256x256 for patch_size=32
+#    use_batchnorm: true
+#    dropout: 0.1
+
+
+# Model Architecture - pretrained - 304M model.
 # All models are fixed at 256x256 image size
 model:
-  init:
-    enabled: false
-    method: 'trunc_normal'  # options: trunc_normal, kaiming
-    mean: 0.0
-    std: 0.02
-    apply_to: ['encoder', 'decoders']  # options: encoder, decoders
-    override_pretrained: false
-    kaiming:
-      distribution: 'uniform'  # options: uniform, normal
-      mode: 'fan_in'           # options: fan_in, fan_out
-      nonlinearity: 'relu'     # options: relu, leaky_relu, linear, etc.
-      a: 0.0                   # negative slope for leaky_relu
-  encoder_type: 'custom'  # Options: 'custom', 'pretrained'
+  # Encoder type selection: 'custom' (train from scratch) or 'pretrained' (use pretrained encoder)
+  encoder_type: 'pretrained' #'custom'  # Options: 'custom', 'pretrained'
   # Encoder Configuration
   encoder:
     img_size: 256
-    patch_size: 16
+    patch_size: 32
     in_channels: 1
-    embed_dim: 512
-    depth: 12
-    num_heads: 8
+    embed_dim: 1024
+    depth: 24
+    num_heads: 16
     mlp_ratio: 4.0
     use_cls_token: false
     dropout: 0.1
     attn_dropout: 0.0
-    # Pretrained source
-    timm_model_name: 'vit_large_patch32_224' #initialization with ViT_L_32 model weights'
+    # Additional options for pretrained encoder (only used when encoder_type: 'pretrained')
+    timm_model_name: 'vit_large_patch32_224'
     timm_kwargs:
-      pretrained: false          # set true to download timm weights instead of local checkpoint
-    checkpoint_path: 'model.safetensors'  # local pretrained weights
+      pretrained: false
+    checkpoint_path: '/lus/flare/projects/PPFL_FM/pretrained_model_weights/model.safetensors'
     checkpoint_kwargs:
       strict: true
+
+  # Decoder Configuration (independent of encoder type)
   decoder:
     base_channels: 64
-    latent_dim: 512
-    num_stages: 4        # 8x8 → 256x256 for patch_size=32
+    latent_dim: null    # If null, automatically uses encoder.embed_dim
+    num_stages: 5      # Number of upsampling stages (depends on patch_size)
     use_batchnorm: true
     dropout: 0.1
 
+
 # Paths
 paths:
-  model_save_path: '/pscratch/sd/s/shas1693/data/ptycho/models'
+  model_save_path: '/flare/SYNAPS-I/ptycho/models'
 
 # WandB Configuration
 wandb:
-  enabled: true
-  entity: 'nersc-das'
+  enabled: false
+  entity: 'aurora-runs'
   project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
