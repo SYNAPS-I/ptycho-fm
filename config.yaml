@@ -4,6 +4,15 @@
 data:
   data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
   packed: true # set to true if using packed data
+
+  # Node-local staging: copy a fraction of shards onto each node's tmpfs
+  # (run scripts/stage_pack_to_local.py via MPI before main.py).
+  local_stage:
+    enabled: false
+    local_dir: '${TMPDIR}/packed'   # per-node; manifest lives in here
+    shard_fraction: 0.1             # 0.1 / 0.2 / 0.4 / 0.6 / 1.0
+    shard_seed: 8
+
   test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
   scale: 10000.0
 

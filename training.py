@@ -13,6 +13,37 @@ from utils.ptychi_utils import place_patches_fourier_shift
 import wandb
 
 
+def _sync_device(device):
+    """Synchronize the accelerator device (CUDA or XPU)."""
+    if 'cuda' in str(device):
+        torch.cuda.synchronize(device)
+    elif 'xpu' in str(device):
+        torch.xpu.synchronize(device)
+
+
+_ITT_AVAILABLE = False
+try:
+    _ITT_AVAILABLE = hasattr(torch, "xpu") and hasattr(torch.xpu, "itt")
+except Exception:
+    _ITT_AVAILABLE = False
+
+
+def _nvtx_range_push(msg):
+    """Push a named range (NVTX on CUDA, ITT on XPU, no-op otherwise)."""
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(msg)
+    elif _ITT_AVAILABLE:
+        torch.xpu.itt.range_push(msg)
+
+
+def _nvtx_range_pop():
+    """Pop a named range (NVTX on CUDA, ITT on XPU, no-op otherwise)."""
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
+    elif _ITT_AVAILABLE:
+        torch.xpu.itt.range_pop()
+
+
 def _move_to_cpu(obj):
     # Recursively detach and move Torch tensors to CPU (for safe serialization).
     if torch.is_tensor(obj):
@@ -447,23 +478,33 @@ class Trainer(object):
         batch_0_io_start = time.time()
         train_end_time = None  # Will be set after each batch completes
         epoch_start_time = time.time()
-        
-        for batch_idx, batch in enumerate(dataloader):
-            # adding some profiling
-            if profile:
-                if epoch == 1 and batch_idx == 0 and self.is_main_process:
-                    torch.cuda.profiler.start()
-                if batch_idx == 50:
-                    if epoch == 1 and self.is_main_process:
-                        torch.cuda.profiler.stop()
-                    break
 
-            torch.cuda.nvtx.range_push(f"step {batch_idx}")
-            torch.cuda.nvtx.range_push(f"data copy in {batch_idx}")
+        prof = None
+        if profile and self.is_main_process:
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                activities.append(torch.profiler.ProfilerActivity.XPU)
+            elif torch.cuda.is_available():
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+            prof_dir = os.path.join("./profiles", f"run{self.run_num}")
+            os.makedirs(prof_dir, exist_ok=True)
+            prof = torch.profiler.profile(
+                activities=activities,
+                schedule=torch.profiler.schedule(wait=2, warmup=2, active=5, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_dir, use_gzip=True),
+            )
+            prof.__enter__()
+
+        for batch_idx, batch in enumerate(dataloader):
+            _nvtx_range_push(f"step {batch_idx}")
+            _nvtx_range_push(f"data copy in {batch_idx}")
+
+            # Record timing for the first 10 batches, then every 50th thereafter
+            record_timing = batch_idx < 10 or (batch_idx % 50 == 0)
 
             # Time IO (data loading) - this captures the time to get batch from DataLoader
             # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
-            if batch_idx < 10:
+            if record_timing:
                 if batch_idx == 0:
                     io_time = time.time() - batch_0_io_start
                 else:
@@ -488,7 +529,7 @@ class Trainer(object):
             norm      = norm.to(self.device, non_blocking=True)
             scale     = scale.to(self.device, non_blocking=True)
 
-            if batch_idx < 10:
+            if record_timing:
                 train_start_time = time.time()
 
             input_diff = diff_amp
@@ -496,9 +537,9 @@ class Trainer(object):
             input_norm = norm
             input_scale = scale
 
-            torch.cuda.nvtx.range_pop()  # copy in
+            _nvtx_range_pop()  # copy in
 
-            torch.cuda.nvtx.range_push("forward")
+            _nvtx_range_push("forward")
 
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
@@ -508,7 +549,7 @@ class Trainer(object):
             else:
                 loss = criterion(output_diff, input_diff)
 
-            torch.cuda.nvtx.range_pop()  # forward
+            _nvtx_range_pop()  # forward
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
@@ -546,14 +587,14 @@ class Trainer(object):
                         flush=True
                     )
             else:
-                torch.cuda.nvtx.range_push("optimizer")
+                _nvtx_range_push("optimizer")
                 optimizer.step()
-                torch.cuda.nvtx.range_pop()  # optimizer
+                _nvtx_range_pop()  # optimizer
                 processed_batches += 1
 
             train_end_time = time.time()
 
-            if batch_idx < 10:
+            if record_timing:
                 train_time = train_end_time - train_start_time
                 total_time = io_time + train_time
                 if self.is_main_process:
@@ -580,9 +621,15 @@ class Trainer(object):
                 next_milestone_idx += 1
 
 
-            torch.cuda.nvtx.range_pop()  # step
+            _nvtx_range_pop()  # step
 
-        torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+            if prof is not None:
+                prof.step()
+
+        if prof is not None:
+            prof.__exit__(None, None, None)
+
+        _sync_device(self.device)  # device sync to ensure accurate epoch timings
         print(f"Processed {processed_batches} batches", flush=True)
         num_batches = processed_batches
         if num_batches == 0:
@@ -828,6 +875,5 @@ class Trainer(object):
         # Synchronize all processes after validation and potential model saving
         # This prevents CUDA/HDF5 conflicts when other ranks continue while rank 0 saves
         if self.use_ddp and dist.is_initialized():
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
+            _sync_device(self.device)
             dist.barrier()

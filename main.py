@@ -1,4 +1,5 @@
 import os
+import json
 from typing import Literal
 import argparse
 import pickle
@@ -17,9 +18,14 @@ try:
     from mpi4py import MPI
 except ImportError:
     MPI = None
+try:
+    import intel_extension_for_pytorch as ipex
+except ImportError:
+    ipex = None
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
 from data_simple_pack import PtychographyDatasetPacked
+from data_simple_pack_local import PtychographyDatasetPackedLocal
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
 from training import Trainer
@@ -255,13 +261,15 @@ def ensure_env_from_slurm():
         os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
         
 
-def init_distributed(platform: str = Literal['polaris', 'slurm']):
+def init_distributed(platform: str = Literal['polaris', 'slurm', 'aurora']):
     if platform == 'polaris':
         return init_distributed_polaris()
     elif platform == 'slurm':
         return init_distributed_slurm()
+    elif platform == 'aurora':
+        return init_distributed_aurora()
     else:
-        raise ValueError(f"Invalid platform: {platform}. Must be 'polaris' or 'slurm'")
+        raise ValueError(f"Invalid platform: {platform}. Must be 'polaris', 'slurm', or 'aurora'")
 
 
 def init_distributed_polaris():
@@ -357,11 +365,42 @@ def init_distributed_slurm():
     return rank_env, world_size, mapped_local, device
 
 
+def init_distributed_aurora():
+    """
+    Initialize torch.distributed for Aurora (Intel XPU) using MPI and xccl backend.
+    Returns (rank, world_size, local_rank, device).
+    """
+    if MPI is None:
+        raise ImportError("MPI is required for Aurora. Please install mpi4py.")
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    os.environ['RANK'] = str(rank)
+    os.environ['WORLD_SIZE'] = str(size)
+    local_rank = int(os.environ.get('PALS_LOCAL_RANKID', rank % torch.xpu.device_count()))
+    os.environ['LOCAL_RANK'] = str(local_rank)
+
+    master_addr = socket.gethostname() if rank == 0 else None
+    master_addr = comm.bcast(master_addr, root=0)
+    os.environ['MASTER_ADDR'] = master_addr
+    os.environ['MASTER_PORT'] = os.environ.get('MASTER_PORT', '29500')
+
+    torch.xpu.set_device(int(local_rank))
+    device = torch.device(f'xpu:{local_rank}')
+
+    if size > 1:
+        dist.init_process_group(backend='xccl', init_method='env://', rank=rank, world_size=size)
+
+    print(f"Hello World from rank {rank} of {size} on {socket.gethostname()}", flush=True)
+    return rank, size, local_rank, device
+
+
 def cleanup_distributed():
     if dist.is_available() and dist.is_initialized():
         try:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            _sync_device()
             dist.barrier()
         except Exception:
             pass
@@ -399,14 +438,23 @@ rank, world_size, local_rank, DEVICE = init_distributed(config['training'].get('
 is_main_process = rank == 0
 
 
+def _sync_device():
+    """Synchronize the current accelerator device."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+        torch.xpu.synchronize()
+
 def _ddp_barrier():
     """Keep all ranks in lockstep before collectives. Rank-only work (e.g. wandb.init on rank 0)
     must finish before any rank hits the first DDP all_reduce or peers will block forever."""
     if world_size <= 1 or not dist.is_available() or not dist.is_initialized():
         return
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dist.barrier(device_ids=[DEVICE.index])
+    _sync_device()
+    if torch.cuda.is_available() and DEVICE.index is not None:
+        dist.barrier(device_ids=[DEVICE.index])
+    else:
+        dist.barrier()
 
 _ddp_barrier()
 
@@ -414,11 +462,22 @@ _ddp_barrier()
 # Pinned memory speeds up non_blocking H2D copies, but it uses CUDA's caching host allocator
 # and can trigger `CUDACachingHostAllocatorImpl::record_stream` crashes on some systems.
 pin_memory = bool(config['data'].get('pin_memory', True))
-if pin_memory and not (torch.cuda.is_available() and config['data'].get('use_cuda_prefetcher', True)):
+# Disable pin_memory on XPU (not supported) or when prefetcher is off on CUDA
+if DEVICE.type == 'xpu':
+    pin_memory = False
+    config['data']['pin_memory'] = False
+elif pin_memory and not (torch.cuda.is_available() and config['data'].get('use_cuda_prefetcher', True)):
     pin_memory = False
     config['data']['pin_memory'] = False
     if is_main_process:
         print("Disabling DataLoader pin_memory because use_cuda_prefetcher is False (avoids CUDA pinned-host allocator crashes).", flush=True)
+
+# Warm up XPU context to avoid concurrent first-transfer hangs
+if str(DEVICE).startswith("xpu"):
+    _warmup = torch.zeros(1).to(DEVICE)
+    torch.xpu.synchronize(DEVICE)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
 print(
     f"[{socket.gethostname()}] WORLD_SIZE={world_size} RANK={rank} "
@@ -435,9 +494,49 @@ if 'data_path' not in config['data']:
 data_dir = config['data']['data_path']
 is_packed = config['data'].get('packed', False)
 
+# Node-local staging: if enabled, read the per-node manifest written by
+# scripts/stage_pack_to_local.py and build a dataset that only sees this
+# node's staged shards. Each node's sampler shards over its local ranks only.
+local_stage_cfg = config['data'].get('local_stage') or {}
+local_stage_enabled = bool(local_stage_cfg.get('enabled', False))
+local_stage_paths: list = []
+if local_stage_enabled:
+    if not is_packed:
+        raise ValueError("data.local_stage.enabled requires data.packed: true")
+    local_dir = os.path.expandvars(local_stage_cfg['local_dir'])
+    manifest_path = os.path.join(local_dir, 'local_manifest.json')
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(
+            f"local_stage.enabled=true but no manifest at {manifest_path}. "
+            "Run scripts/stage_pack_to_local.py before main.py."
+        )
+    with open(manifest_path, 'r') as _f:
+        _manifest = json.load(_f)
+    local_stage_paths = [os.path.join(local_dir, n) for n in _manifest['local_shards']]
+    if is_main_process:
+        print(
+            f"[local_stage] ENABLED: {len(local_stage_paths)} shard(s) on this node "
+            f"from {local_dir} (fraction={_manifest['shard_fraction']}, "
+            f"n_nodes={_manifest['n_nodes']})",
+            flush=True,
+        )
+
 # Create full dataset with sequential indices
 # Shuffling is handled by random_split with a deterministic seed
-if is_packed:
+if is_packed and local_stage_enabled:
+    base_dataset = PtychographyDatasetPackedLocal(
+        shard_paths=local_stage_paths,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        default_normalization=config['data'].get('default_normalization', 100000.0),
+        apply_noise=config['data'].get('apply_noise', True),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        target_size=config['data'].get('target_size', 256),
+        debug=DEBUG_MODE,
+    )
+elif is_packed:
     base_dataset = PtychographyDatasetPacked(
         pack_dir=data_dir,
         rank=rank,
@@ -553,6 +652,23 @@ if val_dataloader_kwargs_base['num_workers'] > 0:
 # Only use prefetcher if CUDA is available AND enabled in config
 use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
 
+# When local-stage is on, each node's dataset holds only its node's shards,
+# so DistributedSampler must shard across local ranks (not world) — otherwise
+# ranks on other nodes would try to draw from data they don't have.
+if local_stage_enabled:
+    ranks_per_node = int(os.environ.get('PALS_LOCAL_SIZE', max(1, world_size // max(1, _manifest['n_nodes']))))
+    sampler_rank = int(os.environ.get('PALS_LOCAL_RANKID', rank % ranks_per_node))
+    sampler_world_size = ranks_per_node
+    if is_main_process:
+        print(
+            f"[local_stage] sampler override: num_replicas={sampler_world_size} "
+            f"(ranks_per_node), rank=local_rank (DDP still world-wide)",
+            flush=True,
+        )
+else:
+    sampler_rank = rank
+    sampler_world_size = world_size
+
 # Build initial train/val loaders (full training set)
 (
     train_dataset,
@@ -565,8 +681,8 @@ use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
     fraction=1.0,
     train_subset_base=train_subset_base,
     sharding_strategy=sharding_strategy,
-    rank=rank,
-    world_size=world_size,
+    rank=sampler_rank,
+    world_size=sampler_world_size,
     debug_mode=DEBUG_MODE,
     train_dataloader_kwargs_base=train_dataloader_kwargs_base,
     random_seed=config['data']['random_seed'],
@@ -584,8 +700,8 @@ use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
 ) = _build_val_loader(
     val_subset=val_subset,
     sharding_strategy=sharding_strategy,
-    rank=rank,
-    world_size=world_size,
+    rank=sampler_rank,
+    world_size=sampler_world_size,
     debug_mode=DEBUG_MODE,
     val_dataloader_kwargs_base=val_dataloader_kwargs_base,
     random_seed=config['data']['random_seed'],
@@ -690,10 +806,13 @@ if is_main_process:
 # Move model to device and wrap with DDP (multinode.py approach)
 model = model.to(DEVICE)
 if world_size > 1:
-    # Use torch.cuda.current_device() like multinode.py does
-    # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    dev_index = DEVICE.index
-    model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=True)
+    if DEVICE.type == 'xpu':
+        # xccl backend: do not pass device_ids
+        model = DDP(model, find_unused_parameters=False, gradient_as_bucket_view=True)
+    else:
+        # CUDA/nccl: pass device_ids for explicit device binding
+        dev_index = DEVICE.index
+        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=True)
     # if "CUDA_VISIBLE_DEVICES" in os.environ:
     #     # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
     #     model = DDP(model, find_unused_parameters=False)
@@ -749,7 +868,7 @@ param_groups = [
     {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'}
 ]
 
-optimizer = optim.Adam(param_groups, fused=True)
+optimizer = optim.Adam(param_groups, fused=(DEVICE.type == 'cuda'))
 
 # Optional learning rate scheduler
 scheduler = None
@@ -918,8 +1037,8 @@ try:
                 fraction=fraction,
                 train_subset_base=train_subset_base,
                 sharding_strategy=sharding_strategy,
-                rank=rank,
-                world_size=world_size,
+                rank=sampler_rank,
+                world_size=sampler_world_size,
                 debug_mode=DEBUG_MODE,
                 train_dataloader_kwargs_base=train_dataloader_kwargs_base,
                 random_seed=config['data']['random_seed'],
