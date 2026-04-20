@@ -20,6 +20,7 @@ export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
-srun shifter bash -c "
+srun -u --mpi=pmi2 --module=gpu \
+    shifter bash -c "
     python main.py
 "
