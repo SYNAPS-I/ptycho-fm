@@ -630,7 +630,8 @@ class Trainer(object):
             prof.__exit__(None, None, None)
 
         _sync_device(self.device)  # device sync to ensure accurate epoch timings
-        print(f"Processed {processed_batches} batches", flush=True)
+        if self.is_main_process:
+            print(f"Processed {processed_batches} batches", flush=True)
         num_batches = processed_batches
         if num_batches == 0:
             if self.is_main_process:

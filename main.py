@@ -566,6 +566,22 @@ else:
         debug=DEBUG_MODE
     )
 
+# When using node-local staging, each node may have a different pattern count.
+# DDP requires all ranks to run the same number of batches, so truncate to the
+# global minimum to prevent deadlocks.
+if local_stage_enabled and dist.is_initialized():
+    local_len = torch.tensor([len(base_dataset)], dtype=torch.long, device=DEVICE)
+    dist.all_reduce(local_len, op=dist.ReduceOp.MIN)
+    min_len = int(local_len.item())
+    if min_len < len(base_dataset):
+        if is_main_process:
+            print(
+                f"[local_stage] truncating dataset {len(base_dataset)} -> {min_len} "
+                f"(global min across nodes)",
+                flush=True,
+            )
+        base_dataset = Subset(base_dataset, list(range(min_len)))
+
 # Optionally take only the first N samples from the full dataset
 full_dataset = base_dataset
 total_size = len(base_dataset)
