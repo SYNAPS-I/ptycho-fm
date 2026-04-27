@@ -124,6 +124,70 @@ def decoder256_flops(
     return total
 
 
+def _convt2d_weight_bias(in_ch: int, out_ch: int, kernel: int) -> int:
+    return in_ch * out_ch * kernel * kernel + out_ch
+
+
+def decoder256_param_count(
+    latent_dim: int,
+    base_channels: int,
+    num_stages: int,
+    out_channels: int = 1,
+    use_batchnorm: bool = True,
+    kernel: int = 3,
+) -> int:
+    """Trainable parameters in one ``Decoder256`` (ConvTranspose + optional BN + final Linear)."""
+    enc_ch = _decoder_stage_channel_map(num_stages, base_channels, latent_dim)
+    in_ch = latent_dim
+    total = 0
+    for i in range(num_stages):
+        if i < num_stages - 1:
+            out_ch = enc_ch[num_stages - 2 - i]
+        else:
+            out_ch = base_channels
+        total += _convt2d_weight_bias(in_ch, out_ch, kernel)
+        if use_batchnorm:
+            total += 2 * out_ch
+        total += _convt2d_weight_bias(out_ch, out_ch, kernel)
+        if use_batchnorm:
+            total += 2 * out_ch
+        in_ch = out_ch
+    total += base_channels * out_channels + out_channels
+    return total
+
+
+def custom_vit_encoder_param_count(
+    img_h: int,
+    img_w: int,
+    patch_size: int,
+    in_channels: int,
+    embed: int,
+    depth: int,
+    mlp_ratio: float,
+    use_cls_token: bool,
+) -> int:
+    """Trainable parameters in ``CustomViT`` (patch + pos + blocks + final LN), cf. neural-scaling style accounting."""
+    h_patch = img_h // patch_size
+    w_patch = img_w // patch_size
+    n_patches = h_patch * w_patch
+    hidden = int(embed * mlp_ratio)
+
+    patch = in_channels * embed * patch_size * patch_size + embed
+    n_pos = n_patches + (1 if use_cls_token else 0)
+    pos = n_pos * embed
+    cls_params = embed if use_cls_token else 0
+
+    # One LayerNorm: gamma + beta
+    ln = 2 * embed
+    qkv = embed * embed * 3 + 3 * embed
+    proj = embed * embed + embed
+    mlp_w = embed * hidden + hidden + hidden * embed + embed
+    block = 2 * ln + qkv + proj + mlp_w
+
+    final_norm = ln
+    return patch + pos + cls_params + block * depth + final_norm
+
+
 def custom_vit_encoder_flops(
     batch,
     img_h,
@@ -211,13 +275,13 @@ class PtychoViTFlopsCalculator:
         self.in_channels = int(enc.get("in_channels", 1))
         self.embed = int(enc.get("embed_dim", 512))
         self.depth = int(enc.get("depth", 12))
-        self.heads = int(enc.get("num_heads", 8))
         self.mlp_ratio = float(enc.get("mlp_ratio", 4.0))
         self.use_cls_token = bool(enc.get("use_cls_token", False))
         self.encoder_type = model_cfg.get("encoder_type", "custom")
+        self.heads = self.embed // HEAD_DIM
 
         dec = model_cfg.get("decoder", {})
-        self.base_channels = self.embed // 8
+        self.base_channels = self.embed // EMBED_BASE_RATIO
         self.num_stages = int(dec.get("num_stages", 4))
         latent = dec.get("latent_dim")
         self.latent_dim = int(self.embed if latent is None else latent)
@@ -263,6 +327,30 @@ class PtychoViTFlopsCalculator:
 
     def flops_analytical(self, verbose=False):
         return self.flops_encoder_decoder(verbose=verbose)
+
+    def param_count(self) -> float:
+        """Estimated parameter count (millions): CustomViT + 2× Decoder256 + two scalar output scales."""
+        if self.encoder_type != "custom":
+            raise NotImplementedError("param_count is implemented for encoder_type='custom' only.")
+        enc_p = custom_vit_encoder_param_count(
+            self.img_h,
+            self.img_w,
+            self.patch_size,
+            self.in_channels,
+            self.embed,
+            self.depth,
+            self.mlp_ratio,
+            self.use_cls_token,
+        )
+        dec_p = decoder256_param_count(
+            self.latent_dim,
+            self.base_channels,
+            self.num_stages,
+            out_channels=1,
+            use_batchnorm=self.use_batchnorm,
+        )
+        head_extra = 2
+        return (enc_p + 2 * dec_p + head_extra) * 1e-6
 
     def forward_flops_fvcore(self, device, norm=72033.211, scale=10000.0):
         """fvcore FlopCountAnalysis total (full forward), scaled to TFLOPs for display.
