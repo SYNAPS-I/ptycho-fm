@@ -15,12 +15,12 @@ echo "Enabling profiling..."
 NSYS_ARGS="--trace=cuda,cublas,nvtx --kill none -c cudaProfilerApi -f true"
 PROFILE_DIR="$OUTPUT/profiles"
 mkdir -p "$PROFILE_DIR"
-export PROFILE_CMD="nsys profile $NSYS_ARGS -o $PROFILE_DIR/vit-profile"
+export PROFILE_CMD="nsys profile $NSYS_ARGS -o $PROFILE_DIR/iter"
 
 # Run command
-cmd="$PROFILE_CMD python main.py"
+cmd="$PROFILE_CMD python main_iters.py --config config.yaml"
 
-nodes=4
+nodes=1
 ngpu=4 # number of GPUs (single node)
 srun -u --mpi=pmi2 \
   -N $nodes \

@@ -28,7 +28,7 @@ data:
 
   # Limit number of files to use (for faster testing). Set to null to use all files.
   # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
-  max_files: null
+  max_files: 15
 
   # DataLoader Configuration
   num_workers: 4
@@ -42,6 +42,7 @@ data:
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
+  valid_batch_size: 256
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
   # Optional: learning rate scheduler
   lr_scheduler:
@@ -60,7 +61,8 @@ training:
   # amp_decoder_lr: 1.0e-6
   # ph_decoder_lr: 1.0e-6
 
-  epochs: 11  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 5  # Total epochs to train for (not additional epochs when resuming)
+  log_every: 1000 # Log every N iterations
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
@@ -73,7 +75,7 @@ training:
 
   validation_plot_freq: 1  # Plot validation results every N epochs
   test_plot_freq: 1 # Plot stitched test results every M epochs
-  resume_from_checkpoint: false  # Set to true to resume training from checkpoint
+  resume_from_checkpoint: true  # Set to true to resume training from checkpoint
   # Save model weights each epoch as model_epoch_XXX.pth
   save_epoch_models: true
   # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
@@ -135,9 +137,9 @@ wandb:
   project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
-  run_name: 'base-new'
+  run_name: 'base-iter-check'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 0
+  run_num: 'iter-check'
