@@ -8,6 +8,7 @@ dependencies = [
     "cmcrameri>=1.9",
     "h5py>=3.15.0",
     "matplotlib>=3.10.7",
+    "mlflow>=2.10.0",
     "numpy>=2.3.3",
     "pandas>=2.3.3",
     "scikit-image>=0.25.2",
