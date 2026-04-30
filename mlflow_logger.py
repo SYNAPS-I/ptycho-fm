@@ -90,20 +90,25 @@ class MLflowLogger:
             return
         self._mlflow.log_artifact(path, artifact_path=artifact_path)
 
-    def register_best_model(self, best_model_path: str, model_name: str) -> None:
-        """Log best_model.pth as an artifact and register a new model version.
+    def register_best_model(self, model, model_name: str) -> None:
+        """Log a PyTorch nn.Module via mlflow.pytorch and register a new version.
 
-        Mirrors mlflow_tool.push(): logs under artifact_path='model', resolves the
-        artifact URI directly from run.info (rather than runs:/...) so Azure ML's
-        registry accepts it.
+        Uses ``mlflow.pytorch.log_model`` so the registry entry includes the
+        MLmodel descriptor (flavor, signature, conda env). The model should be
+        on CPU, in eval mode, with the best weights already loaded; the caller
+        is responsible for unwrapping DDP and loading ``best_model.pth``.
+
+        Registration is done manually with the resolved artifact URI rather
+        than the ``runs:/`` shorthand because Azure ML's model registry does
+        not accept the latter (matches the workaround in mlflow_tool.py).
         """
         if not self.enabled:
             return
-        if not os.path.exists(best_model_path):
-            print(f"MLflow: best_model not found at {best_model_path}; skipping registration", flush=True)
+        if model is None:
+            print("MLflow: no model provided; skipping registration", flush=True)
             return
 
-        self._mlflow.log_artifact(best_model_path, artifact_path='model')
+        self._mlflow.pytorch.log_model(pytorch_model=model, artifact_path='model')
         artifact_uri = f"{self.run.info.artifact_uri}/model"
 
         try:
@@ -111,14 +116,14 @@ class MLflowLogger:
         except Exception:
             self._client.create_registered_model(
                 model_name,
-                description=f"ptycho-vit fine-tuned model ({os.path.basename(best_model_path)})",
+                description="ptycho-vit fine-tuned model",
             )
 
         result = self._client.create_model_version(
             name=model_name,
             source=artifact_uri,
             run_id=self.run.info.run_id,
-            description=f"Uploaded from {os.path.basename(best_model_path)}",
+            description="Logged via mlflow.pytorch.log_model()",
         )
         print(f"MLflow: registered model '{result.name}' version {result.version}", flush=True)
 

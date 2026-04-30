@@ -297,8 +297,12 @@ wandb:
 Independent of W&B — enable either, both, or neither.
 
 When enabled, training automatically logs hyperparameters, per-epoch metrics
-(train/val loss, SSIM, PSNR, learning rate), the resolved config, and registers
-`best_model.pth` as a new model version at the end of the run.
+(train/val loss, SSIM, PSNR, learning rate), the resolved config, and the
+fine-tuned best model. The model is logged via `mlflow.pytorch.log_model`,
+so the registry entry has a proper MLmodel descriptor (flavor, signature,
+environment) — Azure ML recognizes it as a PyTorch model rather than an
+opaque blob. Reloading via `mlflow.pyfunc.load_model(...)` requires this
+repo on `PYTHONPATH` so the `PtychoViT` class can be imported.
 
 **One-time setup (Azure ML workspace):**
 ```bash

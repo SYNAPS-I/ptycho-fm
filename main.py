@@ -1032,9 +1032,19 @@ if is_main_process:
         MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']), 'best_model.pth'
     )
     if config.get('mlflow', {}).get('register_model', True):
-        mlflow_logger.register_best_model(
-            best_model_path,
-            model_name=config.get('mlflow', {}).get('registered_model_name', 'ptycho-vit'),
-        )
+        if os.path.exists(best_model_path):
+            unwrapped_model = model.module if isinstance(
+                model, (nn.DataParallel, DDP)
+            ) else model
+            unwrapped_model.load_state_dict(
+                torch.load(best_model_path, map_location='cpu')
+            )
+            unwrapped_model.cpu().eval()
+            mlflow_logger.register_best_model(
+                unwrapped_model,
+                model_name=config.get('mlflow', {}).get('registered_model_name', 'ptycho-vit'),
+            )
+        else:
+            print(f'MLflow: best_model not found at {best_model_path}; skipping registration', flush=True)
     mlflow_logger.finish()
 
