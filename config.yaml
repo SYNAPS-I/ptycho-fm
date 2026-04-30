@@ -132,7 +132,19 @@ wandb:
   project: 'PtychoViT'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
-  resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
+  resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null
+
+# MLflow Configuration
+# Independent of wandb: either, both, or neither can be enabled.
+mlflow:
+  enabled: false
+  # If null, falls back to MLFLOW_TRACKING_URI env var. Env var always wins when set.
+  tracking_uri: null
+  experiment_name: 'ptycho-vit'
+  run_name: null                  # null → derived from trainer.run_num + timestamp
+  registered_model_name: 'ptycho-vit'
+  register_model: true            # if false, log artifact only and skip registry
+  tags: {}                        # optional dict of {key: value} tags
 
 # Trainer Configuration
 trainer:

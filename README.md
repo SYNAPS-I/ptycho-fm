@@ -22,7 +22,7 @@ All models combine learned representations with physics-based constraints to rec
 - **Multi-dataset support**: Automatic discovery and loading of HDF5 file pairs
 - **Multiple loss functions**: SmoothL1, MSE, L1, and PoissonNLL
 - **Training modes**: Supervised (amp/phase loss) or unsupervised (diffraction loss)
-- **Experiment tracking**: Integrated Weights & Biases logging
+- **Experiment tracking**: Integrated Weights & Biases and MLflow (Azure ML) logging
 
 ## Project Structure
 
@@ -291,6 +291,43 @@ wandb:
   notes: 'Experiment notes'
   resume_run_id: null  # Optional: resume existing run
 ```
+
+### MLflow (auto-push metrics and best model)
+
+Independent of W&B — enable either, both, or neither.
+
+When enabled, training automatically logs hyperparameters, per-epoch metrics
+(train/val loss, SSIM, PSNR, learning rate), the resolved config, and the
+fine-tuned best model. The model is logged via `mlflow.pytorch.log_model`,
+so the registry entry has a proper MLmodel descriptor (flavor, signature,
+environment) — Azure ML recognizes it as a PyTorch model rather than an
+opaque blob. Reloading via `mlflow.pyfunc.load_model(...)` requires this
+repo on `PYTHONPATH` so the `PtychoViT` class can be imported.
+
+**One-time setup (Azure ML workspace):**
+```bash
+az login
+export MLFLOW_TRACKING_URI="azureml://<region>.api.azureml.ms/mlflow/v1.0/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.MachineLearningServices/workspaces/<ws>"
+```
+(Or get the URI from `az ml workspace show --query mlflow_tracking_uri -o tsv`.)
+
+**Enable in `config.yaml`:**
+```yaml
+mlflow:
+  enabled: true
+  tracking_uri: null              # null → use MLFLOW_TRACKING_URI env var
+  experiment_name: 'ptycho-vit'
+  registered_model_name: 'ptycho-vit'
+  register_model: true            # set false to log artifact only, skip registry
+```
+
+Then run training as usual:
+```bash
+python main.py --config config.yaml
+```
+
+The fine-tuned model appears under the `ptycho-vit` experiment in the Azure ML
+workspace, and a new version of the registered model is created automatically.
 
 ## Testing
 

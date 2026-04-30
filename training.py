@@ -145,11 +145,12 @@ class Trainer(object):
         run_num, 
         device, 
         model_save_path,
-        is_main_process=True, 
-        use_ddp=False, 
-        wandb_enabled=True, 
+        is_main_process=True,
+        use_ddp=False,
+        wandb_enabled=True,
         debug_mode=False,
-        skip_batch_if_grad_norm_greater_than=None
+        skip_batch_if_grad_norm_greater_than=None,
+        mlflow_logger=None
     ):
         super().__init__()
         self.model = model
@@ -162,6 +163,7 @@ class Trainer(object):
         self.wandb_enabled = wandb_enabled
         self.debug_mode = debug_mode
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
+        self.mlflow_logger = mlflow_logger
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -587,6 +589,16 @@ class Trainer(object):
             wandb.log({"train_amp_loss": avg_amp_loss})
             wandb.log({"train_ph_loss": avg_ph_loss})
 
+        if self.mlflow_logger is not None:
+            self.mlflow_logger.log_metrics(
+                {
+                    "train_loss": avg_train_loss,
+                    "train_amp_loss": avg_amp_loss,
+                    "train_ph_loss": avg_ph_loss,
+                },
+                step=epoch,
+            )
+
         metrics['training_loss'].append(avg_train_loss)
         metrics['train_amp_loss'].append(avg_amp_loss)
         metrics['train_ph_loss'].append(avg_ph_loss)
@@ -740,6 +752,20 @@ class Trainer(object):
             wandb.log({"val_ph_ssim": avg_ph_ssim})
             wandb.log({"val_ph_psnr": avg_ph_psnr})
 
+        if self.mlflow_logger is not None:
+            self.mlflow_logger.log_metrics(
+                {
+                    "val_loss": avg_val_loss,
+                    "val_amp_loss": avg_val_amp_loss,
+                    "val_ph_loss": avg_val_ph_loss,
+                    "val_amp_ssim": avg_amp_ssim,
+                    "val_amp_psnr": avg_amp_psnr,
+                    "val_ph_ssim": avg_ph_ssim,
+                    "val_ph_psnr": avg_ph_psnr,
+                },
+                step=epoch,
+            )
+
         metrics['validation_loss'].append(avg_val_loss)
         metrics['val_amp_loss'].append(avg_val_amp_loss)
         metrics['val_ph_loss'].append(avg_val_ph_loss)
@@ -788,6 +814,10 @@ class Trainer(object):
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})
+            if self.mlflow_logger is not None:
+                self.mlflow_logger.log_metrics(
+                    {"lr": optimizer.param_groups[0]['lr']}, step=epoch
+                )
 
         if avg_val_loss < metrics['best_val_loss']:
             if self.is_main_process:

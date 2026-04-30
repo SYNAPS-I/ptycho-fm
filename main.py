@@ -27,6 +27,7 @@ from prefetcher import CUDAPrefetcher
 from utils.utils import compute_sha256
 
 import wandb
+from mlflow_logger import MLflowLogger
 
 def resolve_config_path(config_path):
     """Resolve configuration path (relative to script directory)."""
@@ -747,6 +748,8 @@ if FINETUNE_PATH:
     if is_main_process:
         print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
     
+mlflow_logger = MLflowLogger(config, is_main_process)
+
 trainer = Trainer(
     model,
     MODE,
@@ -757,7 +760,8 @@ trainer = Trainer(
     use_ddp=(world_size > 1),
     wandb_enabled=config['wandb']['enabled'],
     debug_mode=DEBUG_MODE,
-    skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than
+    skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than,
+    mlflow_logger=mlflow_logger,
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -851,6 +855,28 @@ if is_main_process and config['wandb']['enabled']:
     if FINETUNE_PATH and finetune_checkpoint_sha256 is not None:
         wandb.run.summary["finetune_checkpoint_sha256"] = finetune_checkpoint_sha256
         print("Logged finetune checkpoint SHA256 to wandb", flush=True)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Log run params and config snapshot to MLflow (rank 0, no-op when disabled)
+# ────────────────────────────────────────────────────────────────────────────────
+mlflow_logger.log_params({
+    "learning_rate": LR,
+    "encoder_lr": encoder_lr,
+    "amp_decoder_lr": amp_decoder_lr,
+    "ph_decoder_lr": ph_decoder_lr,
+    "batch_size": BATCH_SIZE,
+    "epochs": EPOCHS,
+    "loss_function": config['training']['loss_function'],
+    "encoder_type": config['model'].get('encoder_type', 'custom'),
+    "model": config['model'],
+    "data": config['data'],
+    "training": config['training'],
+    "trainer": config['trainer'],
+    "model_save_path": config['paths'].get('model_save_path', 'N/A'),
+})
+mlflow_logger.log_artifact(config_path)
+if FINETUNE_PATH and finetune_checkpoint_sha256 is not None:
+    mlflow_logger.log_params({"finetune_checkpoint_sha256": finetune_checkpoint_sha256})
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
@@ -996,4 +1022,29 @@ if is_main_process:
     print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
-    wandb.finish() 
+    wandb.finish()
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Push best model to MLflow registry and close the run (rank 0, no-op when disabled)
+# ────────────────────────────────────────────────────────────────────────────────
+if is_main_process:
+    best_model_path = os.path.join(
+        MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']), 'best_model.pth'
+    )
+    if config.get('mlflow', {}).get('register_model', True):
+        if os.path.exists(best_model_path):
+            unwrapped_model = model.module if isinstance(
+                model, (nn.DataParallel, DDP)
+            ) else model
+            unwrapped_model.load_state_dict(
+                torch.load(best_model_path, map_location='cpu')
+            )
+            unwrapped_model.cpu().eval()
+            mlflow_logger.register_best_model(
+                unwrapped_model,
+                model_name=config.get('mlflow', {}).get('registered_model_name', 'ptycho-vit'),
+            )
+        else:
+            print(f'MLflow: best_model not found at {best_model_path}; skipping registration', flush=True)
+    mlflow_logger.finish()
+
