@@ -1,5 +1,6 @@
 import os
 import shutil
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +9,8 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 
-from utils.ptychi_utils import place_patches_fourier_shift
+# [MODIFIED] added stitch_patches import for use in generate_test_plot
+from utils.ptychi_utils import place_patches_fourier_shift, stitch_patches
 
 import wandb
 
@@ -125,16 +127,19 @@ def compute_ssim(
     mu_target_sq = mu_target ** 2
     mu_pred_target = mu_pred * mu_target
 
-    # Compute variances and covariance
-    sigma_pred_sq = F.conv2d(pred ** 2, window, padding=window_size // 2, groups=channels) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target ** 2, window, padding=window_size // 2, groups=channels) - mu_target_sq
+    # [MODIFIED] Fix #3: E[X^2] - E[X]^2 in float32 can go slightly negative when
+    # the local window is nearly constant, making SSIM exceed its [-1, 1] bound.
+    # Clamp variance terms to >= 0 to prevent the numerical artefact.
+    sigma_pred_sq = (F.conv2d(pred ** 2, window, padding=window_size // 2, groups=channels) - mu_pred_sq).clamp(min=0)
+    sigma_target_sq = (F.conv2d(target ** 2, window, padding=window_size // 2, groups=channels) - mu_target_sq).clamp(min=0)
     sigma_pred_target = F.conv2d(pred * target, window, padding=window_size // 2, groups=channels) - mu_pred_target
 
     # SSIM formula
     ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
                ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
 
-    return ssim_map.mean().item()
+    # Clamp to the theoretical range as a final safety guard against residual float32 wobble.
+    return ssim_map.clamp(-1.0, 1.0).mean().item()
 
 
 class Trainer(object):
@@ -145,11 +150,13 @@ class Trainer(object):
         run_num, 
         device, 
         model_save_path,
-        is_main_process=True, 
-        use_ddp=False, 
-        wandb_enabled=True, 
+        is_main_process=True,
+        use_ddp=False,
+        wandb_enabled=True,
         debug_mode=False,
-        skip_batch_if_grad_norm_greater_than=None
+        skip_batch_if_grad_norm_greater_than=None,
+        val_plot_sample_idx=0,  # [MODIFIED] configurable sample index for validation plot
+        transpose_object_patches=False,  # [MODIFIED] Fix #9: un-transpose HXN patches before val plot display
     ):
         super().__init__()
         self.model = model
@@ -162,6 +169,8 @@ class Trainer(object):
         self.wandb_enabled = wandb_enabled
         self.debug_mode = debug_mode
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
+        self.val_plot_sample_idx = val_plot_sample_idx  # [MODIFIED] configurable sample index for validation plot
+        self.transpose_object_patches = transpose_object_patches  # [MODIFIED] Fix #9: val dataset is wrapped (Subset/RankShardedSubset) so transpose flag must be carried on Trainer, not read from dataloader.dataset
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -252,13 +261,25 @@ class Trainer(object):
         f.colorbar(in0, cax=cax, orientation='vertical')
         ax[0, 0].set_title('Input Diff. Amp.')
 
-        in1 = ax[0, 1].imshow(gt_amp, interpolation='none')
+        # [MODIFIED] compute contrast limits from central 50% of each patch to avoid
+        # Fourier boundary artifacts at patch edges skewing the colorscale
+        h, w = gt_amp.shape
+        ch, cw = h // 4, w // 4
+
+        gt_amp_vmin, gt_amp_vmax = np.percentile(gt_amp[ch:-ch, cw:-cw], [1, 99])
+        gt_ph_vmin  = gt_ph[ch:-ch, cw:-cw].mean() - 2 * gt_ph[ch:-ch, cw:-cw].std()
+        gt_ph_vmax  = gt_ph[ch:-ch, cw:-cw].mean() + 2 * gt_ph[ch:-ch, cw:-cw].std()
+        pr_amp_vmin, pr_amp_vmax = np.percentile(pred_amp[ch:-ch, cw:-cw], [1, 99])
+        pr_ph_vmin  = pred_ph[ch:-ch, cw:-cw].mean() - 2 * pred_ph[ch:-ch, cw:-cw].std()
+        pr_ph_vmax  = pred_ph[ch:-ch, cw:-cw].mean() + 2 * pred_ph[ch:-ch, cw:-cw].std()
+
+        in1 = ax[0, 1].imshow(gt_amp, interpolation='none', vmin=gt_amp_vmin, vmax=gt_amp_vmax)
         divider = make_axes_locatable(ax[0, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(in1, cax=cax, orientation='vertical', format='%.2f')
         ax[0, 1].set_title('GT Amp.')
 
-        in2 = ax[0, 2].imshow(gt_ph, interpolation='none', cmap='magma')
+        in2 = ax[0, 2].imshow(gt_ph, interpolation='none', cmap='magma', vmin=gt_ph_vmin, vmax=gt_ph_vmax)
         divider = make_axes_locatable(ax[0, 2])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(in2, cax=cax, orientation='vertical', format='%.1f')
@@ -270,13 +291,13 @@ class Trainer(object):
         f.colorbar(out0, cax=cax, orientation='vertical')
         ax[1, 0].set_title('Output Diff. Amp.')
 
-        out1 = ax[1, 1].imshow(pred_amp, interpolation='none')
+        out1 = ax[1, 1].imshow(pred_amp, interpolation='none', vmin=pr_amp_vmin, vmax=pr_amp_vmax)
         divider = make_axes_locatable(ax[1, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(out1, cax=cax, orientation='vertical', format='%.2f')
         ax[1, 1].set_title('Predicted Amp.')
 
-        out2 = ax[1, 2].imshow(pred_ph, interpolation='none', cmap='magma')
+        out2 = ax[1, 2].imshow(pred_ph, interpolation='none', cmap='magma', vmin=pr_ph_vmin, vmax=pr_ph_vmax)
         divider = make_axes_locatable(ax[1, 2])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(out2, cax=cax, orientation='vertical', format='%.1f')
@@ -287,6 +308,9 @@ class Trainer(object):
         if not os.path.isdir(run_path):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
+        # [MODIFIED] close figure after saving to prevent memory leak (matplotlib retains
+        # all pyplot figures until explicitly closed; >20 open triggers RuntimeWarning)
+        plt.close(f)
 
     def generate_test_plot(self, dataloader, epoch, filename, central_crop=64, ph_crop=180):
         total_scan_points = len(dataloader.dataset)
@@ -310,10 +334,28 @@ class Trainer(object):
                 input_scale = scale.to(self.device, non_blocking=True)
 
                 _output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-                pred_amp[scan_idx:scan_idx + batch_size] = output_amp.squeeze().detach().cpu()
-                pred_ph[scan_idx:scan_idx + batch_size] = output_ph.squeeze().detach().cpu()
-                gt_amp[scan_idx:scan_idx + batch_size] = amp_patch.squeeze().detach().cpu()
-                gt_ph[scan_idx:scan_idx + batch_size] = ph_patch.squeeze().detach().cpu()
+                # [MODIFIED] use squeeze(1) not squeeze() — squeeze() with no argument
+                # collapses ALL size-1 dims, so a batch of 1 goes from (1,1,H,W) to (H,W)
+                # which breaks the batch-dim indexing on the lines below.
+                p_amp = output_amp.squeeze(1).detach().cpu()
+                p_ph  = output_ph.squeeze(1).detach().cpu()
+                g_amp = amp_patch.squeeze(1).detach().cpu()
+                g_ph  = ph_patch.squeeze(1).detach().cpu()
+                # [MODIFIED] Fix #9: patches were transposed at extraction time to put
+                # them in the model's frame (HXN convention). Un-transpose before placing
+                # into the on-disk-frame canvas so adjacent patches overlap coherently.
+                # Both predicted and GT patches live in the model frame and need the
+                # inverse transpose. This block is a no-op when transpose_object_patches
+                # is False (simulated data).
+                if getattr(dataloader.dataset, 'transpose_object_patches', False):
+                    p_amp = p_amp.transpose(-2, -1).contiguous()
+                    p_ph  = p_ph.transpose(-2, -1).contiguous()
+                    g_amp = g_amp.transpose(-2, -1).contiguous()
+                    g_ph  = g_ph.transpose(-2, -1).contiguous()
+                pred_amp[scan_idx:scan_idx + batch_size] = p_amp
+                pred_ph[scan_idx:scan_idx + batch_size]  = p_ph
+                gt_amp[scan_idx:scan_idx + batch_size]   = g_amp
+                gt_ph[scan_idx:scan_idx + batch_size]    = g_ph
 
                 scan_idx += batch_size
 
@@ -321,91 +363,86 @@ class Trainer(object):
             dataloader.dataset._cache_positions()
             dataloader.dataset._cache_object_data()
 
-        object_size = dataloader.dataset.object_shape
-        positions = dataloader.dataset._cached_probe_positions
-        pred_amp_object = torch.zeros(object_size, device='cpu')
-        pred_ph_object = torch.zeros(object_size, device='cpu')
-        buffer = torch.zeros(object_size, device='cpu')
-
         central_crop = int(central_crop)
-        if central_crop <= 0:
-            raise ValueError("test_plot central_crop must be a positive integer.")
-        pred_amp_object = place_patches_fourier_shift(
-            pred_amp_object,
-            positions,
-            pred_amp[:, central_crop:-central_crop, central_crop:-central_crop],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        pred_ph_object = place_patches_fourier_shift(
-            pred_ph_object,
-            positions,
-            pred_ph[:, central_crop:-central_crop, central_crop:-central_crop],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        buffer = place_patches_fourier_shift(
-            buffer,
-            positions,
-            torch.ones_like(pred_ph[:, central_crop:-central_crop, central_crop:-central_crop]),
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
+        if central_crop < 0:
+            raise ValueError("test_plot central_crop must be >= 0.")
 
-        gt_amp_object = torch.zeros(object_size, device='cpu')
-        gt_ph_object = torch.zeros(object_size, device='cpu')
-        gt_amp_object = place_patches_fourier_shift(
-            gt_amp_object,
-            positions,
-            gt_amp[:, central_crop:-central_crop, central_crop:-central_crop],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        gt_ph_object = place_patches_fourier_shift(
-            gt_ph_object,
-            positions,
-            gt_ph[:, central_crop:-central_crop, central_crop:-central_crop],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
+        # [MODIFIED] replaced manual place_patches_fourier_shift + divide-by-buffer block
+        # with stitch_patches, which auto-calculates canvas size from position range
+        # (fixes corner-placement bug where patches appeared in bottom-right corner)
+        positions = dataloader.dataset._cached_probe_positions
+        patch_size = pred_amp.shape[-1]
 
-        pred_amp_object = pred_amp_object / torch.clip(buffer, min=1)
-        pred_ph_object = pred_ph_object / torch.clip(buffer, min=1)
-        gt_amp_object = gt_amp_object / torch.clip(buffer, min=1)
-        gt_ph_object = gt_ph_object / torch.clip(buffer, min=1)
+        # [MODIFIED] added canvas_pad=64 to prevent Fourier wrap-around stripes at canvas edges
+        pred_amp_np, _ = stitch_patches(pred_amp, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+        pred_ph_np, _ = stitch_patches(pred_ph, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+        gt_amp_np, _ = stitch_patches(gt_amp, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+        gt_ph_np, _ = stitch_patches(gt_ph, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+
+        pred_amp_object = torch.from_numpy(pred_amp_np)
+        pred_ph_object = torch.from_numpy(pred_ph_np)
+        gt_amp_object = torch.from_numpy(gt_amp_np)
+        gt_ph_object = torch.from_numpy(gt_ph_np)
 
         ph_crop = int(ph_crop)
-        if ph_crop <= 0:
-            raise ValueError("test_plot ph_crop must be a positive integer.")
-        vmin_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) - (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
-        vmax_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) + (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
+        if ph_crop < 0:
+            raise ValueError("test_plot ph_crop must be >= 0.")
+
+        # [MODIFIED] clamp ph_crop so it never removes more than the canvas allows
+        canvas_h, canvas_w = gt_amp_object.shape
+        if ph_crop > 0:
+            max_ph_crop = min(canvas_h, canvas_w) // 2 - 1
+            if ph_crop >= max_ph_crop:
+                print(f"[Warning] test_plot_ph_crop={ph_crop} is too large for canvas {canvas_h}×{canvas_w}. "
+                      f"Clamping to {max_ph_crop}.", flush=True)
+                ph_crop = max_ph_crop
+
+        # [MODIFIED] compute vmin/vmax dynamically per row using the same method (percentile for amp,
+        # mean±2σ for phase) so each row has optimal contrast regardless of prediction quality
+        # ph_crop=0 means show the full canvas with no border trim.
+        c = ph_crop  # shorthand
+        if c > 0:
+            gt_amp_crop   = gt_amp_object[c:-c, c:-c]
+            gt_ph_crop    = gt_ph_object[c:-c, c:-c]
+            pred_amp_crop = pred_amp_object[c:-c, c:-c]
+            pred_ph_crop  = pred_ph_object[c:-c, c:-c]
+        else:
+            gt_amp_crop   = gt_amp_object
+            gt_ph_crop    = gt_ph_object
+            pred_amp_crop = pred_amp_object
+            pred_ph_crop  = pred_ph_object
+
+        gt_vmin_amp   = float(torch.quantile(gt_amp_crop,   0.01))
+        gt_vmax_amp   = float(torch.quantile(gt_amp_crop,   0.99))
+        gt_vmin_ph    = float(torch.mean(gt_ph_crop)   - 2 * torch.std(gt_ph_crop))
+        gt_vmax_ph    = float(torch.mean(gt_ph_crop)   + 2 * torch.std(gt_ph_crop))
+
+        pred_vmin_amp = float(torch.quantile(pred_amp_crop, 0.01))
+        pred_vmax_amp = float(torch.quantile(pred_amp_crop, 0.99))
+        pred_vmin_ph  = float(torch.mean(pred_ph_crop) - 2 * torch.std(pred_ph_crop))
+        pred_vmax_ph  = float(torch.mean(pred_ph_crop) + 2 * torch.std(pred_ph_crop))
 
         f, ax = plt.subplots(figsize=(9, 8), ncols=2, nrows=2)
 
-        gt0 = ax[0, 0].imshow(gt_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        gt0 = ax[0, 0].imshow(gt_amp_crop, interpolation='none', vmin=gt_vmin_amp, vmax=gt_vmax_amp)
         divider = make_axes_locatable(ax[0, 0])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(gt0, cax=cax, orientation='vertical')
-        ax[0, 0].set_title('LSQML amplitude')
+        ax[0, 0].set_title('GT amplitude')
 
-        gt1 = ax[0, 1].imshow(gt_ph_object[180:-180, 180:-180], interpolation='none', vmin=-1.3, vmax=1.3, cmap='magma')
+        gt1 = ax[0, 1].imshow(gt_ph_crop, interpolation='none', vmin=gt_vmin_ph, vmax=gt_vmax_ph, cmap='magma')
         divider = make_axes_locatable(ax[0, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(gt1, cax=cax, orientation='vertical')
-        ax[0, 1].set_title('LSQML phase')
+        ax[0, 1].set_title('GT phase')
 
-        pred0 = ax[1, 0].imshow(pred_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        pred0 = ax[1, 0].imshow(pred_amp_crop, interpolation='none', vmin=pred_vmin_amp, vmax=pred_vmax_amp)
         divider = make_axes_locatable(ax[1, 0])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(pred0, cax=cax, orientation='vertical')
         ax[1, 0].set_title('Predicted amplitude')
 
-        pred1 = ax[1, 1].imshow(pred_ph_object[180:-180, 180:-180], interpolation='none', vmin=vmin_ph, vmax=vmax_ph, cmap='magma')
+        pred1 = ax[1, 1].imshow(pred_ph_crop, interpolation='none', vmin=pred_vmin_ph, vmax=pred_vmax_ph, cmap='magma')
         divider = make_axes_locatable(ax[1, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(pred1, cax=cax, orientation='vertical')
@@ -532,6 +569,19 @@ class Trainer(object):
                 optimizer.step()
                 processed_batches += 1
 
+                # [FIX] Loss accumulation moved inside this else-block so that skipped batches
+                # (grad norm > skip_batch_if_grad_norm_greater_than) do not inflate the running
+                # sums. Previously these lines ran unconditionally, but the denominator
+                # (processed_batches) only counted non-skipped batches, causing reported
+                # avg losses to be artificially high whenever batches were skipped.
+                # Amp/phase losses are tracked here even in unsupervised/fine-tuning mode
+                # as a diagnostic readout of reconstruction quality.
+                running_loss += loss.detach().item()
+                loss_amp = criterion(output_amp.detach(), amp_patch)
+                loss_ph  = criterion(output_ph.detach(), ph_patch)
+                running_amp_loss += loss_amp.item()
+                running_ph_loss  += loss_ph.item()
+
             train_end_time = time.time()
 
             if batch_idx < 10:
@@ -539,14 +589,6 @@ class Trainer(object):
                 total_time = io_time + train_time
                 if self.is_main_process:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
-
-            running_loss += loss.detach().item()
-
-            # Track amp/phase losses (targets now guaranteed on same device)
-            loss_amp = criterion(output_amp.detach(), amp_patch)
-            loss_ph  = criterion(output_ph.detach(), ph_patch)
-            running_amp_loss += loss_amp.item()
-            running_ph_loss  += loss_ph.item()
 
             if batch_idx > 0 and self.is_main_process:
                 from datetime import datetime
@@ -612,6 +654,12 @@ class Trainer(object):
         processed_batches = 0
 
         total_batches = len(dataloader)
+        # [MODIFIED] convert sample index to (batch_idx, pos_in_batch); clamp to valid range
+        batch_size = dataloader.batch_size
+        total_samples = total_batches * batch_size
+        sample_idx_clamped = min(self.val_plot_sample_idx, total_samples - 1)
+        plot_batch_idx = sample_idx_clamped // batch_size
+        plot_pos_in_batch = sample_idx_clamped % batch_size
         progress_milestones = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         milestone_batches = [int(m * total_batches) for m in progress_milestones]
         next_milestone_idx = 0
@@ -622,6 +670,7 @@ class Trainer(object):
         last_output_amp = None
         last_ph_patch = None
         last_output_ph = None
+        last_plot_pos = 0  # [MODIFIED] position within the captured batch to plot
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
@@ -692,13 +741,14 @@ class Trainer(object):
                         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Validation Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                     next_milestone_idx += 1
 
-                if plot and self.is_main_process:
+                if plot and self.is_main_process and batch_idx == plot_batch_idx:  # [MODIFIED] use configured sample index instead of last batch
                     last_input_diff = input_diff
                     last_output_diff = output_diff
                     last_amp_patch = amp_patch
                     last_output_amp = output_amp
                     last_ph_patch = ph_patch
                     last_output_ph = output_ph
+                    last_plot_pos = min(plot_pos_in_batch, input_diff.shape[0] - 1)  # clamp in case last batch is smaller
 
         num_batches = processed_batches
         if num_batches == 0:
@@ -761,14 +811,28 @@ class Trainer(object):
 
 
         if plot and self.is_main_process and last_input_diff is not None:
-            input_diff_np = last_input_diff[0, 0].detach().cpu().numpy()
-            output_diff_np = last_output_diff[0, 0].detach().cpu().numpy()
+            i = last_plot_pos  # [MODIFIED] index of the specific sample within the captured batch
+            input_diff_np = last_input_diff[i, 0].detach().cpu().numpy()
+            output_diff_np = last_output_diff[i, 0].detach().cpu().numpy()
 
-            input_amp = last_amp_patch[0, 0].detach().cpu()
-            output_amp = last_output_amp[0, 0].detach().cpu().numpy()
+            input_amp = last_amp_patch[i, 0].detach().cpu()
+            output_amp = last_output_amp[i, 0].detach().cpu()
+            input_ph = last_ph_patch[i, 0].detach().cpu()
+            output_ph = last_output_ph[i, 0].detach().cpu()
 
-            input_ph = last_ph_patch[0, 0].detach().cpu()
-            output_ph = last_output_ph[0, 0].detach().cpu().numpy()
+            # [MODIFIED] Fix #9: un-transpose patches back to the on-disk object frame before
+            # plotting. Uses self.transpose_object_patches because the val dataloader's dataset
+            # is a Subset/RankShardedSubset wrapper that does not expose the flag directly.
+            if getattr(self, 'transpose_object_patches', False):
+                input_amp  = input_amp.transpose(-2, -1).contiguous()
+                output_amp = output_amp.transpose(-2, -1).contiguous()
+                input_ph   = input_ph.transpose(-2, -1).contiguous()
+                output_ph  = output_ph.transpose(-2, -1).contiguous()
+
+            input_amp  = input_amp.numpy()
+            output_amp = output_amp.numpy()
+            input_ph   = input_ph.numpy()
+            output_ph  = output_ph.numpy()
 
             filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff_np, output_diff_np, input_amp, output_amp, input_ph, output_ph, filename)
@@ -788,6 +852,8 @@ class Trainer(object):
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})
+            if self.is_main_process:
+                print(f"[Epoch {epoch}] LR: {optimizer.param_groups[0]['lr']:.2e}", flush=True)  # [MODIFIED] print current LR each epoch when scheduler is active
 
         if avg_val_loss < metrics['best_val_loss']:
             if self.is_main_process:
