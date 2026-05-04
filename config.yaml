@@ -2,15 +2,16 @@
 
 # Data Configuration
 data:
-  data_path: '/pscratch/sd/e/edey/simulated_data'
-  test_path: '/pscratch/sd/e/edey/test_data/scan807_dp.hdf5'
+  data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
+  packed: true # set to true if using packed data
+  test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
   # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  normalization_dict_path: '/pscratch/sd/e/edey/ptycho-vit/normalization.pkl'
-  test_normalization: '/pscratch/sd/e/edey/test_data/test2probes_norm.pkl'
+  normalization_dict_path: '/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl'
+  test_normalization: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/test2probes_norm.pkl'
   default_normalization: 100000.0
 
   cache_object: true
@@ -23,24 +24,24 @@ data:
   # subset_fraction: 0.1
 
   # Distributed data loading strategy:
-  sharding_strategy: 'static'  # Options: 'static' or 'dynamic'
+  sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
 
   # Limit number of files to use (for faster testing). Set to null to use all files.
   # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
-  max_files: 100
+  max_files: null
 
   # DataLoader Configuration
   num_workers: 4
   prefetch_factor: 2
-  pin_memory: false  # Set true only when using CUDAPrefetcher
-  drop_last: false
-  persistent_workers: false  # Disabled to avoid CUDA/HDF5 conflicts
-  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
+  pin_memory: true  # Required for CUDAPrefetcher async transfer
+  drop_last: true
+  persistent_workers: true  # Keep workers alive across epochs
+  use_cuda_prefetcher: true  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 256
+  batch_size: 64
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
   # Optional: learning rate scheduler
   lr_scheduler:
@@ -76,8 +77,10 @@ training:
   # Save model weights each epoch as model_epoch_XXX.pth
   save_epoch_models: true
   # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
-  checkpoint_freq: 0
+  checkpoint_freq: 1
   finetune_from_model: null
+
+  profile: false
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -123,17 +126,18 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/home/beams0/XYIN/projects/edge-ptycho-vit/ptycho-vit/models'
+  model_save_path: '/pscratch/sd/s/shas1693/data/ptycho/models'
 
 # WandB Configuration
 wandb:
-  enabled: false
-  entity: 'SYNAPS-I'
-  project: 'PtychoViT'
+  enabled: true
+  entity: 'nersc-das'
+  project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
+  run_name: 'base-new'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: test_finetuning
+  run_num: 0

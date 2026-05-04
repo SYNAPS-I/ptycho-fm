@@ -617,6 +617,18 @@ class CombinedDataset(Dataset):
         self.debug = debug
         self.debug_call_count = 0  # Track number of __getitem__ calls for debug logging
 
+        # dummy: set to below tensor if needed
+        self.fake_data = None
+        # (
+        #     torch.randn([1, 256, 256], dtype=torch.float32),
+        #     torch.randn([1, 256, 256], dtype=torch.float32),
+        #     torch.randn([1, 256, 256], dtype=torch.float32),
+        #     torch.randn([1, 10, 256, 256], dtype=torch.complex64),
+        #     torch.randn([2], dtype=torch.float64),
+        #     torch.randn([1], dtype=torch.float32),
+        #     torch.randn([1], dtype=torch.float32),
+        # )
+
         # Try to load index.csv to avoid opening all HDF5 files
         self.index_df = None
         self.pattern_counts: Dict[Path, int] = {}
@@ -740,6 +752,9 @@ class CombinedDataset(Dataset):
         Maps rank-local index to global index, then to file and local file index.
         Uses LRU cache to limit number of open datasets in memory.
         """
+        if self.fake_data:
+            return self.fake_data
+
         if idx >= len(self.current_indices):
             raise IndexError(f"Index {idx} out of range for rank shard with {len(self.current_indices)} patterns")
 

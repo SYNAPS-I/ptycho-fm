@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import math
+import torch.nn.functional as F
 
 
 class PatchEmbedding(nn.Module):
@@ -36,10 +36,11 @@ class MultiHeadSelfAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.dropout = dropout
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
 
         self.qkv = nn.Linear(embed_dim, embed_dim * 3)
-        self.attn_dropout = nn.Dropout(dropout)
+        # self.attn_dropout = nn.Dropout(dropout)
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_dropout = nn.Dropout(dropout)
 
@@ -52,13 +53,18 @@ class MultiHeadSelfAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, batch_size, num_heads, n_tokens, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # Scaled dot-product attention
-        attn = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_dropout(attn)
+        # # Scaled dot-product attention
+        # attn = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # attn = attn.softmax(dim=-1)
+        # attn = self.attn_dropout(attn)
 
-        # Combine heads
-        x = (attn @ v).transpose(1, 2)  # (batch_size, n_tokens, num_heads, head_dim)
+        # # Combine heads
+        # x = (attn @ v).transpose(1, 2)  # (batch_size, n_tokens, num_heads, head_dim)
+        # x = x.reshape(batch_size, n_tokens, embed_dim)
+
+        # use flash attention
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
+        x = x.transpose(1, 2)
         x = x.reshape(batch_size, n_tokens, embed_dim)
 
         # Output projection

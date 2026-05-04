@@ -19,6 +19,7 @@ except ImportError:
     MPI = None
 
 from data import PtychographyDataset, CombinedDataset, RankShardedSubset
+from data_simple_pack import PtychographyDatasetPacked
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
 from training import Trainer
@@ -274,7 +275,7 @@ def init_distributed_polaris():
     local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
     rank_env = int(os.environ.get("RANK", "0"))
 
-    dist.init_process_group('nccl', init_method='env://')
+    dist.init_process_group('nccl', init_method='env://', )
     
     if torch.cuda.is_available():
         nvis = torch.cuda.device_count()
@@ -346,6 +347,7 @@ def init_distributed_slurm():
         else:
             mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
         torch.cuda.set_device(mapped_local)
+        torch.backends.cudnn.benchmark = True
         device = torch.device(f"cuda:{mapped_local}")
         os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
     else:
@@ -358,6 +360,8 @@ def init_distributed_slurm():
 def cleanup_distributed():
     if dist.is_available() and dist.is_initialized():
         try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             dist.barrier()
         except Exception:
             pass
@@ -394,6 +398,18 @@ checkpoint_freq = int(config['training'].get('checkpoint_freq', 0))  # 0 disable
 rank, world_size, local_rank, DEVICE = init_distributed(config['training'].get('platform', 'slurm'))
 is_main_process = rank == 0
 
+
+def _ddp_barrier():
+    """Keep all ranks in lockstep before collectives. Rank-only work (e.g. wandb.init on rank 0)
+    must finish before any rank hits the first DDP all_reduce or peers will block forever."""
+    if world_size <= 1 or not dist.is_available() or not dist.is_initialized():
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    dist.barrier(device_ids=[DEVICE.index])
+
+_ddp_barrier()
+
 # Normalize DataLoader pinned-memory usage.
 # Pinned memory speeds up non_blocking H2D copies, but it uses CUDA's caching host allocator
 # and can trigger `CUDACachingHostAllocatorImpl::record_stream` crashes on some systems.
@@ -417,23 +433,39 @@ if 'data_path' not in config['data']:
     raise ValueError("Config must specify 'data_path' (directory containing paired HDF5 files)")
 
 data_dir = config['data']['data_path']
+is_packed = config['data'].get('packed', False)
 
 # Create full dataset with sequential indices
 # Shuffling is handled by random_split with a deterministic seed
-base_dataset = CombinedDataset(
-    file_paths=data_dir,
-    rank=rank,
-    world_size=world_size,
-    scale=config['data']['scale'],
-    normalization_dict_path=config['data'].get('normalization_dict_path'),
-    default_normalization=config['data'].get('default_normalization', 100000.0),
-    apply_noise=config['data'].get('apply_noise', True),
-    cache_object=config['data'].get('cache_object', False),
-    max_probe_modes=config['data'].get('max_probe_modes', 8),
-    target_size=config['data'].get('target_size', 256),
-    max_files=config['data'].get('max_files'),
-    debug=DEBUG_MODE
+if is_packed:
+    base_dataset = PtychographyDatasetPacked(
+        pack_dir=data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        default_normalization=config['data'].get('default_normalization', 100000.0),
+        apply_noise=config['data'].get('apply_noise', True),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        target_size=config['data'].get('target_size', 256),
+        max_shards=config['data'].get('max_shards'),
+        debug=DEBUG_MODE
 )
+else:
+    base_dataset = CombinedDataset(
+        file_paths=data_dir,
+        rank=rank,
+        world_size=world_size,
+        scale=config['data']['scale'],
+        normalization_dict_path=config['data'].get('normalization_dict_path'),
+        default_normalization=config['data'].get('default_normalization', 100000.0),
+        apply_noise=config['data'].get('apply_noise', True),
+        cache_object=config['data'].get('cache_object', False),
+        max_probe_modes=config['data'].get('max_probe_modes', 8),
+        target_size=config['data'].get('target_size', 256),
+        max_files=config['data'].get('max_files'),
+        debug=DEBUG_MODE
+    )
 
 # Optionally take only the first N samples from the full dataset
 full_dataset = base_dataset
@@ -570,10 +602,11 @@ if is_main_process:
     else:
         print("Using standard DataLoader on CPU", flush=True)
 
-# Create test dataset and loader only on main process when test_path is configured
-if is_main_process and config['data'].get('test_path') is not None:
+# Create test dataset and loader only on main process
+# if is_main_process:
+if config['data'].get('test_path') is not None:
     test_dataset = PtychographyDataset(
-        file_path=config['data'].get('test_path'),
+        file_path=config['data']['test_path'],
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('test_normalization'),
         apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
@@ -582,7 +615,6 @@ if is_main_process and config['data'].get('test_path') is not None:
         target_size=config['data'].get('target_size', 256),
         object_name=config['data'].get('test_dataset_object_name', None),
     )
-
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
@@ -592,6 +624,7 @@ if is_main_process and config['data'].get('test_path') is not None:
     )
 
     print(f"Test dataset: {len(test_dataset)} patterns", flush=True)
+    _ddp_barrier()
 else:
     test_loader = None
     if is_main_process:
@@ -607,7 +640,7 @@ if is_main_process:
     print(f"Epochs: {EPOCHS} | World Size (GPUs): {world_size}", flush=True)
     print(f"Loss function: {config['training']['loss_function']}", flush=True)
     print(f"Data directory: {data_dir}", flush=True)
-    print(f"Number of paired files: {len(base_dataset.file_paths)}", flush=True)
+#    print(f"Number of paired files: {len(base_dataset.file_paths)}", flush=True)
     print(f"Total patterns (after subset_fraction): {len(full_dataset)}", flush=True)
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
@@ -639,7 +672,7 @@ if is_main_process:
     encoder_type = config['model'].get('encoder_type', 'custom')
     print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
     dummy_data = torch.randn((1, 1, img_size, img_size))
-    dummy_probe = torch.randn((1, 1, 8, img_size, img_size, 2))
+    dummy_probe = torch.randn((1, 1, 10, img_size, img_size, 2))
     try:
         summary(
             model,
@@ -659,13 +692,17 @@ model = model.to(DEVICE)
 if world_size > 1:
     # Use torch.cuda.current_device() like multinode.py does
     # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
-        model = DDP(model, find_unused_parameters=False)
-    else:
-        # For torchrun or other launchers, explicitly specify device
-        dev_index = torch.cuda.current_device()
-        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
+    dev_index = DEVICE.index
+    model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=True)
+    # if "CUDA_VISIBLE_DEVICES" in os.environ:
+    #     # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
+    #     model = DDP(model, find_unused_parameters=False)
+    # else:
+    #     # For torchrun or other launchers, explicitly specify device
+    #     dev_index = torch.cuda.current_device()
+    #     model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
+
+_ddp_barrier()
 
 # Load pretrained weights for finetuning (fresh optimizer state)
 finetune_checkpoint_sha256 = None
@@ -712,7 +749,7 @@ param_groups = [
     {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'}
 ]
 
-optimizer = optim.Adam(param_groups)
+optimizer = optim.Adam(param_groups, fused=True)
 
 # Optional learning rate scheduler
 scheduler = None
@@ -760,6 +797,7 @@ trainer = Trainer(
     skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than
 )
 
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Resume from checkpoint if requested
 # ────────────────────────────────────────────────────────────────────────────────
@@ -801,13 +839,15 @@ if config['training'].get('resume_from_checkpoint', False):
 # ────────────────────────────────────────────────────────────────────────────────
 if is_main_process and config['wandb']['enabled']:
     wandb.login()
+    run_name = config['wandb']['run_name']
     if wandb_run_id is not None:
         # Resume existing wandb run
         run = wandb.init(
             entity=config['wandb']['entity'],
             project=config['wandb']['project'],
             id=wandb_run_id,
-            resume='must'
+            resume='must',
+            name=run_name,
         )
         print(f'Resumed wandb run: {wandb_run_id}', flush=True)
     else:
@@ -815,6 +855,7 @@ if is_main_process and config['wandb']['enabled']:
         run = wandb.init(
             entity=config['wandb']['entity'],
             project=config['wandb']['project'],
+            name=run_name,
             config={
                 "learning_rate": LR,
                 "encoder_lr": encoder_lr,
@@ -851,6 +892,9 @@ if is_main_process and config['wandb']['enabled']:
     if FINETUNE_PATH and finetune_checkpoint_sha256 is not None:
         wandb.run.summary["finetune_checkpoint_sha256"] = finetune_checkpoint_sha256
         print("Logged finetune checkpoint SHA256 to wandb", flush=True)
+
+
+_ddp_barrier()
 
 if is_main_process:
     print('\nStarting Training...\n', flush=True)
@@ -904,6 +948,8 @@ try:
             trainer.save_config(config_path)
             print('Saved config to run path', flush=True)
 
+        _ddp_barrier()
+
         # Log epoch start with timestamp
         if is_main_process:
             from datetime import datetime
@@ -934,11 +980,13 @@ try:
 
         # Training loop
         model.train()
-        trainer.train(train_prefetcher, criterion, optimizer, metrics, epoch=epoch)
+        profile = config['training'].get('profile', False)
+        trainer.train(train_prefetcher, criterion, optimizer, metrics, profile=profile, epoch=epoch)
+
 
         # Validation loop
         model.eval()
-        plot = (epoch % config['training']['validation_plot_freq'] == 0)
+        plot = (epoch % config['training']['validation_plot_freq'] == 0) and (not profile)
         
         # Debug logging for validation in first epoch
         if DEBUG_MODE and epoch == 0:
@@ -954,10 +1002,11 @@ try:
         
         if is_main_process:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
-        trainer.validate(val_prefetcher, criterion, optimizer, metrics, plot=plot, epoch=epoch, scheduler=scheduler)
+        trainer.validate(val_prefetcher, criterion, optimizer, metrics, 
+            plot=plot, epoch=epoch, scheduler=scheduler, profile=profile)
 
         # Generate test plot only on main process
-        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and test_loader is not None:
+        if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and (not profile) and test_loader is not None:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
             trainer.generate_test_plot(
                 test_loader,
@@ -966,6 +1015,9 @@ try:
                 central_crop=config['training'].get('test_plot_central_crop', 64),
                 ph_crop=config['training'].get('test_plot_ph_crop', 180),
             )
+
+        # Rank 0 test plot / I/O can lag other ranks at end of epoch; align before next epoch.
+        _ddp_barrier()
 
         # Optional per-epoch saving
         do_checkpoint = checkpoint_freq > 0 and ((epoch + 1) % checkpoint_freq == 0)

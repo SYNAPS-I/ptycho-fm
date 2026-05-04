@@ -103,7 +103,8 @@ class Decoder256(nn.Module):
             in_ch = out_ch
 
         # Final output layer
-        self.output = nn.Conv2d(base_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        # self.output = nn.Conv2d(base_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        self.output = nn.Linear(base_channels, out_channels)
 
         # Optional output activation
         if output_activation == 'sigmoid':
@@ -120,6 +121,7 @@ class Decoder256(nn.Module):
     def forward(self, x):
         for stage in self.stages:
             x = stage(x)
-        x = self.output(x)
+        # x = self.output(x)
+        x = self.output(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         x = self.output_activation(x)
         return x
