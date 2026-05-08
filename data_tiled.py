@@ -5,12 +5,20 @@ container rather than a paired ``*_dp.hdf5`` / ``*_para.hdf5`` pair on disk.
 The container layout is the one written by holoptycho when its ``fine_tune``
 config flag is set (see holoptycho/AGENTS.md):
 
-    <run>/diffraction/dp                       (nz, H, W) uint16 intensity
+    <run>/diffraction/dp                       (nz, H, W) uint8 amplitude
     <run>/diffraction/probe_position_x_m       (nz,) float64 meters
     <run>/diffraction/probe_position_y_m       (nz,) float64 meters
     <run>/final/object                          (1, H_obj, W_obj) complex
     <run>/final/probe                           (N_modes, H, W) complex
     <run>.metadata['x_pixel_m']                 float, sample-plane pixel size
+
+The diffraction data is stored as **amplitude** (= ``sqrt(intensity)``,
+rounded to uint8) rather than raw intensity, because Tiled doesn't accept
+compressed ``write_block`` payloads and uint8 storage halves the on-the-wire
+upload volume. The 1-count quantization is below the Poisson noise floor for
+ML training, so the loss is negligible. Concretely this means the loader
+**skips the sqrt step** that the h5 path applies — the bytes coming off Tiled
+are already amplitude.
 
 The ``__getitem__`` contract (return order, shapes, dtypes) is identical to
 :class:`PtychographyDataset`, so a downstream training loop can swap data
@@ -163,19 +171,39 @@ class TiledPtychographyDataset(PtychographyDataset):
         self._cached_probe = probe
 
     def _load_pattern(self, pattern_idx: int):
-        """Tiled-side equivalent of PtychographyDataset._load_hdf5_pattern."""
+        """Tiled-side equivalent of PtychographyDataset._load_hdf5_pattern.
+
+        holoptycho writes ``dp`` as **uint8 amplitude** (= ``sqrt(intensity)``,
+        rounded) to halve the on-the-wire write volume vs raw uint16
+        intensity, since Tiled does not accept compressed write_block payloads.
+        That means we already have ``A = sqrt(I)``, so we skip the h5 path's
+        own ``sqrt`` step.
+
+        The h5 path does ``sqrt((I/N)*scale)`` — algebraically that's
+        ``A * sqrt(scale/N)``, which is what we apply here.
+
+        Poisson augmentation lives in intensity space and isn't meaningful on
+        pre-sqrt'd amplitudes; experimental data (the only kind that lands in
+        Tiled today) is set to ``apply_noise=False`` anyway, so we issue a
+        warning and skip if asked to apply it.
+        """
         self._cache_positions()
         if self.cache_object:
             self._cache_object_data()
 
-        # Diffraction intensity (uint16) -> normalize -> Poisson -> sqrt.
-        diffraction_pattern = np.asarray(self._dp_node[pattern_idx])
-        diffraction_pattern = self.normalize(diffraction_pattern)
+        amp_u8 = np.asarray(self._dp_node[pattern_idx])
         if self.apply_noise:
-            diffraction_pattern = np.random.default_rng().poisson(
-                diffraction_pattern
+            import warnings
+            warnings.warn(
+                "TiledPtychographyDataset: apply_noise=True on pre-sqrt'd "
+                "uint8 amplitude; skipping Poisson (use experimental data "
+                "with apply_noise=False, or fall back to PtychographyDataset "
+                "for simulated h5 data).",
+                stacklevel=2,
             )
-        diffraction_amp = np.sqrt(diffraction_pattern.astype(np.float32))
+        diffraction_amp = amp_u8.astype(np.float32) * float(
+            np.sqrt(self.scale / self.normalization)
+        )
 
         if (
             self.target_size is not None

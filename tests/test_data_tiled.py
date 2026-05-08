@@ -2,7 +2,7 @@
 
 The class reads from a Tiled run container with a specific shape:
 
-    <run>/diffraction/dp                       (nz, H, W) uint16
+    <run>/diffraction/dp                       (nz, H, W) uint8 amplitude
     <run>/diffraction/probe_position_x_m       (nz,) float64
     <run>/diffraction/probe_position_y_m       (nz,) float64
     <run>/final/object                          (1, H_obj, W_obj) complex
@@ -54,8 +54,10 @@ def _build_fake_run(num_patterns=8, pattern_size=128, object_size=512, n_modes=4
     """Construct a fake Tiled run with the schema TiledPtychographyDataset reads."""
     rng = np.random.default_rng(seed=0)
 
-    dp = (rng.random((num_patterns, pattern_size, pattern_size)) * 1000).astype(
-        np.uint16
+    # uint8 amplitudes (= sqrt of intensity) — what holoptycho writes to
+    # halve the on-the-wire write volume.
+    dp = (rng.random((num_patterns, pattern_size, pattern_size)) * 255).astype(
+        np.uint8
     )
     # Positions in meters: range chosen so the meters-vs-pixels heuristic in
     # _cache_positions classifies them as meters (range ~ 10x pixel_size_m).
