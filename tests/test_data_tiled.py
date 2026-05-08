@@ -174,6 +174,61 @@ def test_tiled_dataset_object_name_from_metadata():
     assert ds.object_name == "test_scan_42"
 
 
+def test_tiled_dataset_forwards_api_key():
+    """An explicit api_key kwarg should be forwarded to tiled.client.from_uri."""
+    fake_run = _build_fake_run()
+
+    with patch("tiled.client.from_uri", return_value=fake_run) as mock_from_uri:
+        from data_tiled import TiledPtychographyDataset
+
+        TiledPtychographyDataset(
+            tiled_uri="http://fake/run-uid/",
+            apply_noise=False,
+            target_size=128,
+            api_key="explicit-key",
+        )
+
+        kwargs = mock_from_uri.call_args.kwargs
+        assert kwargs.get("api_key") == "explicit-key", (
+            f"expected api_key='explicit-key' to be forwarded, got kwargs={kwargs}"
+        )
+
+
+def test_tiled_dataset_picks_up_api_key_env_var(monkeypatch=None):
+    """TILED_API_KEY env var is the fallback when no explicit kwarg is passed.
+
+    Mirrors how holoptycho's replay script and most training jobs authenticate
+    — set TILED_API_KEY in the environment, code stays unchanged across dev
+    and prod.
+    """
+    import os
+    fake_run = _build_fake_run()
+
+    # Use a context manager to set + unset the env var so we don't pollute
+    # the test process.
+    prev = os.environ.get("TILED_API_KEY")
+    os.environ["TILED_API_KEY"] = "env-var-key"
+    try:
+        with patch("tiled.client.from_uri", return_value=fake_run) as mock_from_uri:
+            from data_tiled import TiledPtychographyDataset
+
+            TiledPtychographyDataset(
+                tiled_uri="http://fake/run-uid/",
+                apply_noise=False,
+                target_size=128,
+            )
+
+            kwargs = mock_from_uri.call_args.kwargs
+            assert kwargs.get("api_key") == "env-var-key", (
+                f"expected api_key='env-var-key' to be forwarded, got kwargs={kwargs}"
+            )
+    finally:
+        if prev is None:
+            os.environ.pop("TILED_API_KEY", None)
+        else:
+            os.environ["TILED_API_KEY"] = prev
+
+
 def test_tiled_dataset_rejects_non_fine_tunable_run():
     """A run produced with recon_mode='vit' is marked fine_tunable=False in
     its metadata (no probe/object reconstruction). Surface a clear error at

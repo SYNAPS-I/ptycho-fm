@@ -53,11 +53,13 @@ class TiledPtychographyDataset(PtychographyDataset):
         max_probe_modes: int = 8,
         target_size: Optional[int] = 256,
         object_name: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         # Skip PtychographyDataset.__init__ — its h5-specific path expects a
         # local file. Set up the parent's attributes by hand, then run the
         # Tiled-specific loaders.
         torch.utils.data.Dataset.__init__(self)
+        import os
         from tiled.client import from_uri
 
         self.tiled_uri = tiled_uri
@@ -73,8 +75,13 @@ class TiledPtychographyDataset(PtychographyDataset):
         self._cached_probe_positions = None
         self._cached_probe = None
 
-        # Open the run container and bind the array nodes.
-        self._run = from_uri(tiled_uri)
+        # Auth precedence: explicit kwarg > TILED_API_KEY env var > cached
+        # `tiled login` credentials. Passing api_key=None to from_uri is the
+        # signal to fall back to the cached credentials, so we only forward
+        # the kwarg when something resolved to a non-empty string.
+        resolved_api_key = api_key or os.environ.get("TILED_API_KEY") or None
+        from_uri_kwargs = {"api_key": resolved_api_key} if resolved_api_key else {}
+        self._run = from_uri(tiled_uri, **from_uri_kwargs)
         # holoptycho stamps `fine_tunable: true` into run metadata iff the
         # iterative branch will populate `final/probe` and `final/object` —
         # the supervised targets this loader requires. Reject vit-only runs
