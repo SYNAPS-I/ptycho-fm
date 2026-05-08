@@ -28,7 +28,7 @@ data:
 
   # Limit number of files to use (for faster testing). Set to null to use all files.
   # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
-  max_files: 15
+  max_files: null
 
   # DataLoader Configuration
   num_workers: 4
@@ -62,7 +62,7 @@ training:
   # ph_decoder_lr: 1.0e-6
 
   epochs: 5  # Total epochs to train for (not additional epochs when resuming)
-  log_every: 1000 # Log every N iterations
+  log_every: 2000 # Log every N iterations
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
@@ -137,9 +137,9 @@ wandb:
   project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
-  run_name: 'base-iter-check'
+  run_name: 'base-iter'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 'iter-check'
+  run_num: 'iter'
