@@ -249,6 +249,65 @@ python inference.py --model_path /path/to/checkpoint.pt --config config.yaml
 - Provides unified indexing across all files
 - Works seamlessly with PyTorch `DataLoader` and `DistributedSampler`
 
+### TiledPtychographyDataset
+
+Sibling of `PtychographyDataset` that reads a per-run holoptycho container
+from a Tiled server instead of paired HDF5 files. Same `__getitem__` contract
+(7-tuple, identical shapes/dtypes), so it drops into the same training loop.
+
+Only runs marked `fine_tunable: true` in their Tiled metadata are accepted —
+that flag is set by holoptycho when `recon_mode` is `iterative` or `both`,
+since fine-tuning needs the reconstructed `final/probe` and `final/object`
+as supervised targets.
+
+```python
+from data_tiled import TiledPtychographyDataset
+
+ds = TiledPtychographyDataset(
+    tiled_uri="https://tiled.nsls2.bnl.gov/api/v1/metadata/hxn/processed/holoptycho/<run_uid>/",
+)
+```
+
+#### Authentication
+
+Auth precedence is **explicit `api_key=` arg > `TILED_API_KEY` env var > cached `tiled login` credentials**.
+
+For training jobs (Slurm, CI, containers) the env-var form is the most
+convenient — no code change between dev and prod, no secret in the script:
+
+```bash
+export TILED_API_KEY=<your-key>
+python training.py  # TiledPtychographyDataset picks up the key automatically
+```
+
+For interactive use on a dev box, run `tiled login <server>` once and the
+cached credentials get picked up; `api_key` can be omitted.
+
+For one-off explicit overrides, pass `api_key=` directly:
+
+```python
+ds = TiledPtychographyDataset(tiled_uri="...", api_key="...")
+```
+
+#### Exporting a Tiled run to HDF5 (Polaris / air-gapped compute)
+
+Polaris compute nodes can't reach the Tiled server. For training there, run
+`scripts/export_tiled_to_hdf5.py` on a login node — which has internet — to
+materialize the run as the paired `*_dp.hdf5` / `*_para.hdf5` files
+`PtychographyDataset` already reads. The training job then sees a normal
+local-file dataset; no Tiled access at runtime.
+
+```bash
+export TILED_API_KEY=<your-key>
+python scripts/export_tiled_to_hdf5.py <run_uid> \
+    --out-dir /lus/eagle/projects/<your-project>/holoptycho-runs
+# Produces <scan_id>_dp.hdf5 + <scan_id>_para.hdf5 under --out-dir.
+```
+
+Point your training config's `data.data_path` at the output directory and
+launch the job as usual. Run the export once per scan you want to fine-tune
+on; the files are reusable across runs.
+
 ### Normalization
 - Per-object normalization factors loaded from pickle file
 - Format: `{object_name: normalization_factor}`
@@ -314,6 +373,8 @@ python tests/test_utils.py
 - **model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
 - **ptychi_utils.py**: Image processing utilities adapted from pty-chi
 - **data.py**: Dataset classes for loading Ptychodus format files
+- **data_tiled.py**: `TiledPtychographyDataset` — reads holoptycho runs from a Tiled server
+- **scripts/export_tiled_to_hdf5.py**: stage a Tiled run to `*_dp.hdf5` + `*_para.hdf5` for offline training (Polaris, etc.)
 - **training.py**: Training and validation logic
 
 ### Adding New Models
