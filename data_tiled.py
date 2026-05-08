@@ -75,6 +75,20 @@ class TiledPtychographyDataset(PtychographyDataset):
 
         # Open the run container and bind the array nodes.
         self._run = from_uri(tiled_uri)
+        # holoptycho stamps `fine_tunable: true` into run metadata iff the
+        # iterative branch will populate `final/probe` and `final/object` —
+        # the supervised targets this loader requires. Reject vit-only runs
+        # (or runs that predate the metadata flag) with a clear message
+        # rather than failing later with a cryptic KeyError on `final/`.
+        run_meta = dict(self._run.metadata or {})
+        if not run_meta.get("fine_tunable", False):
+            raise ValueError(
+                f"Tiled run {tiled_uri} is not marked fine_tunable in its "
+                "metadata. ptycho-vit's training loader needs final/probe "
+                "and final/object as supervised targets; only runs created "
+                "with recon_mode='iterative' or 'both' produce them. Re-run "
+                "holoptycho on this scan with one of those recon modes."
+            )
         diffraction = self._run["diffraction"]
         final = self._run["final"]
         self._dp_node = diffraction["dp"]

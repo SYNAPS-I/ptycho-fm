@@ -49,6 +49,12 @@ class _FakeContainer:
     def __getitem__(self, key):
         return self._children[key]
 
+    def __contains__(self, key):
+        return key in self._children
+
+    def __iter__(self):
+        return iter(self._children)
+
 
 def _build_fake_run(num_patterns=8, pattern_size=128, object_size=512, n_modes=4):
     """Construct a fake Tiled run with the schema TiledPtychographyDataset reads."""
@@ -86,7 +92,8 @@ def _build_fake_run(num_patterns=8, pattern_size=128, object_size=512, n_modes=4
         metadata={
             "scan_id": "test_scan_42",
             "x_pixel_m": 1e-7,
-            "fine_tune": True,
+            "fine_tunable": True,
+            "complete": True,
         },
     )
 
@@ -165,3 +172,27 @@ def test_tiled_dataset_object_name_from_metadata():
         )
 
     assert ds.object_name == "test_scan_42"
+
+
+def test_tiled_dataset_rejects_non_fine_tunable_run():
+    """A run produced with recon_mode='vit' is marked fine_tunable=False in
+    its metadata (no probe/object reconstruction). Surface a clear error at
+    __init__ rather than blowing up later when reading final/."""
+    fake_run = _build_fake_run()
+    fake_run.metadata["fine_tunable"] = False
+
+    with patch("tiled.client.from_uri", return_value=fake_run):
+        from data_tiled import TiledPtychographyDataset
+
+        try:
+            TiledPtychographyDataset(
+                tiled_uri="http://fake/run-uid/",
+                apply_noise=False,
+                target_size=128,
+            )
+        except ValueError as e:
+            assert "fine_tunable" in str(e), f"unexpected error message: {e}"
+        else:
+            raise AssertionError(
+                "expected ValueError for fine_tunable=False run"
+            )
