@@ -24,4 +24,5 @@ dependencies = [
 dev = [
     "ipykernel>=7.0.1",
     "jupyter>=1.1.1",
+    "ruff>=0.15.12",
 ]

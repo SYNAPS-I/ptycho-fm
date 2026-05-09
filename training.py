@@ -12,7 +12,7 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from datetime import datetime
 import time
 # [MODIFIED] added stitch_patches import for use in generate_test_plot
-from utils.ptychi_utils import place_patches_fourier_shift, stitch_patches
+from utils.ptychi_utils import stitch_patches
 
 import wandb
 

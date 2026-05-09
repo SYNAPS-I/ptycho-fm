@@ -16,7 +16,7 @@ from data import PtychographyDataset
 from model.model import PtychoViT
 from torch.utils.data import DataLoader
 # [MODIFIED] import stitch_patches from shared utils instead of defining it locally
-from utils.ptychi_utils import place_patches_fourier_shift, stitch_patches
+from utils.ptychi_utils import stitch_patches
 
 # =============================================================================
 # CONFIGURATION - MODIFY THESE PATHS FOR YOUR DATA
@@ -127,7 +127,6 @@ def visualize_stitching(positions, counts, patch_size=1024, save_path=None):
                 s=1, c='blue', alpha=0.3, label='Probe centers')
 
     # Draw sample patch rectangles: pick by actual spatial position
-    n = len(positions)
     cy_all = canvas_positions[:, 0]
     cx_all = canvas_positions[:, 1]
     sample_indices = [
@@ -240,8 +239,6 @@ def run_inference(model, data_path, config, device, results_dir, batch_size=64):
     all_gt_diff = []
     all_positions = []
 
-    img_size = config['model']['encoder']['img_size']
-
     print('\n'+'='*30)
     print(f"Running inference for scan {SCAN_ID}...")
     print('-'*30)
@@ -341,9 +338,9 @@ def run_inference(model, data_path, config, device, results_dir, batch_size=64):
     canvas_pad   = 64
     if dataset._cached_probe_positions is None:
         dataset._cache_positions()
-    print(f'Run amplitude stitching...')
+    print('Run amplitude stitching...')
     stitched_amp, counts_amp = stitch_patches(pred_amp, positions, patch_size, crop=central_crop, canvas_pad=canvas_pad)
-    print(f'Run phase stitching...')
+    print('Run phase stitching...')
     stitched_ph, counts_ph = stitch_patches(pred_ph, positions, patch_size, crop=central_crop, canvas_pad=canvas_pad)
     print(f"  Stitched object size: {stitched_amp.shape}")
 
@@ -363,11 +360,11 @@ def run_inference(model, data_path, config, device, results_dir, batch_size=64):
     np.save(os.path.join(results_dir, f'{data_name}_stitch_counts.npy'), counts_amp)
 
     print(f"\nResults saved to: {results_dir}")
-    print(f"  Patches:")
+    print("  Patches:")
     print(f"    - {data_name}_pred_amplitude.npy: shape {pred_amp.shape}")
     print(f"    - {data_name}_pred_phase.npy: shape {pred_ph.shape}")
     print(f"    - {data_name}_pred_diffraction.npy: shape {pred_diff.shape}")
-    print(f"  Stitched:")
+    print("  Stitched:")
     print(f"    - {data_name}_stitched_amplitude.npy: shape {stitched_amp.shape}")
     print(f"    - {data_name}_stitched_phase.npy: shape {stitched_ph.shape}")
 
