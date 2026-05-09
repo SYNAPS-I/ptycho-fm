@@ -2,12 +2,9 @@
 
 # Data Configuration
 data:
-  # Option 1: Specify a list of specific files to use
-  # datafiles:
-  #    - '/pscratch/sd/e/edey/aileen/data/eagle256_dp.hdf5'
-  data_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272452'
-  # data_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/scan807_test_data'
-  test_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272458/272458_dp.hdf5'
+  data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
+  packed: false # set to true if using packed data
+  test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
@@ -16,7 +13,7 @@ data:
   normalization_dict_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272452/normalization.pkl'
   # normalization_dict_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/scan807_test_data/normalization.pkl'
   test_normalization: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272458/normalization.pkl'
-
+  default_normalization: 100000.0
   apply_noise: false             # HXN experimental data already contains noise; don't add Poisson noise on top
   transpose_object_patches: true # HXN object array has transposed axes relative to probe/dp; fixes forward-physics alignment
 
@@ -27,20 +24,63 @@ data:
   random_seed: 8
 
   # Distributed data loading strategy:
-  sharding_strategy: 'static'  # Options: 'static' or 'dynamic'
+  sharding_strategy: 'dynamic'  # Options: 'static' or 'dynamic'
+
+  # Limit number of files to use (for faster testing). Set to null to use all files.
+  # ~2000 patterns per file on average, so 100 files ≈ 200k patterns
+  max_files: null
 
   # DataLoader Configuration
   num_workers: 4
   prefetch_factor: 2
-  pin_memory: false  # Required for CUDAPrefetcher async transfer
-  persistent_workers: false  # Keep workers alive across epochs
-  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
+  pin_memory: true  # Required for CUDAPrefetcher async transfer
+  drop_last: true
+  persistent_workers: true  # Keep workers alive across epochs
+  use_cuda_prefetcher: true  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
-  learning_rate: 1.0e-4  # Default learning rate (used if individual rates not specified)
+  learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  # Learning rate scheduler (optional)
+  # scheduler_class accepts any torch.optim.lr_scheduler class name.
+  # CosineAnnealingLR: smoothly decays LR to eta_min over T_max epochs — good default for a fixed epoch budget.
+  # ReduceLROnPlateau: cuts LR by `factor` when val loss stalls for `patience` epochs — adaptive, no epoch budget needed.
+  # StepLR: multiplies LR by `gamma` every `step_size` epochs — simple fixed schedule.
+  # CyclicLR: oscillates LR between base_lr and max_lr — can escape local minima.
+  lr_scheduler:
+    enabled: true
+    scheduler_class: 'CosineAnnealingLR'  # swap to CosineAnnealingLR / ReduceLROnPlateau / StepLR / CyclicLR as needed
+    kwargs:
+      T_max: 100       # CosineAnnealingLR: match total epochs
+      eta_min: 1.0e-5 # CosineAnnealingLR / ReduceLROnPlateau: floor LR
+
+      # ReduceLROnPlateau options (uncomment when using that scheduler):
+      # mode: 'min'       # 'min' = reduce when metric stops decreasing (use for loss); 'max' for accuracy
+      # factor: 0.5       # multiply LR by this factor on plateau (0.5 = halve the LR)
+      # patience: 5       # number of epochs with no improvement before cutting LR
+      # min_lr: 1.0e-6    # floor LR; will never drop below this value
+
+      # StepLR options:
+      # step_size: 10
+      # gamma: 0.5
+
+      # CyclicLR options:
+      # NOTE: scheduler.step() is called once per epoch here (not per batch),
+      # so step_size_up is in epochs, not iterations.
+      # NOTE: cycle_momentum MUST be false when using Adam (not SGD).
+      # base_lr: 1.0e-6    # lower LR bound
+      # max_lr: 1.0e-4     # upper LR bound (3–10× base_lr typical)
+      # step_size_up: 5    # epochs in the increasing half of each cycle
+      # mode: 'triangular2'  # halves amplitude each cycle → gradually settles; options: triangular, triangular2, exp_range
+      # cycle_momentum: false  # required for Adam
+
+  # Optional: per-epoch subsetting of the training set only (validation unaffected)
+  data_subsetting_schedule:
+    enabled: false
+    epochs: [0, 3, 5]
+    fractions: [0.05, 0.2, 1.0]
 
   # Individual learning rates for model components (optional)
   # If not specified, will use the default learning_rate above
@@ -75,42 +115,15 @@ training:
   test_plot_freq: 1        # Plot stitched test results every M epochs
   test_plot_central_crop: 0   # Pixels trimmed from each patch edge before stitching (removes low-quality Fourier boundary)
   test_plot_ph_crop: 128       # Pixels trimmed from the final stitched canvas border (removes stitching edge artifacts); auto-clamped if too large
-  # Learning rate scheduler (optional)
-  # scheduler_class accepts any torch.optim.lr_scheduler class name.
-  # CosineAnnealingLR: smoothly decays LR to eta_min over T_max epochs — good default for a fixed epoch budget.
-  # ReduceLROnPlateau: cuts LR by `factor` when val loss stalls for `patience` epochs — adaptive, no epoch budget needed.
-  # StepLR: multiplies LR by `gamma` every `step_size` epochs — simple fixed schedule.
-  # CyclicLR: oscillates LR between base_lr and max_lr — can escape local minima.
-  lr_scheduler:
-    enabled: true
-    scheduler_class: 'CosineAnnealingLR'  # swap to CosineAnnealingLR / ReduceLROnPlateau / StepLR / CyclicLR as needed
-    kwargs:
-      T_max: 100       # CosineAnnealingLR: match total epochs
-      eta_min: 1.0e-5 # CosineAnnealingLR / ReduceLROnPlateau: floor LR
-
-      # ReduceLROnPlateau options (uncomment when using that scheduler):
-      # mode: 'min'       # 'min' = reduce when metric stops decreasing (use for loss); 'max' for accuracy
-      # factor: 0.5       # multiply LR by this factor on plateau (0.5 = halve the LR)
-      # patience: 5       # number of epochs with no improvement before cutting LR
-      # min_lr: 1.0e-6    # floor LR; will never drop below this value
-
-      # StepLR options:
-      # step_size: 10
-      # gamma: 0.5
-
-      # CyclicLR options:
-      # NOTE: scheduler.step() is called once per epoch here (not per batch),
-      # so step_size_up is in epochs, not iterations.
-      # NOTE: cycle_momentum MUST be false when using Adam (not SGD).
-      # base_lr: 1.0e-6    # lower LR bound
-      # max_lr: 1.0e-4     # upper LR bound (3–10× base_lr typical)
-      # step_size_up: 5    # epochs in the increasing half of each cycle
-      # mode: 'triangular2'  # halves amplitude each cycle → gradually settles; options: triangular, triangular2, exp_range
-      # cycle_momentum: false  # required for Adam
 
   resume_from_checkpoint: false  # Set to true to resume training from checkpoint
-  # finetune_from_model: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/20260323-ptycho-vit/Finetuning_results/run042001_dpot_bs_resumed/best_model.pth'
-  finetune_from_model: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/20260323-ptycho-vit/Finetuning_results/best_model.pth'
+  # Save model weights each epoch as model_epoch_XXX.pth
+  save_epoch_models: true
+  # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
+  checkpoint_freq: 1
+  finetune_from_model: null
+
+  profile: false
 
 # Model Architecture
 # All models are fixed at 256x256 image size
@@ -155,15 +168,16 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/20260323-ptycho-vit/Finetuning_results'
+  model_save_path: '/pscratch/sd/s/shas1693/data/ptycho/models'
 
 # WandB Configuration
 wandb:
   enabled: false
-  entity: 'SYNAPS-I'
-  project: 'PtychoViT'
-  dataset_name: 'simulated_360k'
-  notes: 'Pretrained ViT, different LR for encoder and decoder'
+  entity: 'nersc-das'
+  project: 'ptycho-vit'
+  dataset_name: 'simulated full data'
+  notes: 'Custom ViT, 43M'
+  run_name: 'base-new'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration

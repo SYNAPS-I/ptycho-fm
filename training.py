@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 
+from datetime import datetime
+import time
 # [MODIFIED] added stitch_patches import for use in generate_test_plot
 from utils.ptychi_utils import place_patches_fourier_shift, stitch_patches
 
@@ -456,9 +458,9 @@ class Trainer(object):
         plt.close(f)
 
         if self.wandb_enabled:
-            wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")})
+            wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")}, step=epoch, commit=True)
 
-    def train(self, dataloader, criterion, optimizer, metrics, epoch=None):
+    def train(self, dataloader, criterion, optimizer, metrics, profile=False, epoch=None):
         """
         Training loop.
 
@@ -476,17 +478,30 @@ class Trainer(object):
         milestone_batches = [int(total_batches * m) for m in progress_milestones]
         next_milestone_idx = 0
 
-        import time
-        from datetime import datetime
 
         if self.is_main_process:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Loading first batch... (this may take a while with lazy data loading)", flush=True)
 
         batch_0_io_start = time.time()
-        train_end_time = None
-
+        train_end_time = None  # Will be set after each batch completes
+        epoch_start_time = time.time()
+        
         for batch_idx, batch in enumerate(dataloader):
+            # adding some profiling
+            if profile:
+                if epoch == 1 and batch_idx == 0 and self.is_main_process:
+                    torch.cuda.profiler.start()
+                if batch_idx == 50:
+                    if epoch == 1 and self.is_main_process:
+                        torch.cuda.profiler.stop()
+                    break
+
+            torch.cuda.nvtx.range_push(f"step {batch_idx}")
+            torch.cuda.nvtx.range_push(f"data copy in {batch_idx}")
+
+            # Time IO (data loading) - this captures the time to get batch from DataLoader
+            # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
             if batch_idx < 10:
                 if batch_idx == 0:
                     io_time = time.time() - batch_0_io_start
@@ -520,6 +535,10 @@ class Trainer(object):
             input_norm = norm
             input_scale = scale
 
+            torch.cuda.nvtx.range_pop()  # copy in
+
+            torch.cuda.nvtx.range_push("forward")
+
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
             if self.mode == 'supervised':
@@ -528,6 +547,7 @@ class Trainer(object):
             else:
                 loss = criterion(output_diff, input_diff)
 
+            torch.cuda.nvtx.range_pop()  # forward
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
@@ -558,7 +578,6 @@ class Trainer(object):
             skip_threshold = self.skip_batch_if_grad_norm_greater_than
             if skip_threshold is not None and global_max_norm is not None and global_max_norm > skip_threshold:
                 if self.is_main_process:
-                    from datetime import datetime
                     print(
                         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                         f"[Skip Batch] Grad norm {global_max_norm:.2f} > {skip_threshold} "
@@ -566,7 +585,9 @@ class Trainer(object):
                         flush=True
                     )
             else:
+                torch.cuda.nvtx.range_push("optimizer")
                 optimizer.step()
+                torch.cuda.nvtx.range_pop()  # optimizer
                 processed_batches += 1
 
                 # [FIX] Loss accumulation moved inside this else-block so that skipped batches
@@ -591,19 +612,22 @@ class Trainer(object):
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
 
             if batch_idx > 0 and self.is_main_process:
-                from datetime import datetime
-                if batch_idx < 1000 and (batch_idx + 1) % 100 == 0:
+                if batch_idx < 1000 and (batch_idx + 1) % 1000 == 0:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
                 elif (batch_idx + 1) % 1000 == 0:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
 
             if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
-                from datetime import datetime
                 progress_pct = int(progress_milestones[next_milestone_idx] * 100)
                 if self.is_main_process:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                 next_milestone_idx += 1
 
+
+            torch.cuda.nvtx.range_pop()  # step
+
+        torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+        print(f"Processed {processed_batches} batches", flush=True)
         num_batches = processed_batches
         if num_batches == 0:
             if self.is_main_process:
@@ -616,24 +640,27 @@ class Trainer(object):
             avg_amp_loss = running_amp_loss / num_batches
             avg_ph_loss = running_ph_loss / num_batches
 
+        epoch_end_time = time.time()
+        epoch_time = epoch_end_time - epoch_start_time
+
         if self.is_main_process:
-            from datetime import datetime
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
+            #print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed in {epoch_time:.3f} seconds", flush=True)
 
         avg_train_loss = self.synchronize_loss(avg_train_loss)
         avg_amp_loss = self.synchronize_loss(avg_amp_loss)
         avg_ph_loss = self.synchronize_loss(avg_ph_loss)
 
         if self.is_main_process and self.wandb_enabled:
-            wandb.log({"train_loss": avg_train_loss})
-            wandb.log({"train_amp_loss": avg_amp_loss})
-            wandb.log({"train_ph_loss": avg_ph_loss})
+            wandb.log({"train_loss": avg_train_loss}, step=epoch)
+            wandb.log({"train_amp_loss": avg_amp_loss}, step=epoch)
+            wandb.log({"train_ph_loss": avg_ph_loss}, step=epoch)
 
         metrics['training_loss'].append(avg_train_loss)
         metrics['train_amp_loss'].append(avg_amp_loss)
         metrics['train_ph_loss'].append(avg_ph_loss)
 
-    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None):
+    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None, profile=False):
         """
         Validation loop with SSIM and PSNR metrics.
         """
@@ -674,6 +701,10 @@ class Trainer(object):
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
+                if profile:
+                    if batch_idx == 50:
+                        # early stop if profiling
+                        break
                 if isinstance(batch, (list, tuple)) and len(batch) == 8:
                     diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
                 else:
@@ -782,13 +813,13 @@ class Trainer(object):
         avg_ph_psnr = self.synchronize_loss(avg_ph_psnr)
 
         if self.is_main_process and self.wandb_enabled:
-            wandb.log({"val_loss": avg_val_loss})
-            wandb.log({"val_amp_loss": avg_val_amp_loss})
-            wandb.log({"val_ph_loss": avg_val_ph_loss})
-            wandb.log({"val_amp_ssim": avg_amp_ssim})
-            wandb.log({"val_amp_psnr": avg_amp_psnr})
-            wandb.log({"val_ph_ssim": avg_ph_ssim})
-            wandb.log({"val_ph_psnr": avg_ph_psnr})
+            wandb.log({"val_loss": avg_val_loss}, step=epoch)
+            wandb.log({"val_amp_loss": avg_val_amp_loss}, step=epoch)
+            wandb.log({"val_ph_loss": avg_val_ph_loss}, step=epoch)
+            wandb.log({"val_amp_ssim": avg_amp_ssim}, step=epoch)
+            wandb.log({"val_amp_psnr": avg_amp_psnr}, step=epoch)
+            wandb.log({"val_ph_ssim": avg_ph_ssim}, step=epoch)
+            wandb.log({"val_ph_psnr": avg_ph_psnr}, step=epoch)
 
         metrics['validation_loss'].append(avg_val_loss)
         metrics['val_amp_loss'].append(avg_val_amp_loss)
@@ -839,7 +870,7 @@ class Trainer(object):
 
             if self.wandb_enabled:
                 run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
-                wandb.log({"val_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Epoch {epoch}")})
+                wandb.log({"val_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Epoch {epoch}")}, step=epoch)
 
         if scheduler:
             # Only ReduceLROnPlateau expects a monitored metric; others use epoch progression.
@@ -851,7 +882,7 @@ class Trainer(object):
                 metrics['lr'] = []
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
-                wandb.log({"lr": optimizer.param_groups[0]['lr']})
+                wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=epoch)
             if self.is_main_process:
                 print(f"[Epoch {epoch}] LR: {optimizer.param_groups[0]['lr']:.2e}", flush=True)  # [MODIFIED] print current LR each epoch when scheduler is active
 
