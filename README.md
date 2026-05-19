@@ -143,7 +143,6 @@ data:
   num_workers: 4
   prefetch_factor: 10
   pin_memory: true
-  drop_last: false
   persistent_workers: false
 ```
 

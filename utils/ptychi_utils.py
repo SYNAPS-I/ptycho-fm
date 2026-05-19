@@ -10,6 +10,112 @@ import torch
 from torch import Tensor
 from typing import Optional, Tuple, Literal
 
+# Cheng-Chu
+def stitch_patches(patches, positions, patch_size=256, image_shape=None,
+                    batch_size=1024, crop=64, pad=32, canvas_pad=0):
+    """
+    Stitch patches using Fourier shift for sub-pixel accuracy.
+
+    Uses FFT-based shifting (place_patches_fourier_shift) to handle
+    fractional/sub-pixel positions for accurate reconstruction.
+    Patches are processed in batches to avoid OOM on large datasets.
+
+    Edge pixels of each patch are cropped before stitching to remove
+    border artifacts (the model lacks context beyond the patch boundary).
+
+    Args:
+        patches: Array of shape (N, H, W) containing predicted patches
+        positions: Array of shape (N, 2) containing (y, x) center positions in pixels
+        patch_size: Size of each patch (assumes square patches)
+        image_shape: Optional (H, W) output image size. If None, auto-calculated from positions.
+        batch_size: Number of patches to Fourier-shift at once (default 1024).
+        crop: Pixels to crop from each edge before stitching (default 64).
+              E.g. crop=64 turns 256x256 patches into 128x128 center crops.
+              Set to 0 to disable cropping.
+        pad: Fourier shift padding to avoid wrap-around artifacts (default 32).
+
+    Returns:
+        stitched: Full stitched image (averaged in overlapping regions)
+        counts: Number of overlapping patches at each pixel
+    """
+    # Crop edges to keep only reliable center region
+    if crop > 0:
+        patches = patches[:, crop:-crop, crop:-crop]
+        cropped_size = patch_size - 2 * crop
+    else:
+        cropped_size = patch_size
+    half_size = cropped_size // 2
+
+    # Convert to tensors
+    if not isinstance(patches, torch.Tensor):
+        patches = torch.from_numpy(patches).float()
+    if not isinstance(positions, torch.Tensor):
+        positions = torch.from_numpy(positions).float()
+
+    # Auto-calculate image shape from positions if not provided
+    if image_shape is None:
+        min_y = positions[:, 0].min() - half_size
+        max_y = positions[:, 0].max() + half_size
+        min_x = positions[:, 1].min() - half_size
+        max_x = positions[:, 1].max() + half_size
+
+        # Add padding (canvas_pad adds extra buffer on each side to prevent Fourier wrap-around at edges)
+        canvas_h = int(np.ceil(max_y - min_y)) + 2 + 2 * canvas_pad
+        canvas_w = int(np.ceil(max_x - min_x)) + 2 + 2 * canvas_pad
+        image_shape = (canvas_h, canvas_w)
+
+        # Offset positions to canvas coordinates (so min position is near origin)
+        offset_y = -min_y + 1 + canvas_pad
+        offset_x = -min_x + 1 + canvas_pad
+        positions = positions.clone()
+        positions[:, 0] = positions[:, 0] + offset_y
+        positions[:, 1] = positions[:, 1] + offset_x
+
+    n_patches = len(patches)
+    print(f"Stitching: {n_patches} patches ({cropped_size}x{cropped_size} after crop={crop}) "
+          f"-> {image_shape[0]}x{image_shape[1]} image")
+    print(f"  Position range after offset: Y=[{positions[:, 0].min():.1f}, {positions[:, 0].max():.1f}], "
+          f"X=[{positions[:, 1].min():.1f}, {positions[:, 1].max():.1f}]")
+
+    # Initialize accumulators
+    accumulated = torch.zeros(image_shape, dtype=patches.dtype)
+    counts = torch.zeros(image_shape, dtype=patches.dtype)
+
+    # Process in batches to avoid OOM from FFT intermediates
+    for start in range(0, n_patches, batch_size):
+        end = min(start + batch_size, n_patches)
+        batch_patches = patches[start:end]
+        batch_positions = positions[start:end]
+
+        # Accumulate patch values
+        accumulated = place_patches_fourier_shift(
+            accumulated, batch_positions, batch_patches, op="add",
+            adjoint_mode=False, pad=pad
+        )
+
+        # Accumulate overlap counts
+        ones = torch.ones_like(batch_patches)
+        counts = place_patches_fourier_shift(
+            counts, batch_positions, ones, op="add",
+            adjoint_mode=False, pad=pad
+        )
+
+        if (end - start == batch_size) and (end < n_patches):
+            print(f"  Placed {end}/{n_patches} patches...")
+
+    # Average overlapping regions (avoid division by zero)
+    counts_safe = torch.clamp(counts, min=1)
+    stitched = accumulated / counts_safe
+
+    # Convert back to numpy
+    stitched_np = stitched.numpy()
+    counts_np = counts.numpy()
+
+    print(f"  Stitched shape: {stitched_np.shape}")
+    print(f"  Max overlap: {counts_np.max():.0f} patches")
+
+    return stitched_np, counts_np
+
 def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, int]) -> Tensor:
     """
     Slice patches from an image at given window positions. The patch size is determined

@@ -90,6 +90,9 @@ def build_dataloader(data_path: str, config: dict, normalization_value: float, b
         cache_object=data_cfg.get("cache_object", True),
         max_probe_modes=data_cfg.get("max_probe_modes", 8),
         target_size=target_size,
+        # [MODIFIED] Fix #9: forward the transpose flag from config so the dataset
+        # extracts patches in the correct frame for HXN data.
+        transpose_object_patches=data_cfg.get("transpose_object_patches", False),
     )
     dataset.normalization = normalization_value
 
@@ -134,6 +137,13 @@ def run_inference_and_stitch(
 
             output_amp = output_amp.squeeze(1).detach().cpu()
             output_ph = output_ph.squeeze(1).detach().cpu()
+
+            # [MODIFIED] Fix #9: patches were transposed at extraction time to match
+            # the model's frame (HXN convention). Un-transpose before placing into the
+            # on-disk-frame canvas so overlapping patches stitch coherently.
+            if getattr(dataloader.dataset, 'transpose_object_patches', False):
+                output_amp = output_amp.transpose(-2, -1).contiguous()
+                output_ph  = output_ph.transpose(-2, -1).contiguous()
 
             amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
             ph_patches = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]

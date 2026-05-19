@@ -8,7 +8,7 @@ class WeightedLoss(nn.Module):
 
         Args:
             loss_type: Type of loss - 'mse' or 'mae' (default: 'mse')
-            threshold: Pixels below this value in BOTH input and target are ignored (default: 0.0)
+            threshold: Target pixels at or below this value are ignored (default: 0.0)
             alpha: Weight exponent controlling emphasis on low intensities (default: 1.0)
                    alpha=1 → inverse weighting (1/intensity)
         """
@@ -25,21 +25,17 @@ class WeightedLoss(nn.Module):
             input: Model output (predicted diffraction - no noise)
             target: Noisy diffraction pattern (with Poisson noise)
         """
-        # Create mask: include pixels where EITHER input OR target is above threshold
-        # This handles cases where Poisson noise zeros out low-intensity pixels
-        #mask = ((target > self.threshold) | (input > self.threshold)).float()
+        # [MODIFIED] Fix #2: mask and weights MUST come from `target` (the measurement),
+        # not from `input` (the prediction). Using the prediction here creates a
+        # positive-feedback loop: the model can minimize the loss by predicting ~0
+        # wherever it struggles, which masks those pixels out and removes the gradient
+        # signal. On HXN data with many true-zero detector pixels this was catastrophic.
+        mask = (target > self.threshold).float()
 
-        # Mask that includes pixels where ONLY input is above threshold
-        mask = (input > self.threshold).float()
-
-        # Compute weights based on input intensity where available
-        # For pixels where target is zero but prediction is non-zero,
-        # use the prediction intensity for weighting
-        #intensity_for_weighting = torch.where(target > self.threshold, target, input)
-
+        # Inverse-intensity weighting (Poisson-style): upweight dim *measured* pixels.
+        # Again use `target` so weighting is determined by the data, not the prediction.
         if self.alpha > 0:
-            #weight = mask / (intensity_for_weighting + 1e-6) ** self.alpha
-            weight = mask / (input + 1e-6) ** self.alpha
+            weight = mask / (target + 1e-6) ** self.alpha
         else:
             weight = mask  # Uniform weighting
 
