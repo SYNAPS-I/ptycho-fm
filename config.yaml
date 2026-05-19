@@ -2,15 +2,15 @@
 
 # Data Configuration
 data:
-  data_path: '/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed'
+  data_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272460_only'
   packed: false # set to true if using packed data
-  test_path: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/scan807_dp.hdf5'
+  test_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272458/272458_dp.hdf5'
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # If not specified or file not found, will use default normalization value
   # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
-  normalization_dict_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272452/normalization.pkl'
+  normalization_dict_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272460_only/normalization.pkl'
   # normalization_dict_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/scan807_test_data/normalization.pkl'
   test_normalization: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/converted_dp_para/272458/normalization.pkl'
   default_normalization: 100000.0
@@ -36,13 +36,13 @@ data:
   pin_memory: true  # Required for CUDAPrefetcher async transfer
   drop_last: true
   persistent_workers: true  # Keep workers alive across epochs
-  use_cuda_prefetcher: true  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
+  use_cuda_prefetcher: false  # Set to false to disable async CUDA prefetching (may fix CUDA sync issues)
 
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
-  learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  learning_rate: 1.0e-4  # Default learning rate (used if individual rates not specified)
   # Learning rate scheduler (optional)
   # scheduler_class accepts any torch.optim.lr_scheduler class name.
   # CosineAnnealingLR: smoothly decays LR to eta_min over T_max epochs — good default for a fixed epoch budget.
@@ -53,7 +53,7 @@ training:
     enabled: true
     scheduler_class: 'CosineAnnealingLR'  # swap to CosineAnnealingLR / ReduceLROnPlateau / StepLR / CyclicLR as needed
     kwargs:
-      T_max: 100       # CosineAnnealingLR: match total epochs
+      T_max: 1       # CosineAnnealingLR: match total epochs
       eta_min: 1.0e-5 # CosineAnnealingLR / ReduceLROnPlateau: floor LR
 
       # ReduceLROnPlateau options (uncomment when using that scheduler):
@@ -88,7 +88,7 @@ training:
   # amp_decoder_lr: 1.0e-4
   # ph_decoder_lr: 5.0e-5
 
-  epochs: 100  # Total epochs to train for (not additional epochs when resuming)
+  epochs: 1  # Total epochs to train for (not additional epochs when resuming)
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
 
   # Weighted loss configuration (only used when loss_function: 'weighted')
@@ -121,7 +121,8 @@ training:
   save_epoch_models: true
   # Save full training state (optimizer etc.) every N epochs; 0 disables (can be large for Adam).
   checkpoint_freq: 1
-  finetune_from_model: null
+  # finetune_from_model: null
+  finetune_from_model: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/20260323-ptycho-vit/Finetuning_results/best_model.pth'
 
   profile: false
 
@@ -168,7 +169,7 @@ model:
 
 # Paths
 paths:
-  model_save_path: '/pscratch/sd/s/shas1693/data/ptycho/models'
+  model_save_path: '/nsls2/data/hxn/legacy/home/home/SYNAPS/chengchu/20260323-ptycho-vit/Finetuning_results'
 
 # WandB Configuration
 wandb:
@@ -182,4 +183,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: '043002' # Ensure this is string type
+  run_num: '051901' # Ensure this is string type
