@@ -6,7 +6,6 @@ import numpy as np
 import h5py as h5
 import glob
 from scipy.ndimage import zoom as scipy_zoom
-from scipy.signal import windows
 
 
 def rescale_complex_array(arr, new_shape):
