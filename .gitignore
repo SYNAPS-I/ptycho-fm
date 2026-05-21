@@ -12,4 +12,9 @@ wandb/
 /workspace/
 
 # compiled python
-*.pyc
+*.pyc# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+train_data/
+checkpoints/
