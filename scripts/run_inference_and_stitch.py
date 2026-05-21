@@ -18,7 +18,11 @@ from data import PtychographyDataset  # noqa: E402
 from model.model import PtychoViT  # noqa: E402
 from development_logs.model512 import PtychoViT as PtychoViT512  # noqa: E402
 from development_logs.model_cnn import PtychoCNN, PtychoCNN256  # noqa: E402
-from utils.ptychi_utils import place_patches_fourier_shift  # noqa: E402
+from utils.ptychi_utils import (  # noqa: E402
+    make_hann_window,
+    place_patches_fourier_shift,
+    _place_patches_no_shift,
+)
 
 
 def load_config(path: str) -> dict:
@@ -113,73 +117,91 @@ def run_inference_and_stitch(
     pad: int,
     device: torch.device,
 ):
-    pred_amp_object = torch.zeros(object_shape, device="cpu")
-    pred_ph_object = torch.zeros(object_shape, device="cpu")
-    buffer = torch.zeros(object_shape, device="cpu")
+    # Canvases on `device` so FFT-based Fourier shifts run on GPU when available.
+    # Phase uses circular mean: accumulate weighted cos/sin to avoid ±π wrap artefacts.
+    pred_amp_object = torch.zeros(object_shape, device=device)
+    pred_ph_cos     = torch.zeros(object_shape, device=device)  # Σ w·cos(φ)
+    pred_ph_sin     = torch.zeros(object_shape, device=device)  # Σ w·sin(φ)
+    # Weight accumulator stays on CPU — integer scatter-add, no FFT needed.
+    weight_buffer   = torch.zeros(object_shape)  # CPU
 
     model.to(device)
     model.eval()
+
+    hann_window = None  # built lazily from first batch's patch size
+    hann_window_cpu = None
+
+    positions = positions.to(device)
 
     scan_idx = 0
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Inference", unit="batch"):
             diff_amp, _amp_patch, _ph_patch, probe, _probe_pos, norm, scale = batch
-            batch_size = diff_amp.size(0)
+            b = diff_amp.size(0)
 
-            input_diff = diff_amp.to(device)
+            input_diff  = diff_amp.to(device)
             input_probe = torch.view_as_real(probe.clone().detach()).to(device)
-            input_norm = norm.to(device)
+            input_norm  = norm.to(device)
             input_scale = scale.to(device)
 
             _output_diff, output_amp, output_ph = model(
                 input_diff, input_probe, input_norm, input_scale
             )
 
-            output_amp = output_amp.squeeze(1).detach().cpu()
-            output_ph = output_ph.squeeze(1).detach().cpu()
+            # Keep predictions on device — avoids CPU↔GPU round-trips.
+            output_amp = output_amp.squeeze(1).detach()
+            output_ph  = output_ph.squeeze(1).detach()
 
-            # [MODIFIED] Fix #9: patches were transposed at extraction time to match
-            # the model's frame (HXN convention). Un-transpose before placing into the
-            # on-disk-frame canvas so overlapping patches stitch coherently.
+            # [MODIFIED] Fix #9: un-transpose HXN patches before placing into canvas.
             if getattr(dataloader.dataset, 'transpose_object_patches', False):
                 output_amp = output_amp.transpose(-2, -1).contiguous()
                 output_ph  = output_ph.transpose(-2, -1).contiguous()
 
             amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
-            ph_patches = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]
+            ph_patches  = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]
 
-            batch_positions = positions[scan_idx : scan_idx + batch_size]
+            # Build Hann window once from the first batch's patch dimensions.
+            if hann_window is None:
+                h_p, w_p = amp_patches.shape[-2:]
+                hann_window     = make_hann_window(h_p, w_p, device=device)
+                hann_window_cpu = hann_window.cpu()
 
+            w_exp = hann_window.unsqueeze(0).expand(b, -1, -1)  # (B, H_p, W_p)
+
+            batch_positions = positions[scan_idx : scan_idx + b]
+
+            # Amplitude: Hann-weighted accumulation
             pred_amp_object = place_patches_fourier_shift(
-                pred_amp_object,
-                batch_positions,
-                amp_patches,
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
-            )
-            pred_ph_object = place_patches_fourier_shift(
-                pred_ph_object,
-                batch_positions,
-                ph_patches,
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
-            )
-            buffer = place_patches_fourier_shift(
-                buffer,
-                batch_positions,
-                torch.ones_like(ph_patches),
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
+                pred_amp_object, batch_positions, amp_patches * w_exp,
+                op="add", adjoint_mode=False, pad=pad,
             )
 
-            scan_idx += batch_size
+            # Phase: circular mean — accumulate weighted cos and sin separately
+            pred_ph_cos = place_patches_fourier_shift(
+                pred_ph_cos, batch_positions, torch.cos(ph_patches) * w_exp,
+                op="add", adjoint_mode=False, pad=pad,
+            )
+            pred_ph_sin = place_patches_fourier_shift(
+                pred_ph_sin, batch_positions, torch.sin(ph_patches) * w_exp,
+                op="add", adjoint_mode=False, pad=pad,
+            )
 
-    pred_amp_object = pred_amp_object / torch.clip(buffer, min=1)
-    pred_ph_object = pred_ph_object / torch.clip(buffer, min=1)
-    return pred_amp_object, pred_ph_object
+            # Weight: integer scatter-add on CPU (no FFT needed for denominator)
+            w_exp_cpu = hann_window_cpu.unsqueeze(0).expand(b, -1, -1)
+            weight_buffer = _place_patches_no_shift(
+                weight_buffer, batch_positions.cpu(), w_exp_cpu,
+            )
+
+            scan_idx += b
+
+    # Finalize amplitude: divide by accumulated Hann weights
+    safe_weight = torch.clamp(weight_buffer.to(device), min=1e-8)
+    pred_amp_object = pred_amp_object / safe_weight
+
+    # Finalize phase: circular mean = atan2(Σ w·sin φ, Σ w·cos φ)
+    pred_ph_object = torch.atan2(pred_ph_sin, pred_ph_cos)
+
+    return pred_amp_object.cpu(), pred_ph_object.cpu()
 
 
 def main():
@@ -211,8 +233,8 @@ def main():
     parser.add_argument(
         "--pad",
         type=int,
-        default=32,
-        help="Padding for Fourier-shift placement (default: 32).",
+        default=4,
+        help="Padding for Fourier-shift placement (default: 4).",
     )
     parser.add_argument(
         "--device",

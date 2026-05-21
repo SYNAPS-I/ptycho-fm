@@ -377,9 +377,9 @@ class Trainer(object):
 
         # [MODIFIED] added canvas_pad=64 to prevent Fourier wrap-around stripes at canvas edges
         pred_amp_np, _ = stitch_patches(pred_amp, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
-        pred_ph_np, _ = stitch_patches(pred_ph, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
-        gt_amp_np, _ = stitch_patches(gt_amp, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
-        gt_ph_np, _ = stitch_patches(gt_ph, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+        pred_ph_np, _  = stitch_patches(pred_ph,  positions, patch_size=patch_size, crop=central_crop, canvas_pad=64, mode="phase")
+        gt_amp_np, _   = stitch_patches(gt_amp,   positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
+        gt_ph_np, _    = stitch_patches(gt_ph,    positions, patch_size=patch_size, crop=central_crop, canvas_pad=64, mode="phase")
 
         pred_amp_object = torch.from_numpy(pred_amp_np)
         pred_ph_object = torch.from_numpy(pred_ph_np)
