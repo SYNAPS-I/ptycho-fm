@@ -13,8 +13,14 @@ combination of:
   - scan-position mapping (8 sign/swap variants)
   - position-anchor corner of the object (TL, TR, BL, BR)
   - source-DP semantics (amplitude vs intensity)
+  - object conjugation (False / True) — tests whether the stored complex
+    object has the correct phase sign relative to the forward model.
+    conj(o) gives a different |FFT(p*o)|^2 unless the probe is exactly
+    centrosymmetric; for a zone-plate probe this breaks the degeneracy.
+    Conjugation commutes with all D4 orientations so no equivalences are
+    lost by sweeping it independently.
 
-Total: 4 * 8 * 8 * 4 * 2 = 2048 combinations.
+Total: 4 * 8 * 8 * 4 * 2 * 2 = 4096 combinations.
 
 Each is scored via a forward model that simulates intensities as
 |fft2_unnormalized(probe * obj_patch)|^2 (matching ptycho-vit's forward
@@ -536,20 +542,27 @@ def sweep(data, n_eval_positions=64, rng_seed=0):
                 I_sim = bk.abs2(fft)
 
                 # Vectorised NCC against all 16 DP variants in one pass.
-                num = bk.sum(dp_variants * I_sim, axis=(1, 2, 3))   # (16,)
-                norm_sim = bk.sqrt(bk.sum(I_sim * I_sim))             # ()
-                scores = 1.0 - num / (norms_meas * norm_sim + 1e-30)
-                scores_np = bk.to_numpy(scores)
-
-                for vi, (dp_name, kind) in enumerate(variant_keys):
-                    results.append({
-                        'score': float(scores_np[vi]),
-                        'orient': orient_name,
-                        'pos_map': pm_name,
-                        'corner': corner,
-                        'dp_orient': dp_name,
-                        'dp_kind': kind,
-                    })
+                # Score both the object as-stored and its complex conjugate.
+                for conj_flag, I_sim_c in [
+                    (False, I_sim),
+                    (True,  bk.abs2(bk.fftshift(bk.fft2(
+                        bk.asarray(np.conj(patches_np)) * probe_t_bk
+                    )))),
+                ]:
+                    num_c = bk.sum(dp_variants * I_sim_c, axis=(1, 2, 3))   # (16,)
+                    norm_sim_c = bk.sqrt(bk.sum(I_sim_c * I_sim_c))         # ()
+                    scores_c = 1.0 - num_c / (norms_meas * norm_sim_c + 1e-30)
+                    scores_np_c = bk.to_numpy(scores_c)
+                    for vi, (dp_name, kind) in enumerate(variant_keys):
+                        results.append({
+                            'score': float(scores_np_c[vi]),
+                            'orient': orient_name,
+                            'pos_map': pm_name,
+                            'corner': corner,
+                            'dp_orient': dp_name,
+                            'dp_kind': kind,
+                            'conjugate': conj_flag,
+                        })
                 if outer_i % 32 == 0 or outer_i == n_outer:
                     print(f"  Forward-model batch {outer_i}/{n_outer}")
 
@@ -589,6 +602,8 @@ def write_outputs(data, best, out_dir, scan_id, write_chunk_size=128):
 
     obj = data['object']
     obj_t = np.stack([orient_fn(obj[s]) for s in range(obj.shape[0])], axis=0).astype(np.complex64)
+    if best.get('conjugate', False):
+        obj_t = np.conj(obj_t)
 
     xm, ym = pos_fn(data['x_positions_m'], data['y_positions_m'])
     cx, cy = map_positions_to_pixels(
@@ -643,6 +658,19 @@ def write_outputs(data, best, out_dir, scan_id, write_chunk_size=128):
         f.create_dataset('probe_position_indexes', data=np.arange(xm.shape[0]))
         f.create_dataset('probe_position_x_m', data=x_out_m)
         f.create_dataset('probe_position_y_m', data=y_out_m)
+        # Record the sweep result as root-level attributes so the provenance
+        # of every transform applied to the stored data is inspectable with
+        # h5py / h5dump without needing the sweep report file.
+        # NOTE: the object and probe are already stored *after* all transforms
+        # have been applied (orient, conjugate). These attrs are for auditing
+        # only — downstream code does not need to re-apply them.
+        f.attrs['hxn_to_vit_sweep_score']     = best['score']
+        f.attrs['hxn_to_vit_orient']          = best['orient']
+        f.attrs['hxn_to_vit_pos_map']         = best['pos_map']
+        f.attrs['hxn_to_vit_corner']          = best['corner']
+        f.attrs['hxn_to_vit_dp_orient']       = best['dp_orient']
+        f.attrs['hxn_to_vit_dp_kind']         = best['dp_kind']
+        f.attrs['hxn_to_vit_conjugate']       = bool(best.get('conjugate', False))
 
     return dp_path, para_path, pkl_path, txt_path
 
@@ -656,15 +684,17 @@ def write_report(results, out_dir, scan_id, best):
         f.write(f"  pos_map:       {best['pos_map']}\n")
         f.write(f"  corner:        {best['corner']}\n")
         f.write(f"  dp_orient:     {best['dp_orient']}\n")
-        f.write(f"  dp_kind:       {best['dp_kind']}\n\n")
+        f.write(f"  dp_kind:       {best['dp_kind']}\n")
+        f.write(f"  conjugate:     {best.get('conjugate', False)}\n\n")
         f.write(f"All {len(results)} combinations ranked (lower score = better match):\n")
         hdr = (f"{'rank':>5} {'score':>14} {'orient':>15} "
-               f"{'pos_map':>9} {'corner':>7} {'dp_orient':>15} {'dp_kind':>10}\n")
+               f"{'pos_map':>9} {'corner':>7} {'dp_orient':>15} {'dp_kind':>10} {'conj':>6}\n")
         f.write(hdr)
         for i, r in enumerate(results):
             f.write(
                 f"{i+1:>5} {r['score']:>14.6g} {r['orient']:>15} "
-                f"{r['pos_map']:>9} {r['corner']:>7} {r['dp_orient']:>15} {r['dp_kind']:>10}\n"
+                f"{r['pos_map']:>9} {r['corner']:>7} {r['dp_orient']:>15} {r['dp_kind']:>10} "
+                f"{str(r.get('conjugate', False)):>6}\n"
             )
     return path
 
@@ -700,13 +730,15 @@ def main():
         len(ORIENT_SWEEP_KEYS)                  # orient (probe=obj), non-transpose coset
         * len(POSITION_MAPS) * len(CORNERS)
         * len(ORIENTATIONS) * len(DP_KINDS)
+        * 2                                      # conjugate object: False / True
     )
     print(f"Sweeping {n_combos} combinations with {args.n_eval_positions} eval positions...")
     results = sweep(data, n_eval_positions=args.n_eval_positions, rng_seed=args.rng_seed)
     best = results[0]
     print(f"Best: score={best['score']:.6g}  orient={best['orient']}  "
           f"pos={best['pos_map']}  corner={best['corner']}  "
-          f"dp={best['dp_orient']}  kind={best['dp_kind']}")
+          f"dp={best['dp_orient']}  kind={best['dp_kind']}  "
+          f"conjugate={best.get('conjugate', False)}")
 
     dp_path, para_path, pkl_path, txt_path = write_outputs(
         data, best, args.out_dir, args.scan_id,

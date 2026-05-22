@@ -11,8 +11,9 @@ from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 
 from datetime import datetime
 import time
-# [MODIFIED] added stitch_patches import for use in generate_test_plot
-from utils.ptychi_utils import stitch_patches
+# [MODIFIED] added stitch_patches / stitch_patches_multi import for use in generate_test_plot
+from utils.ptychi_utils import stitch_patches, stitch_patches_multi
+from prefetcher import CUDAPrefetcher
 
 import wandb
 
@@ -322,8 +323,20 @@ class Trainer(object):
         gt_ph = torch.zeros(pred_amp.shape, device='cpu')
         scan_idx = 0
 
+        # Probe-intensity weight for stitching — extracted from the first batch.
+        # |probe|² is zero outside the beam and peaks where illumination is
+        # strongest, so it suppresses the model's uninformative predictions
+        # outside the actual probe support.  Normalised to max == 1.
+        probe_weight = None  # (H_p, W_p) float tensor, set on first batch
+
+        # [MODIFIED] wrap with CUDAPrefetcher to hide H2D transfer latency during inference
+        if self.device.type == "cuda":
+            inference_loader = CUDAPrefetcher(dataloader, self.device)
+        else:
+            inference_loader = dataloader
+
         with torch.no_grad():
-            for i, batch in enumerate(dataloader):
+            for i, batch in enumerate(inference_loader):
                 if isinstance(batch, (list, tuple)) and len(batch) == 8:
                     diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
                 else:
@@ -343,6 +356,14 @@ class Trainer(object):
                 p_ph  = output_ph.squeeze(1).detach().cpu()
                 g_amp = amp_patch.squeeze(1).detach().cpu()
                 g_ph  = ph_patch.squeeze(1).detach().cpu()
+
+                # Build probe weight once (probe is position-independent)
+                if probe_weight is None:
+                    pw = probe.abs().pow(2).sum(dim=1)[0].cpu()  # (H_probe, W_probe)
+                    pw_max = pw.max()
+                    if pw_max > 0:
+                        pw = pw / pw_max
+                    probe_weight = pw  # stored at full patch size; crop applied in stitch_patches
                 # [MODIFIED] Fix #9: patches were transposed at extraction time to put
                 # them in the model's frame (HXN convention). Un-transpose before placing
                 # into the on-disk-frame canvas so adjacent patches overlap coherently.
@@ -369,17 +390,26 @@ class Trainer(object):
         if central_crop < 0:
             raise ValueError("test_plot central_crop must be >= 0.")
 
-        # [MODIFIED] replaced manual place_patches_fourier_shift + divide-by-buffer block
-        # with stitch_patches, which auto-calculates canvas size from position range
-        # (fixes corner-placement bug where patches appeared in bottom-right corner)
         positions = dataloader.dataset._cached_probe_positions
         patch_size = pred_amp.shape[-1]
 
-        # [MODIFIED] added canvas_pad=64 to prevent Fourier wrap-around stripes at canvas edges
-        pred_amp_np, _ = stitch_patches(pred_amp, positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
-        pred_ph_np, _  = stitch_patches(pred_ph,  positions, patch_size=patch_size, crop=central_crop, canvas_pad=64, mode="phase")
-        gt_amp_np, _   = stitch_patches(gt_amp,   positions, patch_size=patch_size, crop=central_crop, canvas_pad=64)
-        gt_ph_np, _    = stitch_patches(gt_ph,    positions, patch_size=patch_size, crop=central_crop, canvas_pad=64, mode="phase")
+        # [MODIFIED] stitch_patches_multi processes all 4 maps in a single loop:
+        # shared canvas setup, shared weight accumulation, GPU FFTs via device=self.device
+        stitch_results = stitch_patches_multi(
+            [
+                {"patches": pred_amp, "mode": "amplitude", "label": "pred amplitude"},
+                {"patches": pred_ph,  "mode": "phase",     "label": "pred phase"},
+                {"patches": gt_amp,   "mode": "amplitude", "label": "gt amplitude"},
+                {"patches": gt_ph,    "mode": "phase",     "label": "gt phase"},
+            ],
+            positions,
+            patch_size=patch_size,
+            crop=central_crop,
+            canvas_pad=64,
+            device=self.device,
+            patch_weights=probe_weight,
+        )
+        (pred_amp_np, _), (pred_ph_np, _), (gt_amp_np, _), (gt_ph_np, _) = stitch_results
 
         pred_amp_object = torch.from_numpy(pred_amp_np)
         pred_ph_object = torch.from_numpy(pred_ph_np)

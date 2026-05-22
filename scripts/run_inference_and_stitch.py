@@ -19,7 +19,6 @@ from model.model import PtychoViT  # noqa: E402
 from development_logs.model512 import PtychoViT as PtychoViT512  # noqa: E402
 from development_logs.model_cnn import PtychoCNN, PtychoCNN256  # noqa: E402
 from utils.ptychi_utils import (  # noqa: E402
-    make_hann_window,
     place_patches_fourier_shift,
     _place_patches_no_shift,
 )
@@ -31,15 +30,21 @@ def load_config(path: str) -> dict:
 
 
 def resolve_model_and_size(config: dict):
-    model_type = config.get("model", {}).get("model_type", "vit256")
     model_cfg = config.get("model", {})
+    model_type = model_cfg.get("model_type", None)
+
+    # Flat config format used by main.py (encoder_type key at model top-level).
+    if model_type is None and "encoder_type" in model_cfg:
+        model = PtychoViT(config=model_cfg)
+        img_size = model_cfg.get("encoder", {}).get("img_size", 256)
+        return model, img_size
 
     if model_type == "vit":
         model = PtychoViT512(config=model_cfg["vit"])
         img_size = model_cfg["vit"]["encoder"]["img_size"]
-    elif model_type == "vit256":
-        model = PtychoViT(config=model_cfg["vit256"])
-        img_size = model_cfg["vit256"]["encoder"]["img_size"]
+    elif model_type == "vit256" or model_type is None:
+        model = PtychoViT(config=model_cfg.get("vit256", model_cfg))
+        img_size = model_cfg.get("vit256", model_cfg).get("encoder", {}).get("img_size", 256)
     elif model_type == "cnn":
         model = PtychoCNN(config=model_cfg["cnn"])
         img_size = 512
@@ -73,17 +78,20 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device) -> None:
 
 def build_dataloader(data_path: str, config: dict, normalization_value: float, batch_size: int):
     data_cfg = config.get("data", {})
-    model_type = config.get("model", {}).get("model_type", "vit256")
+    model_cfg = config.get("model", {})
     target_size = data_cfg.get("target_size")
     if target_size is None:
-        if model_type == "vit":
-            target_size = config["model"]["vit"]["encoder"]["img_size"]
-        elif model_type == "vit256":
-            target_size = config["model"]["vit256"]["encoder"]["img_size"]
-        elif model_type == "cnn256":
+        # Flat config format (encoder_type at model top-level, used by main.py / run009+)
+        if "encoder_type" in model_cfg:
+            target_size = model_cfg.get("encoder", {}).get("img_size", 256)
+        elif "vit" in model_cfg:
+            target_size = model_cfg["vit"]["encoder"]["img_size"]
+        elif "vit256" in model_cfg:
+            target_size = model_cfg["vit256"]["encoder"]["img_size"]
+        elif "cnn256" in model_cfg:
             target_size = 256
         else:
-            target_size = 512
+            target_size = 256
 
     dataset = PtychographyDataset(
         data_path,
@@ -100,10 +108,16 @@ def build_dataloader(data_path: str, config: dict, normalization_value: float, b
     )
     dataset.normalization = normalization_value
 
+    use_cuda = torch.cuda.is_available()
+    # Each worker opens its own lazy HDF5 handles — safe with SWMR mode.
+    # num_workers > 0 lets patch extraction (FFTs) run in parallel with GPU forward passes.
+    num_workers = min(8, os.cpu_count() or 4)
     dataloader_kwargs = {
         "batch_size": batch_size,
-        "num_workers": 0,
-        "pin_memory": False,
+        "num_workers": num_workers,
+        "pin_memory": use_cuda,
+        "persistent_workers": num_workers > 0,
+        "prefetch_factor": 2 if num_workers > 0 else None,
     }
     return dataset, DataLoader(dataset, shuffle=False, **dataloader_kwargs)
 
@@ -128,8 +142,13 @@ def run_inference_and_stitch(
     model.to(device)
     model.eval()
 
-    hann_window = None  # built lazily from first batch's patch size
-    hann_window_cpu = None
+    # Probe-intensity weight: computed from the first batch and reused for all.
+    # |probe|² encodes where the beam was illuminating — it is zero outside the
+    # beam support and peaks where illumination is strongest, automatically
+    # adapting to any probe geometry (zone-plate annulus, Gaussian, Airy, …).
+    # This replaces the generic Hann window and is physically motivated.
+    probe_weight     = None   # (H_p, W_p) float, on device
+    probe_weight_cpu = None   # CPU copy for integer weight accumulation
 
     positions = positions.to(device)
 
@@ -157,20 +176,35 @@ def run_inference_and_stitch(
                 output_amp = output_amp.transpose(-2, -1).contiguous()
                 output_ph  = output_ph.transpose(-2, -1).contiguous()
 
-            amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
-            ph_patches  = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]
+            if central_crop > 0:
+                amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
+                ph_patches  = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]
+            else:
+                amp_patches = output_amp
+                ph_patches  = output_ph
 
-            # Build Hann window once from the first batch's patch dimensions.
-            if hann_window is None:
-                h_p, w_p = amp_patches.shape[-2:]
-                hann_window     = make_hann_window(h_p, w_p, device=device)
-                hann_window_cpu = hann_window.cpu()
+            # Build probe-intensity weight once from the first batch.
+            # Probe is position-independent (same illumination at every scan point),
+            # so we need only one weight map.
+            if probe_weight is None:
+                # Sum over all leading dims (modes, slices) to get (H, W).
+                # Probe from the dataloader has shape (B, n_modes, [n_slices,] H, W);
+                # take first batch item then flatten everything above the spatial dims.
+                pw = probe[0].to(device).abs().pow(2)  # (n_modes, [n_slices,] H, W)
+                pw = pw.reshape(-1, pw.shape[-2], pw.shape[-1]).sum(dim=0)  # (H, W)
+                if central_crop > 0:
+                    pw = pw[central_crop:-central_crop, central_crop:-central_crop]
+                pw_max = pw.max()
+                if pw_max > 0:
+                    pw = pw / pw_max
+                probe_weight     = pw                    # (H_p, W_p) on device
+                probe_weight_cpu = probe_weight.cpu()
 
-            w_exp = hann_window.unsqueeze(0).expand(b, -1, -1)  # (B, H_p, W_p)
+            w_exp = probe_weight.unsqueeze(0).expand(b, -1, -1)  # (B, H_p, W_p)
 
             batch_positions = positions[scan_idx : scan_idx + b]
 
-            # Amplitude: Hann-weighted accumulation
+            # Amplitude: probe-weighted accumulation
             pred_amp_object = place_patches_fourier_shift(
                 pred_amp_object, batch_positions, amp_patches * w_exp,
                 op="add", adjoint_mode=False, pad=pad,
@@ -187,14 +221,14 @@ def run_inference_and_stitch(
             )
 
             # Weight: integer scatter-add on CPU (no FFT needed for denominator)
-            w_exp_cpu = hann_window_cpu.unsqueeze(0).expand(b, -1, -1)
+            w_exp_cpu = probe_weight_cpu.unsqueeze(0).expand(b, -1, -1)
             weight_buffer = _place_patches_no_shift(
                 weight_buffer, batch_positions.cpu(), w_exp_cpu,
             )
 
             scan_idx += b
 
-    # Finalize amplitude: divide by accumulated Hann weights
+    # Finalize amplitude: divide by accumulated probe weights
     safe_weight = torch.clamp(weight_buffer.to(device), min=1e-8)
     pred_amp_object = pred_amp_object / safe_weight
 
@@ -206,17 +240,21 @@ def run_inference_and_stitch(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run inference and stitch predicted patches into a whole-object image."
+        description="Run inference and stitch predicted patches into whole-object TIFFs."
     )
     parser.add_argument("--config", required=True, help="Path to config YAML.")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")
     parser.add_argument("--data", required=True, help="Path to *_dp.hdf5 data file.")
-    parser.add_argument("--output", required=True, help="Path to output TIFF.")
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output path stem (no extension). Two TIFFs are written: <stem>_phase.tif and <stem>_amp.tif.",
+    )
     parser.add_argument(
         "--output-kind",
-        default="phase",
-        choices=["phase", "amplitude"],
-        help="Which stitched output to write.",
+        default=None,
+        choices=["phase", "amplitude", None],
+        help="Deprecated: both phase and amplitude are always written. Ignored if provided.",
     )
     parser.add_argument(
         "--batch-size",
@@ -259,14 +297,37 @@ def main():
     else:
         central_crop = args.central_crop
 
-    with h5py.File(args.data, "r") as f:
-        if "dp" not in f:
-            raise KeyError(f"Missing 'dp' dataset in {args.data}")
-        normalization_value = compute_dp_max(f["dp"])
+    # Resolve normalization: prefer the *_max_intensity.pkl next to the dp file.
+    data_path = Path(args.data)
+    scan_stem = data_path.stem.replace("_dp", "")
+    pkl_path = data_path.parent / f"{scan_stem}_max_intensity.pkl"
+    if pkl_path.exists():
+        import pickle
+        with open(pkl_path, "rb") as _pkl:
+            norm_dict = pickle.load(_pkl)
+        normalization_value = float(next(iter(norm_dict.values())))
+        print(f"Normalization from {pkl_path.name}: {normalization_value:.6g}")
+    else:
+        with h5py.File(args.data, "r") as f:
+            if "dp" not in f:
+                raise KeyError(f"Missing 'dp' dataset in {args.data}")
+            normalization_value = compute_dp_max(f["dp"])
+        print(f"Normalization from dp max scan: {normalization_value:.6g}")
 
     dataset, dataloader = build_dataloader(
         args.data, config, normalization_value, batch_size
     )
+
+    # Check whether hxn_to_vit applied complex conjugation to the stored object.
+    # If so, the model has learned to predict conjugated (sign-flipped) phase;
+    # negate the stitched phase after inference to recover physical convention.
+    conjugate_object = False
+    with h5py.File(dataset.para_file, "r") as _pf:
+        if 'hxn_to_vit_conjugate' in _pf.attrs:
+            conjugate_object = bool(_pf.attrs['hxn_to_vit_conjugate'])
+            if conjugate_object:
+                print("[info] para.hdf5 was written with conjugate=True; "
+                      "stitched phase will be negated to restore physical convention.")
 
     if dataset._cached_probe_positions is None:
         dataset._cache_positions()
@@ -286,11 +347,25 @@ def main():
         device,
     )
 
-    stitched = pred_ph_object if args.output_kind == "phase" else pred_amp_object
-    output_dir = os.path.dirname(args.output)
+    if conjugate_object:
+        pred_ph_object = -pred_ph_object
+
+    # Strip any .tif/.tiff extension from the stem so the user can pass either
+    # a bare stem or a full filename and get consistent output names.
+    output_stem = args.output
+    for ext in (".tif", ".tiff"):
+        if output_stem.lower().endswith(ext):
+            output_stem = output_stem[: -len(ext)]
+
+    output_dir = os.path.dirname(output_stem)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    tifffile.imwrite(args.output, stitched.numpy().astype(np.float32))
+
+    phase_path = f"{output_stem}_phase.tif"
+    amp_path   = f"{output_stem}_amp.tif"
+    tifffile.imwrite(phase_path, pred_ph_object.numpy().astype(np.float32))
+    tifffile.imwrite(amp_path,   pred_amp_object.numpy().astype(np.float32))
+    print(f"Wrote:\n  {phase_path}\n  {amp_path}")
 
 
 if __name__ == "__main__":

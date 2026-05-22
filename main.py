@@ -703,8 +703,17 @@ if FINETUNE_PATH:
         model.module.load_state_dict(state)
     else:
         model.load_state_dict(state)
+    # log_scale_amp and log_scale_ph are nn.Parameters so load_state_dict
+    # overwrites whatever the config set.  Re-apply config values now so the
+    # scale parameters reflect the current run, not the source checkpoint.
+    _finetune_model = model.module if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)) else model
+    _model_cfg = config.get('model', {})
+    import math as _math
+    _finetune_model.log_scale_amp.data.fill_(_math.log(_model_cfg.get('amp_scale', 0.1)))
+    _finetune_model.log_scale_ph.data.fill_(_math.log(_model_cfg.get('ph_scale', _math.pi)))
     if is_main_process:
-        print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)        
+        print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)
+        print(f"  amp_scale={_model_cfg.get('amp_scale', 0.1)}, amp_offset={_model_cfg.get('amp_offset', 0.975)}, ph_scale={_model_cfg.get('ph_scale', _math.pi):.5f}", flush=True)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Loss, optimizer, metrics, trainer
@@ -759,6 +768,20 @@ if lr_sched_cfg.get('enabled', False):
 else:
     if is_main_process:
         print("\nLR scheduler: disabled (constant LR)", flush=True)  # [MODIFIED] confirm no scheduler at startup
+
+# Optional linear warmup scheduler — runs for warmup_epochs before the main scheduler takes over.
+warmup_epochs = lr_sched_cfg.get('warmup_epochs', 0)
+warmup_scheduler = None
+if warmup_epochs > 0 and scheduler is not None:
+    warmup_start_factor = lr_sched_cfg.get('warmup_start_factor', 0.1)
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=warmup_start_factor,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    if is_main_process:
+        print(f"LR warmup: {warmup_epochs} epochs, start_factor={warmup_start_factor}", flush=True)
 
 if is_main_process:
     print("\nOptimizer learning rates:", flush=True)
@@ -998,7 +1021,9 @@ try:
         if is_main_process:
             print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
         trainer.validate(val_prefetcher, criterion, optimizer, metrics, 
-            plot=plot, epoch=epoch, scheduler=scheduler, profile=profile)
+            plot=plot, epoch=epoch,
+            scheduler=warmup_scheduler if (warmup_scheduler and epoch < warmup_epochs) else scheduler,
+            profile=profile)
 
         # Generate test plot only on main process
         if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and (not profile) and test_loader is not None:
