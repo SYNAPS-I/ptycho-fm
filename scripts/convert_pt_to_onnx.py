@@ -35,6 +35,7 @@ class ExportConfig:
     dynamic_batch: bool
     output_kind: str
     verify: bool
+    probe_path: Path | None
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -259,7 +260,19 @@ def build_reconstruction_wrapper(
     amp_offset: float | None = None,
     amp_scale: float | None = None,
     ph_scale: float | None = None,
+    probe: Any | None = None,
 ) -> Any:
+    """Wrap the trained PtychoViT base model into an edge-inference module.
+
+    The wrapper applies the input log transform, runs encoder + decoders,
+    and returns the post-scaled amp/phase predictions. When ``probe`` is
+    given (a complex tensor in the object frame), the probe's real and
+    imaginary parts are registered as buffers so they bake into the ONNX
+    graph as constants and the module returns them as two additional
+    outputs. Downstream consumers (e.g. the live orientation
+    auto-detector) can then run forward-physics consistency without
+    needing a sidecar probe file — the engine carries it.
+    """
     import torch
     import torch.nn as nn
 
@@ -268,6 +281,7 @@ def build_reconstruction_wrapper(
             super().__init__()
             self.base = base_model
             self.output_kind = output_kind
+            self._has_probe = probe is not None
 
             if amp_scale is not None:
                 self.register_buffer(
@@ -295,6 +309,28 @@ def build_reconstruction_wrapper(
                 torch.tensor(float(resolved_amp_offset), dtype=torch.float32),
             )
 
+            if probe is not None:
+                # Probe is a (H, W) complex tensor in the probe/object frame.
+                # Split into float32 real + imag buffers so the ONNX graph
+                # carries them as Constant nodes — no complex dtype needed
+                # in ONNX, and TensorRT exposes each as a regular output.
+                probe_tensor = probe
+                if not torch.is_tensor(probe_tensor):
+                    probe_tensor = torch.as_tensor(probe_tensor)
+                if probe_tensor.ndim != 2:
+                    raise ValueError(
+                        f"probe must be a 2D complex tensor (H, W); got shape "
+                        f"{tuple(probe_tensor.shape)}"
+                    )
+                self.register_buffer(
+                    "_probe_real",
+                    torch.real(probe_tensor).to(torch.float32).contiguous(),
+                )
+                self.register_buffer(
+                    "_probe_imag",
+                    torch.imag(probe_tensor).to(torch.float32).contiguous(),
+                )
+
         def forward(self, diffraction: Any) -> Any:
             diffraction = 2 * torch.log10(diffraction + 1.0e-1)
             latent = self.base.encoder(diffraction)
@@ -316,12 +352,20 @@ def build_reconstruction_wrapper(
             ph = constrained_ph * ph_scale_t
 
             if self.output_kind == "amplitude":
-                return amp.unsqueeze(1)
-            if self.output_kind == "phase":
-                return ph.unsqueeze(1)
-            if self.output_kind == "amp_phase":
-                return torch.stack([amp, ph], dim=1)
-            raise ValueError(f"Unsupported output kind: {self.output_kind}")
+                primary = amp.unsqueeze(1)
+            elif self.output_kind == "phase":
+                primary = ph.unsqueeze(1)
+            elif self.output_kind == "amp_phase":
+                primary = torch.stack([amp, ph], dim=1)
+            else:
+                raise ValueError(f"Unsupported output kind: {self.output_kind}")
+
+            if self._has_probe:
+                # Touch the buffer with an op so torch.onnx.export tracks
+                # it as a graph output rather than dead-code-eliminating
+                # it. ``+ 0`` is a no-op that survives ONNX export.
+                return primary, self._probe_real + 0, self._probe_imag + 0
+            return primary
 
     return PtychoViTReconstruction(model)
 
@@ -363,17 +407,55 @@ def export_onnx(config: ExportConfig) -> None:
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
+    probe_tensor = None
+    if config.probe_path is not None:
+        import numpy as np
+
+        probe_arr = np.load(config.probe_path)
+        # Accept (H, W) or (n_modes, H, W); use mode 0 for the forward
+        # model. The bake-in is for a single-mode probe; multi-mode probes
+        # would need a different forward formulation downstream.
+        if probe_arr.ndim == 3:
+            probe_arr = probe_arr[0]
+        elif probe_arr.ndim != 2:
+            raise ValueError(
+                f"probe at {config.probe_path} must be 2D or 3D (n_modes,H,W); "
+                f"got ndim={probe_arr.ndim}, shape={probe_arr.shape}"
+            )
+        if not np.iscomplexobj(probe_arr):
+            raise ValueError(
+                f"probe at {config.probe_path} must be a complex array; got "
+                f"dtype={probe_arr.dtype}"
+            )
+        probe_tensor = torch.from_numpy(probe_arr)
+        ph, pw = probe_tensor.shape
+        img_size_check = int(model_cfg["encoder"]["img_size"])
+        if (ph, pw) != (img_size_check, img_size_check):
+            raise ValueError(
+                f"probe spatial shape ({ph}, {pw}) must match the model's "
+                f"img_size ({img_size_check}, {img_size_check}); resize the "
+                f"probe before exporting."
+            )
+
     wrapper = build_reconstruction_wrapper(
         model,
         config.output_kind,
         amp_offset=export_overrides.get("amp_offset"),
         amp_scale=export_overrides.get("amp_scale"),
         ph_scale=export_overrides.get("ph_scale"),
+        probe=probe_tensor,
     )
     wrapper.eval()
 
     img_size = int(model_cfg["encoder"]["img_size"])
     dummy = torch.rand(config.batch_size, 1, img_size, img_size, dtype=torch.float32)
+
+    # Output names follow the wrapper's return tuple. The probe tensors
+    # are constant across batches, so they aren't included in
+    # ``dynamic_axes`` (only the primary output's batch dim is dynamic).
+    output_names = ["output"]
+    if probe_tensor is not None:
+        output_names.extend(["probe_real", "probe_imag"])
 
     dynamic_axes: dict[str, dict[int, str]] | None = None
     if config.dynamic_batch:
@@ -385,7 +467,7 @@ def export_onnx(config: ExportConfig) -> None:
         dummy,
         str(config.output_path),
         input_names=["input"],
-        output_names=["output"],
+        output_names=output_names,
         opset_version=config.opset,
         do_constant_folding=True,
         dynamic_axes=dynamic_axes,
@@ -397,7 +479,8 @@ def export_onnx(config: ExportConfig) -> None:
         onnx_model = onnx.load(str(config.output_path))
         onnx.checker.check_model(onnx_model)
 
-    print(f"Exported ONNX model to {config.output_path}")
+    extras = " (with baked probe)" if probe_tensor is not None else ""
+    print(f"Exported ONNX model to {config.output_path}{extras}")
 
 
 def parse_args() -> ExportConfig:
@@ -440,6 +523,21 @@ def parse_args() -> ExportConfig:
         action="store_true",
         help="Skip ONNX checker validation after export.",
     )
+    parser.add_argument(
+        "--probe",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a complex probe .npy (2D ``(H, W)`` or 3D "
+            "``(n_modes, H, W)`` — mode 0 is used). When provided, the "
+            "probe's real and imaginary parts are baked into the ONNX graph "
+            "as Constant nodes and exposed as additional model outputs "
+            "(``probe_real``, ``probe_imag``). The live orientation "
+            "auto-detector reads these to run forward-physics consistency, "
+            "which resolves the slow-axis sign ambiguity that "
+            "self-consistency leaves degenerate."
+        ),
+    )
     args = parser.parse_args()
 
     return ExportConfig(
@@ -451,6 +549,7 @@ def parse_args() -> ExportConfig:
         dynamic_batch=bool(args.dynamic_batch),
         output_kind=args.output_kind,
         verify=not bool(args.no_verify),
+        probe_path=(args.probe.expanduser().resolve() if args.probe is not None else None),
     )
 
 
