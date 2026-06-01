@@ -16,8 +16,9 @@ CONFIGS = [
     (1024, 16),
     (1024, 24),
     (1536, 16),
-    (1536, 32),
-    (2048, 48),
+    (1536, 24),
+    # (2048, 24),
+    # (2048, 32),
 ]
 
 PATCH_SIZES = [16]
@@ -25,8 +26,8 @@ GLOBAL_BATCH_SIZE = 512
 FORWARD_BACKWARD_FACTOR = 3
 
 BUDGETS = [6e17, 1e18, 3e18, 6e18, 1e19, 3e19, 6e19]
-MIN_ITERS = 1000
-MAX_ITERS = 120_000
+MIN_ITERS = 4000
+MAX_ITERS = 400_000
 
 
 def decoder_num_stages(img_size: int, patch_size: int) -> int:
