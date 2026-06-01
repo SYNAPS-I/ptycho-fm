@@ -18,7 +18,7 @@ data:
   max_probe_modes: 10  # Maximum number of probe modes to pad to
   target_size: 256  # Target size for diffraction patterns (pads smaller patterns, upsamples probe)
 
-  train_split: 0.80  # Fraction of data for training (20% held out for validation/test)
+  train_split: 0.975  # Fraction of data for training (2.5% held out for validation/test)
   random_seed: 8
   # Optional: use only the first fraction of samples from the full dataset (0 < fraction <= 1)
   # subset_fraction: 0.1
@@ -41,14 +41,24 @@ data:
 # Training Configuration
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
-  batch_size: 64
-  valid_batch_size: 256
-  learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
+  batch_size: 32
+  valid_batch_size: 32
+  learning_rate: 1.0e-6  # Default learning rate (used if individual rates not specified)
   # Optional: learning rate scheduler
+  # Two scheduler classes are supported:
+  #   warmup-stable  – linear warmup then constant LR (for long pretraining runs)
+  #   cooldown       – sqrt decay LR to 0 in this phase
+  # Optional: cooldown scheduler configuration
+  #  scheduler_class: 'cooldown'
+  #  kwargs:
+  #    branch_from: '/pscratch/sd/s/shas1693/data/ptycho/models/runlr1em6/state_iters_52000.pth'
+  #    cooldown_steps: 4000
+  # Use a different run_num and run_name from the pretraining run for cooldowns
   lr_scheduler:
-    enabled: false
-    scheduler_class: 'CyclicLR'
-    kwargs: {}
+    enabled: true
+    scheduler_class: 'warmup-stable'
+    kwargs:
+      warmup_steps: 2000
   # Optional: per-epoch subsetting of the training set only (validation unaffected)
   data_subsetting_schedule:
     enabled: false
@@ -61,8 +71,8 @@ training:
   # amp_decoder_lr: 1.0e-6
   # ph_decoder_lr: 1.0e-6
 
-  epochs: 5  # Total epochs to train for (not additional epochs when resuming)
-  log_every: 2000 # Log every N iterations
+  epochs: 100  # Total epochs to train for (not additional epochs when resuming)
+  log_every: 4000 # Log every N iterations
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
@@ -110,7 +120,7 @@ model:
     num_heads: 8
     mlp_ratio: 4.0
     use_cls_token: false
-    dropout: 0.1
+    dropout: 0.0
     attn_dropout: 0.0
     # Pretrained source
     timm_model_name: 'vit_large_patch32_224' #initialization with ViT_L_32 model weights'
@@ -124,7 +134,7 @@ model:
     latent_dim: 512
     num_stages: 4        # 8x8 → 256x256 for patch_size=32
     use_batchnorm: true
-    dropout: 0.1
+    dropout: 0.0
 
 # Paths
 paths:
@@ -137,9 +147,10 @@ wandb:
   project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
-  run_name: 'base-iter'
+  run_name: 'lr1em6'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 'iter'
+  run_num: 'lr1em6'
+

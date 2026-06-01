@@ -20,7 +20,7 @@ export PROFILE_CMD="nsys profile $NSYS_ARGS -o $PROFILE_DIR/iter"
 # Run command
 cmd="$PROFILE_CMD python main_iters.py --config config.yaml"
 
-nodes=1
+nodes=4
 ngpu=4 # number of GPUs (single node)
 srun -u --mpi=pmi2 \
   -N $nodes \

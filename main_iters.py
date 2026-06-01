@@ -57,6 +57,17 @@ EPOCHS = config['training']['epochs']
 MODEL_SAVE_PATH = config['paths']['model_save_path']
 FINETUNE_PATH = config['training'].get('finetune_from_model')
 
+# Detect cooldown run: a separate, always-fresh fine-tuning pass that decays LR to zero.
+# Branch point (model weights) and decay length come from lr_scheduler.kwargs.
+_lr_sched_cfg = config['training'].get('lr_scheduler', {})
+is_cooldown_run = (
+    _lr_sched_cfg.get('enabled', False)
+    and str(_lr_sched_cfg.get('scheduler_class', '')).lower() == 'cooldown'
+)
+if is_cooldown_run and FINETUNE_PATH:
+    raise ValueError("finetune_from_model and cooldown scheduler are mutually exclusive; "
+                     "use lr_scheduler.kwargs.branch_from for cooldown.")
+
 # Distributed init
 rank, world_size, local_rank, DEVICE = init_distributed(config['training'].get('platform', 'slurm'))
 is_main_process = rank == 0
@@ -99,7 +110,7 @@ if world_size > 1:
 
 ddp_barrier(world_size, DEVICE)
 
-# Load pretrained weights for finetuning (fresh optimizer state)
+# Load pretrained weights for finetuning (fresh optimizer state).
 finetune_checkpoint_sha256 = None
 if FINETUNE_PATH:
     if is_main_process:
@@ -110,22 +121,7 @@ if FINETUNE_PATH:
     else:
         model.load_state_dict(state)
     if is_main_process:
-        print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)        
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Loss, optimizer, metrics, trainer
-# ────────────────────────────────────────────────────────────────────────────────
-criterion = build_criterion(config)
-optimizer, scheduler, encoder_lr, amp_decoder_lr, ph_decoder_lr = build_optimizer_and_scheduler(
-    model, config
-)
-
-if is_main_process:
-    print("\nOptimizer learning rates:", flush=True)
-    print(f"  Encoder: {encoder_lr}", flush=True)
-    print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
-    print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
-
+        print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)
 
 # Track starting epoch for checkpoint resumption
 start_epoch = 0
@@ -257,7 +253,9 @@ use_cuda_prefetcher = config['data'].get('use_cuda_prefetcher', True)
 checkpoint_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
 model_checkpoint = os.path.join(checkpoint_path, 'checkpoint_model.pth')
 resume_training = (
-    config['training'].get('resume_from_checkpoint', False) and not FINETUNE_PATH
+    not is_cooldown_run
+    and config['training'].get('resume_from_checkpoint', False)
+    and not FINETUNE_PATH
 )
 if resume_training and not os.path.exists(model_checkpoint):
     if is_main_process:
@@ -275,6 +273,20 @@ else:
     _batches_per_epoch = (_n_train_samples + BATCH_SIZE - 1) // BATCH_SIZE
 # Per-rank step budget: global batches×epochs split across GPUs (matches one process's share).
 _train_max_iters = (_batches_per_epoch * EPOCHS) // world_size
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Loss, optimizer, scheduler
+# ────────────────────────────────────────────────────────────────────────────────
+criterion = build_criterion(config)
+optimizer, scheduler, encoder_lr, amp_decoder_lr, ph_decoder_lr = build_optimizer_and_scheduler(
+    model, config, total_train_steps=_train_max_iters
+)
+
+if is_main_process:
+    print("\nOptimizer learning rates:", flush=True)
+    print(f"  Encoder: {encoder_lr}", flush=True)
+    print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
+    print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
 
 flops_calcs = None
 if config["model"].get("encoder_type", "custom") == "custom":
@@ -333,6 +345,36 @@ if resume_training:
             print(f'Will resume wandb run: {wandb_run_id}', flush=True)
         else:
             print('No wandb run ID found - will create new wandb run', flush=True)
+elif is_cooldown_run:
+    # Cooldown is a continuation of training from a branch checkpoint, just with the LR
+    # schedule replaced. All state (model, optimizer, dataloader position, epoch/iter
+    # counters) carries over exactly as in a normal resume.  Only the scheduler is skipped
+    # so the fresh cooldown LambdaLR is not overwritten.
+    # wandb_run_id stays None → always creates a new wandb run.
+    # branch_from must be a specific state_iters_N.pth file.
+    # model_iters_N.pth is derived from it automatically.
+    _branch_from = _lr_sched_cfg['kwargs']['branch_from']
+    _model_fname = os.path.basename(_branch_from).replace('state_iters_', 'model_iters_')
+    _branch_model = os.path.join(os.path.dirname(_branch_from), _model_fname)
+
+    if world_size > 1:
+        model.module.load_state_dict(torch.load(_branch_model, map_location=DEVICE))
+    else:
+        model.load_state_dict(torch.load(_branch_model, map_location=DEVICE))
+    start_epoch, _ = trainer.load_state_checkpoint(
+        skip_scheduler=True,
+        checkpoint_file=_branch_from,
+    )
+    # max_iters = where we are now + cooldown budget.
+    _cooldown_steps = _lr_sched_cfg['kwargs']['cooldown_steps']
+    trainer.max_iters = trainer.iters + _cooldown_steps
+    if is_main_process:
+        print(
+            f'Cooldown run: branched from {_branch_from} at iter {trainer.iters}, '
+            f'epoch {start_epoch}; running {_cooldown_steps} cooldown steps '
+            f'(stop at iter {trainer.max_iters}).',
+            flush=True,
+        )
 
 (
     train_dataset,
@@ -469,23 +511,7 @@ if is_main_process and config['wandb']['enabled']:
             entity=config['wandb']['entity'],
             project=config['wandb']['project'],
             name=run_name,
-            config={
-                "learning_rate": LR,
-                "encoder_lr": encoder_lr,
-                "amp_decoder_lr": amp_decoder_lr,
-                "ph_decoder_lr": ph_decoder_lr,
-                "batch_size": BATCH_SIZE,
-                "dataset": config['wandb']['dataset_name'],
-                "epochs": EPOCHS,
-                "notes": config['wandb']['notes'],
-                "encoder_type": config['model'].get('encoder_type', 'custom'),
-                "model_config": config['model'],
-                "data_config": config['data'],
-                "trainer_config": config['trainer'],
-                "training_config": config['training'],
-                "wandb_config": config['wandb'],
-                "model_save_path": config['paths'].get('model_save_path', 'N/A')
-            }
+            config=config,
         )
         wandb_run_id = run.id
         print(f'Created new wandb run: {wandb_run_id}', flush=True)
@@ -513,8 +539,8 @@ for epoch in range(start_epoch, EPOCHS):
         if val_sampler is not None:
             val_sampler.set_epoch(epoch)
 
-    # Save config to run path at epoch 0
-    if epoch == 0 and is_main_process:
+    # Save config to run path at the first epoch this job runs
+    if epoch == start_epoch and is_main_process:
         trainer.save_config(config_path)
         print('Saved config to run path', flush=True)
 

@@ -1,5 +1,6 @@
 import hashlib
-from typing import Any, Iterable, Optional, Tuple
+import math
+from typing import Any, Callable, Iterable, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,6 +10,29 @@ import torch.optim as optim
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 
 from custom_loss import WeightedLoss
+
+
+def make_warmup_stable_lr_lambda(warmup_steps: int) -> Callable[[int], float]:
+    """Linear warmup then constant LR=1 (no cooldown)."""
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return (step + 1) / warmup_steps
+        return 1.0
+    return lr_lambda
+
+
+def make_cooldown_lr_lambda(cooldown_steps: int) -> Callable[[int], float]:
+    """Decay LR from 1 → 0 over cooldown_steps using 1 - sqrt(progress)."""
+    if cooldown_steps <= 0:
+        raise ValueError("cooldown_steps must be a positive integer.")
+
+    def lr_lambda(step: int) -> float:
+        if step >= cooldown_steps:
+            return 0.0
+        progress = (step + 1) / cooldown_steps
+        return 1.0 - math.sqrt(progress)
+
+    return lr_lambda
 
 
 def compute_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
@@ -59,6 +83,7 @@ def build_criterion(config: dict) -> nn.Module:
 def build_optimizer_and_scheduler(
     model: nn.Module,
     config: dict,
+    total_train_steps: Optional[int] = None,
 ) -> Tuple[optim.Optimizer, Optional[Any], float, float, float]:
     """
     Adam with per-module learning rates and optional LR scheduler.
@@ -78,7 +103,7 @@ def build_optimizer_and_scheduler(
         {"params": core.amp_decoder.parameters(), "lr": amp_decoder_lr, "name": "amp_decoder"},
         {"params": core.ph_decoder.parameters(), "lr": ph_decoder_lr, "name": "ph_decoder"},
     ]
-    optimizer = optim.AdamW(param_groups, fused=True, betas=(0.9, 0.95), weight_decay=1E-4)
+    optimizer = optim.AdamW(param_groups, fused=True, betas=(0.9, 0.95))
 
     scheduler = None
     lr_sched_cfg = training.get("lr_scheduler", {})
@@ -88,13 +113,31 @@ def build_optimizer_and_scheduler(
             raise ValueError(
                 "training.lr_scheduler.scheduler_class must be provided when lr_scheduler.enabled is True."
             )
-        sched_cls = getattr(torch.optim.lr_scheduler, sched_name, None)
-        if sched_cls is None:
-            raise ValueError(f"Unknown lr scheduler class: {sched_name}")
         sched_kwargs = lr_sched_cfg.get("kwargs", {})
         if not isinstance(sched_kwargs, dict):
             raise ValueError("training.lr_scheduler.kwargs must be a dictionary.")
-        scheduler = sched_cls(optimizer=optimizer, **sched_kwargs)
+        sched_kwargs = dict(sched_kwargs)
+
+        sched_name_lower = str(sched_name).lower()
+        if sched_name_lower == "warmup-stable":
+            warmup_steps = sched_kwargs.get("warmup_steps", 0)
+            lr_fn = make_warmup_stable_lr_lambda(warmup_steps)
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_fn)
+            if torch.distributed.get_rank() == 0:
+                print(f"warmup-stable scheduler: warmup_steps={warmup_steps}", flush=True)
+        elif sched_name_lower == "cooldown":
+            cooldown_steps = sched_kwargs.get("cooldown_steps")
+            if cooldown_steps is None:
+                raise ValueError("cooldown scheduler requires 'cooldown_steps' in lr_scheduler.kwargs.")
+            lr_fn = make_cooldown_lr_lambda(cooldown_steps)
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_fn)
+            if torch.distributed.get_rank() == 0:
+                print(f"cooldown scheduler: cooldown_steps={cooldown_steps}", flush=True)
+        else:
+            sched_cls = getattr(optim.lr_scheduler, sched_name, None)
+            if sched_cls is None:
+                raise ValueError(f"Unknown lr scheduler class: {sched_name}")
+            scheduler = sched_cls(optimizer=optimizer, **sched_kwargs)
 
     return optimizer, scheduler, encoder_lr, amp_decoder_lr, ph_decoder_lr
 

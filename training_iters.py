@@ -13,6 +13,7 @@ import time
 from utils.ptychi_utils import place_patches_fourier_shift
 from utils.utils import get_norm
 from utils.flops_utils import AnalyticalFlopsForTrainer
+from utils.distributed import ddp_barrier
 import wandb
 
 
@@ -283,12 +284,26 @@ class Trainer(object):
                 resume_samples_in_epoch=resume_samples_in_epoch,
             )
         )
+        # checkpoint.state: always-overwritten latest state for normal resume.
+        # state_iters_N.pth: per-iteration archive so any checkpoint can be branched from.
         _atomic_torch_save(cpu_state, os.path.join(state_path, 'checkpoint.state'))
+        _atomic_torch_save(cpu_state, os.path.join(state_path, f'state_iters_{self.iters}.pth'))
 
-    def load_state_checkpoint(self):
-        """Load optimizer/scheduler/metrics and resume counters. Model weights loaded separately in main."""
-        checkpoint_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
-        checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
+    def load_state_checkpoint(self, skip_scheduler=False, checkpoint_file=None):
+        """Load optimizer/scheduler/metrics and resume counters. Model weights loaded separately in main.
+
+        Args:
+            skip_scheduler: If True, do not restore the scheduler state (e.g. cooldown runs that
+                            start a fresh LR schedule from an existing optimizer state).
+            checkpoint_file: Full path to a specific state file (e.g. state_iters_N.pth).
+                             Defaults to checkpoint.state in the run's own save directory.
+        """
+        if checkpoint_file is not None:
+            checkpoint_fname = checkpoint_file
+        else:
+            checkpoint_fname = os.path.join(
+                self.model_save_path, 'run' + str(self.run_num), 'checkpoint.state'
+            )
         if not os.path.exists(checkpoint_fname):
             raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
         state_dict = torch.load(checkpoint_fname, map_location='cpu')
@@ -303,7 +318,7 @@ class Trainer(object):
                 if torch.is_tensor(value):
                     state[key] = value.to(self.device, non_blocking=True)
 
-        if state_dict['scheduler_state_dict'] is not None and self.scheduler is not None:
+        if not skip_scheduler and state_dict['scheduler_state_dict'] is not None and self.scheduler is not None:
             self.scheduler.load_state_dict(state_dict['scheduler_state_dict'])
         wandb_run_id = state_dict.get('wandb_run_id', None)
         return self.epoch, wandb_run_id
@@ -584,6 +599,8 @@ class Trainer(object):
 
             torch.cuda.nvtx.range_push("optimizer")
             optimizer.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
             torch.cuda.nvtx.range_pop()  # optimizer
             processed_batches += 1
 
@@ -605,6 +622,8 @@ class Trainer(object):
             if self.iters_since_last_log % self.log_every == 0:
                 at_boundary = (batch_idx + 1) >= total_batches
                 self.validate_and_log(profile=profile, at_epoch_boundary=at_boundary)
+                if torch.distributed.is_initialized():
+                    ddp_barrier(torch.distributed.get_world_size(), self.device)
 
         if epoch_completed:
             self.iters_in_epoch = 0

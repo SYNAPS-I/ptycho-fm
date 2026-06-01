@@ -2,7 +2,7 @@
 #SBATCH -J ptycho
 #SBATCH -q premium
 #SBATCH -C gpu
-#SBATCH --nodes=128
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
@@ -17,10 +17,11 @@ export HDF5_USE_FILE_LOCKING=FALSE
 export MASTER_ADDR=$(hostname)
 export MASTER_PORT=29500
 export OMP_NUM_THREADS=1
+export NCCL_CROSS_NIC=2
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 srun -u --mpi=pmi2 --module=gpu \
     shifter bash -c "
-    python main.py
+    python main_iters.py
 "
