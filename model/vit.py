@@ -40,6 +40,8 @@ class MultiHeadSelfAttention(nn.Module):
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
 
         self.qkv = nn.Linear(embed_dim, embed_dim * 3)
+        # self.q_norm = nn.LayerNorm(self.head_dim)
+        # self.k_norm = nn.LayerNorm(self.head_dim)
         # self.attn_dropout = nn.Dropout(dropout)
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_dropout = nn.Dropout(dropout)
@@ -52,6 +54,8 @@ class MultiHeadSelfAttention(nn.Module):
         qkv = qkv.reshape(batch_size, n_tokens, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, batch_size, num_heads, n_tokens, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
+        # q = self.q_norm(q)
+        # k = self.k_norm(k)
 
         # # Scaled dot-product attention
         # attn = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
