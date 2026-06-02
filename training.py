@@ -160,6 +160,7 @@ class Trainer(object):
         skip_batch_if_grad_norm_greater_than=None,
         val_plot_sample_idx=0,  # [MODIFIED] configurable sample index for validation plot
         transpose_object_patches=False,  # [MODIFIED] Fix #9: un-transpose HXN patches before val plot display
+        negate_phase=False,  # negate predicted (and GT) phase before display/output; use when training data has conjugate convention
     ):
         super().__init__()
         self.model = model
@@ -174,6 +175,7 @@ class Trainer(object):
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
         self.val_plot_sample_idx = val_plot_sample_idx  # [MODIFIED] configurable sample index for validation plot
         self.transpose_object_patches = transpose_object_patches  # [MODIFIED] Fix #9: val dataset is wrapped (Subset/RankShardedSubset) so transpose flag must be carried on Trainer, not read from dataloader.dataset
+        self.negate_phase = negate_phase
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -889,6 +891,9 @@ class Trainer(object):
                 output_amp = output_amp.transpose(-2, -1).contiguous()
                 input_ph   = input_ph.transpose(-2, -1).contiguous()
                 output_ph  = output_ph.transpose(-2, -1).contiguous()
+
+            if getattr(self, 'negate_phase', False):
+                output_ph = -output_ph
 
             input_amp  = input_amp.numpy()
             output_amp = output_amp.numpy()

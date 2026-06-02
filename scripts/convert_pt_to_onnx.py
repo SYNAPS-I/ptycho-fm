@@ -35,7 +35,8 @@ class ExportConfig:
     dynamic_batch: bool
     output_kind: str
     verify: bool
-    probe_path: Path | None
+    para_path: Path | None
+    negate_phase: bool
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -231,6 +232,26 @@ def resolve_relative_encoder_checkpoint(model_cfg: dict[str, Any], config_path: 
             return
 
 
+def _resolve_para_path(path: Path) -> Path:
+    """Accept either a ``*_para.hdf5`` or ``*_dp.hdf5`` path and return the para path.
+
+    Mirrors the auto-discovery logic in :class:`data.PtychographyDataset`.
+    """
+    stem = path.stem
+    if stem.endswith("_para"):
+        return path
+    if stem.endswith("_dp"):
+        para = path.with_name(f"{stem[:-3]}_para{path.suffix}")
+        if not para.exists():
+            raise FileNotFoundError(
+                f"Could not find paired _para.hdf5 for {path}; expected {para}"
+            )
+        return para
+    raise ValueError(
+        f"HDF5 file must end with '_dp' or '_para'; got: {path.name}"
+    )
+
+
 def sanitize_state_dict_for_model(
     model: Any,
     state_dict: dict[str, Any],
@@ -261,6 +282,7 @@ def build_reconstruction_wrapper(
     amp_scale: float | None = None,
     ph_scale: float | None = None,
     probe: Any | None = None,
+    negate_phase: bool = False,
 ) -> Any:
     """Wrap the trained PtychoViT base model into an edge-inference module.
 
@@ -282,6 +304,11 @@ def build_reconstruction_wrapper(
             self.base = base_model
             self.output_kind = output_kind
             self._has_probe = probe is not None
+
+            self.register_buffer(
+                "_ph_sign",
+                torch.tensor(-1.0 if negate_phase else 1.0, dtype=torch.float32),
+            )
 
             if amp_scale is not None:
                 self.register_buffer(
@@ -349,7 +376,7 @@ def build_reconstruction_wrapper(
             )
 
             amp = (constrained_amp * amp_scale_t) + self._amp_offset
-            ph = constrained_ph * ph_scale_t
+            ph = constrained_ph * ph_scale_t * self._ph_sign
 
             if self.output_kind == "amplitude":
                 primary = amp.unsqueeze(1)
@@ -408,25 +435,28 @@ def export_onnx(config: ExportConfig) -> None:
     model.eval()
 
     probe_tensor = None
-    if config.probe_path is not None:
+    negate_phase = config.negate_phase
+    if config.para_path is not None:
+        import h5py
         import numpy as np
 
-        probe_arr = np.load(config.probe_path)
-        # Accept (H, W) or (n_modes, H, W); use mode 0 for the forward
-        # model. The bake-in is for a single-mode probe; multi-mode probes
-        # would need a different forward formulation downstream.
-        if probe_arr.ndim == 3:
-            probe_arr = probe_arr[0]
-        elif probe_arr.ndim != 2:
+        para_path = _resolve_para_path(config.para_path)
+        with h5py.File(para_path, "r") as para_handle:
+            if "probe" not in para_handle:
+                raise KeyError(f"'probe' dataset not found in {para_path}")
+            probe_arr = para_handle["probe"][...]
+
+        # probe shape from _para.hdf5 is (A, N, H, W) — take first scan, first mode.
+        if probe_arr.ndim != 4:
             raise ValueError(
-                f"probe at {config.probe_path} must be 2D or 3D (n_modes,H,W); "
+                f"Expected 4D probe array (A, N, H, W) in {para_path}; "
                 f"got ndim={probe_arr.ndim}, shape={probe_arr.shape}"
             )
         if not np.iscomplexobj(probe_arr):
             raise ValueError(
-                f"probe at {config.probe_path} must be a complex array; got "
-                f"dtype={probe_arr.dtype}"
+                f"probe in {para_path} must be a complex array; got dtype={probe_arr.dtype}"
             )
+        probe_arr = probe_arr[0, 0]  # (H, W) complex
         probe_tensor = torch.from_numpy(probe_arr)
         ph, pw = probe_tensor.shape
         img_size_check = int(model_cfg["encoder"]["img_size"])
@@ -437,6 +467,8 @@ def export_onnx(config: ExportConfig) -> None:
                 f"probe before exporting."
             )
 
+    if negate_phase:
+        print("[convert_pt_to_onnx] Phase will be negated in the exported model (negate_phase=True).")
     wrapper = build_reconstruction_wrapper(
         model,
         config.output_kind,
@@ -444,6 +476,7 @@ def export_onnx(config: ExportConfig) -> None:
         amp_scale=export_overrides.get("amp_scale"),
         ph_scale=export_overrides.get("ph_scale"),
         probe=probe_tensor,
+        negate_phase=negate_phase,
     )
     wrapper.eval()
 
@@ -472,6 +505,40 @@ def export_onnx(config: ExportConfig) -> None:
         do_constant_folding=True,
         dynamic_axes=dynamic_axes,
     )
+
+    # Constant folding can replace the ``+ 0`` trick with a bare Constant node
+    # whose auto-generated name overwrites output_names. Fix the probe output
+    # names in-place so downstream consumers can always rely on "probe_real" /
+    # "probe_imag" regardless of the torch/onnx version.
+    if probe_tensor is not None:
+        import onnx as _onnx
+
+        _m = _onnx.load(str(config.output_path))
+        _desired = ["probe_real", "probe_imag"]
+        _probe_idx = 0
+        for _out in _m.graph.output:
+            if _out.name == "output":
+                continue
+            _want = _desired[_probe_idx]
+            if _out.name != _want:
+                _old = _out.name
+                # Rename in nodes (e.g. Add/Identity ops not yet folded)
+                for _node in _m.graph.node:
+                    for _j, _o in enumerate(_node.output):
+                        if _o == _old:
+                            _node.output[_j] = _want
+                # Rename in initializers (constant folding promotes buffers to
+                # bare initializers whose name becomes the graph output name)
+                for _init in _m.graph.initializer:
+                    if _init.name == _old:
+                        _init.name = _want
+                # Rename in value_info type annotations if present
+                for _vi in _m.graph.value_info:
+                    if _vi.name == _old:
+                        _vi.name = _want
+                _out.name = _want
+            _probe_idx += 1
+        _onnx.save(_m, str(config.output_path))
 
     if config.verify:
         import onnx
@@ -524,18 +591,30 @@ def parse_args() -> ExportConfig:
         help="Skip ONNX checker validation after export.",
     )
     parser.add_argument(
-        "--probe",
+        "--negate-phase",
+        action="store_true",
+        default=False,
+        help=(
+            "Negate the predicted phase in the exported model. Automatically "
+            "set when the para file's hxn_to_vit_conjugate attribute is True. "
+            "Pass this flag explicitly to force negation regardless."
+        ),
+    )
+    parser.add_argument(
+        "--para",
         type=Path,
         default=None,
+        dest="para",
         help=(
-            "Optional path to a complex probe .npy (2D ``(H, W)`` or 3D "
-            "``(n_modes, H, W)`` — mode 0 is used). When provided, the "
-            "probe's real and imaginary parts are baked into the ONNX graph "
-            "as Constant nodes and exposed as additional model outputs "
-            "(``probe_real``, ``probe_imag``). The live orientation "
-            "auto-detector reads these to run forward-physics consistency, "
-            "which resolves the slow-axis sign ambiguity that "
-            "self-consistency leaves degenerate."
+            "Optional path to a ``*_para.hdf5`` (or paired ``*_dp.hdf5``) "
+            "training data file. The probe is read from the 'probe' dataset "
+            "(shape ``(A, N, H, W)`` complex); mode 0 of the first scan is "
+            "used. When provided, the probe's real and imaginary parts are "
+            "baked into the ONNX graph as Constant nodes and exposed as "
+            "additional model outputs (``probe_real``, ``probe_imag``). The "
+            "live orientation auto-detector reads these to run "
+            "forward-physics consistency, which resolves the slow-axis sign "
+            "ambiguity that self-consistency leaves degenerate."
         ),
     )
     args = parser.parse_args()
@@ -549,7 +628,8 @@ def parse_args() -> ExportConfig:
         dynamic_batch=bool(args.dynamic_batch),
         output_kind=args.output_kind,
         verify=not bool(args.no_verify),
-        probe_path=(args.probe.expanduser().resolve() if args.probe is not None else None),
+        para_path=(args.para.expanduser().resolve() if args.para is not None else None),
+        negate_phase=bool(args.negate_phase),
     )
 
 

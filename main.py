@@ -814,6 +814,7 @@ trainer = Trainer(
     skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than,
     val_plot_sample_idx=int(config['training'].get('val_plot_sample_idx', 0)),  # [MODIFIED] pass configurable plot sample index
     transpose_object_patches=config['data'].get('transpose_object_patches', False),  # [MODIFIED] Fix #9: val dataset is wrapped so flag must be passed via Trainer
+    negate_phase=bool(config['data'].get('negate_phase', False)),
 )
 
 

@@ -130,6 +130,7 @@ def run_inference_and_stitch(
     central_crop: int,
     pad: int,
     device: torch.device,
+    negate_phase: bool = False,
 ):
     # Canvases on `device` so FFT-based Fourier shifts run on GPU when available.
     # Phase uses circular mean: accumulate weighted cos/sin to avoid ±π wrap artefacts.
@@ -175,6 +176,9 @@ def run_inference_and_stitch(
             if getattr(dataloader.dataset, 'transpose_object_patches', False):
                 output_amp = output_amp.transpose(-2, -1).contiguous()
                 output_ph  = output_ph.transpose(-2, -1).contiguous()
+
+            if negate_phase:
+                output_ph = -output_ph
 
             if central_crop > 0:
                 amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
@@ -337,6 +341,7 @@ def main():
 
     load_checkpoint(model, args.checkpoint, device)
 
+    data_cfg = config.get("data", {})
     pred_amp_object, pred_ph_object = run_inference_and_stitch(
         model,
         dataloader,
@@ -345,6 +350,7 @@ def main():
         central_crop,
         args.pad,
         device,
+        negate_phase=data_cfg.get("negate_phase", False),
     )
 
     if conjugate_object:

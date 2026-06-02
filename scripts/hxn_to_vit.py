@@ -602,8 +602,8 @@ def write_outputs(data, best, out_dir, scan_id, write_chunk_size=128):
 
     obj = data['object']
     obj_t = np.stack([orient_fn(obj[s]) for s in range(obj.shape[0])], axis=0).astype(np.complex64)
-    if best.get('conjugate', False):
-        obj_t = np.conj(obj_t)
+    #if best.get('conjugate', False):
+    #    obj_t = np.conj(obj_t)
 
     xm, ym = pos_fn(data['x_positions_m'], data['y_positions_m'])
     cx, cy = map_positions_to_pixels(
