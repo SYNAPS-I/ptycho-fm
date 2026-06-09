@@ -315,6 +315,7 @@ trainer = Trainer(
     scheduler=scheduler,
     debug_mode=DEBUG_MODE,
     log_every=config['training'].get('log_every', 100),
+    log_at_flops=config['training'].get('log_at_flops', []),
     max_iters=_train_max_iters,
     flops_calcs=flops_calcs,
 )
@@ -473,6 +474,10 @@ if is_main_process:
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
     print(f"Valid batch size: {VALID_BATCH_SIZE}", flush=True)
     print(f"Max iterations: {_train_max_iters}", flush=True)
+    if config['training'].get('log_at_flops', []):
+        print(f"Log at FLOPs: {config['training']['log_at_flops']}", flush=True)
+    else:
+        print(f"Log every iterations: {config['training'].get('log_every', 100)}", flush=True)
     print("\nDataLoader Settings:", flush=True)
     print(f"  num_workers: {train_dataloader_kwargs['num_workers']}", flush=True)
     print(f"  pin_memory: {train_dataloader_kwargs['pin_memory']}", flush=True)

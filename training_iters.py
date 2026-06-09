@@ -1,5 +1,6 @@
 import os
 import shutil
+import csv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -157,6 +158,7 @@ class Trainer(object):
         scheduler=None,
         debug_mode=False,
         log_every=100,
+        log_at_flops=None,
         max_iters=100000,
         flops_calcs: AnalyticalFlopsForTrainer | None = None,
     ):
@@ -180,8 +182,13 @@ class Trainer(object):
         self.samples_seen_in_epoch = 0
         self.iters_since_last_log = 0
         self.log_every = log_every
+        self.log_at_tflops = sorted(float(v) / 1e12 for v in (log_at_flops or []))
+        self.next_flops_log_idx = 0
         self.max_iters = max_iters
         self.flops_calcs = flops_calcs
+        if self.log_at_tflops and self.flops_calcs is None:
+            raise ValueError("training.log_at_flops requires FLOPs calculations, but flops_calcs is not available.")
+        self.logs = {}
         self.metrics = {
             'training_loss': [],
             'train_amp_loss': [],
@@ -233,6 +240,103 @@ class Trainer(object):
             os.makedirs(run_path, exist_ok=True)
         if os.path.exists(config_path):
             shutil.copy(config_path, os.path.join(run_path, 'config.yaml'))
+
+    def _logs_path(self):
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        os.makedirs(run_path, exist_ok=True)
+        return os.path.join(run_path, "logs.txt")
+
+    def _log_value(self, value):
+        if torch.is_tensor(value):
+            value = value.detach().cpu()
+            return value.item() if value.numel() == 1 else value.tolist()
+        if hasattr(value, "item"):
+            return value.item()
+        return value
+
+    def _tflops_consumed(self):
+        fc = self.flops_calcs
+        if fc is None:
+            return None
+
+        per_forward_unit_tflops = fc.calculator.flops_analytical()
+        return (
+            per_forward_unit_tflops
+            * fc.train_batch_size
+            * fc.world_size
+            * self.iters
+            * 3
+        ) # 3 for fwd + bwd
+
+    def _sync_flops_log_index_to_current(self):
+        if not self.log_at_tflops:
+            return
+
+        consumed_tflops = self._tflops_consumed()
+        while (
+            self.next_flops_log_idx < len(self.log_at_tflops)
+            and consumed_tflops >= self.log_at_tflops[self.next_flops_log_idx]
+        ):
+            self.next_flops_log_idx += 1
+
+    def _should_log_this_iter(self):
+        if not self.log_at_tflops:
+            return self.iters_since_last_log % self.log_every == 0
+
+        consumed_tflops = self._tflops_consumed()
+        if self.next_flops_log_idx >= len(self.log_at_tflops):
+            return False
+        if consumed_tflops < self.log_at_tflops[self.next_flops_log_idx]:
+            return False
+
+        while (
+            self.next_flops_log_idx < len(self.log_at_tflops)
+            and consumed_tflops >= self.log_at_tflops[self.next_flops_log_idx]
+        ):
+            self.next_flops_log_idx += 1
+        return True
+
+    def write_logs(self, logs=None):
+        """Append scalar logs to logs.txt so completed runs can be queried offline."""
+        if not self.is_main_process:
+            return
+
+        logs = self.logs if logs is None else logs
+        if not logs:
+            return
+
+        log_file = self._logs_path()
+        row = {"iter": self.iters}
+        row.update({k: self._log_value(v) for k, v in logs.items()})
+
+        file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
+        if not file_exists:
+            with open(log_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+                writer.writeheader()
+                writer.writerow(row)
+            return
+
+        with open(log_file, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            new_fields = [k for k in row.keys() if k not in fieldnames]
+            if new_fields:
+                existing_rows = list(reader)
+            else:
+                existing_rows = None
+
+        if new_fields:
+            fieldnames.extend(new_fields)
+            with open(log_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(existing_rows)
+                writer.writerow(row)
+        else:
+            with open(log_file, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writerow(row)
 
     def generate_state_dict(self, wandb_run_id=None, resume_epoch=None, resume_iters_in_epoch=None, resume_samples_in_epoch=None):
         """Returns training state (not model weights). Resume fields default to live trainer counters."""
@@ -530,6 +634,7 @@ class Trainer(object):
         criterion = self.criterion
         optimizer = self.optimizer
         total_batches = len(dataloader)
+        self._sync_flops_log_index_to_current()
 
         if self.is_main_process:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
@@ -543,7 +648,7 @@ class Trainer(object):
             if self.iters >= self.max_iters:
                 if self.is_main_process:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Reached max iterations ({self.max_iters})", flush=True)
-                if self.iters_since_last_log > 0:
+                if self.iters_since_last_log > 0 and not self.log_at_tflops:
                     self.validate()
                 epoch_completed = False
                 break
@@ -619,7 +724,7 @@ class Trainer(object):
 
             torch.cuda.nvtx.range_pop()  # step
 
-            if self.iters_since_last_log % self.log_every == 0:
+            if self._should_log_this_iter():
                 at_boundary = (batch_idx + 1) >= total_batches
                 self.validate_and_log(profile=profile, at_epoch_boundary=at_boundary)
                 if torch.distributed.is_initialized():
@@ -660,10 +765,7 @@ class Trainer(object):
         self.metrics['train_ph_loss'].append(avg_ph_loss)
         self.metrics['grad_norm'].append(avg_grad_norm)
 
-        if (
-            self.is_main_process
-            and self.wandb_enabled
-        ):
+        if self.is_main_process:
             log_payload = {
                 "train_loss": avg_train_loss,
                 "train_amp_loss": avg_amp_loss,
@@ -671,16 +773,12 @@ class Trainer(object):
                 "grad_norm": avg_grad_norm,
                 "lr": self.optimizer.param_groups[0]["lr"],
             }
-            fc = self.flops_calcs
-            per_forward_unit_tflops = fc.calculator.flops_analytical()
-            log_payload["tflops_consumed"] = (
-                per_forward_unit_tflops
-                * fc.train_batch_size
-                * fc.world_size
-                * self.iters
-                * 3
-            ) # 3 for fwd + bwd
-            wandb.log(log_payload, step=self.iters)
+            tflops_consumed = self._tflops_consumed()
+            if tflops_consumed is not None:
+                log_payload["tflops_consumed"] = tflops_consumed
+            self.logs = log_payload
+            if self.wandb_enabled:
+                wandb.log(log_payload, step=self.iters)
 
         if self.is_main_process:
             print(
@@ -870,14 +968,21 @@ class Trainer(object):
         avg_ph_ssim = self.synchronize_loss(avg_ph_ssim)
         avg_ph_psnr = self.synchronize_loss(avg_ph_psnr)
 
-        if self.is_main_process and self.wandb_enabled:
-            wandb.log({"val_loss": avg_val_loss}, step=self.iters)
-            wandb.log({"val_amp_loss": avg_val_amp_loss}, step=self.iters)
-            wandb.log({"val_ph_loss": avg_val_ph_loss}, step=self.iters)
-            wandb.log({"val_amp_ssim": avg_amp_ssim}, step=self.iters)
-            wandb.log({"val_amp_psnr": avg_amp_psnr}, step=self.iters)
-            wandb.log({"val_ph_ssim": avg_ph_ssim}, step=self.iters)
-            wandb.log({"val_ph_psnr": avg_ph_psnr}, step=self.iters)
+        val_payload = {
+            "val_loss": avg_val_loss,
+            "val_amp_loss": avg_val_amp_loss,
+            "val_ph_loss": avg_val_ph_loss,
+            "val_amp_ssim": avg_amp_ssim,
+            "val_amp_psnr": avg_amp_psnr,
+            "val_ph_ssim": avg_ph_ssim,
+            "val_ph_psnr": avg_ph_psnr,
+        }
+
+        if self.is_main_process:
+            if self.wandb_enabled:
+                wandb.log(val_payload, step=self.iters)
+            self.write_logs({**self.logs, **val_payload})
+            self.logs = {}
 
         self.metrics['validation_loss'].append(avg_val_loss)
         self.metrics['val_amp_loss'].append(avg_val_amp_loss)
