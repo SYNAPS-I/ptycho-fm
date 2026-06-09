@@ -53,7 +53,7 @@ def pos_embed_add_flops(batch_tokens, embed):
 
 
 def conv_transpose2d_flops(batch, h, w, cin, cout, kernel, stride=1, padding=1, output_padding=0):
-    """MAC-style FLOPs for ConvTranspose2d (same order as Conv2d with matching spatial I/O)."""
+    """ConvTranspose2d FLOPs using 2 FLOPs per multiply-add."""
     if stride != 1:
         raise NotImplementedError("Decoder uses stride-1 transpose convs only.")
     h_out = (h - 1) * stride - 2 * padding + kernel + output_padding
@@ -65,6 +65,10 @@ def conv_transpose2d_flops(batch, h, w, cin, cout, kernel, stride=1, padding=1, 
 
 def batch_norm2d_flops(batch, h, w, channels):
     return 4 * batch * channels * h * w * TFLOPS
+
+
+def relu_flops(batch, h, w, channels):
+    return batch * channels * h * w * TFLOPS
 
 
 def bilinear_upsample2x_flops(batch, h_in, w_in, channels):
@@ -109,9 +113,11 @@ def decoder256_flops(
         total += conv_transpose2d_flops(batch, h, w, in_ch, out_ch, kernel)
         if use_batchnorm:
             total += batch_norm2d_flops(batch, h, w, out_ch)
+        total += relu_flops(batch, h, w, out_ch)
         total += conv_transpose2d_flops(batch, h, w, out_ch, out_ch, kernel)
         if use_batchnorm:
             total += batch_norm2d_flops(batch, h, w, out_ch)
+        total += relu_flops(batch, h, w, out_ch)
 
         total += bilinear_upsample2x_flops(batch, h, w, out_ch)
         in_ch = out_ch
@@ -278,10 +284,10 @@ class PtychoViTFlopsCalculator:
         self.mlp_ratio = float(enc.get("mlp_ratio", 4.0))
         self.use_cls_token = bool(enc.get("use_cls_token", False))
         self.encoder_type = model_cfg.get("encoder_type", "custom")
-        self.heads = self.embed // HEAD_DIM
+        self.heads = int(enc.get("num_heads", self.embed // HEAD_DIM))
 
         dec = model_cfg.get("decoder", {})
-        self.base_channels = self.embed // EMBED_BASE_RATIO
+        self.base_channels = int(dec.get("base_channels", self.embed // EMBED_BASE_RATIO))
         self.num_stages = int(dec.get("num_stages", 4))
         latent = dec.get("latent_dim")
         self.latent_dim = int(self.embed if latent is None else latent)
