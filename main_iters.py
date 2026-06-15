@@ -151,9 +151,12 @@ if 'data_path' not in config['data']:
 
 data_dir = config['data']['data_path']
 is_packed = config['data'].get('packed', False)
+apply_noise = config['data'].get('apply_noise', True)
+deterministic_noise = config['data'].get('deterministic_noise', True)
+noise_seed = config['data'].get('noise_seed', config['data']['random_seed'])
 
-# Create full dataset with sequential indices
-# Shuffling is handled by random_split with a deterministic seed
+# Create full dataset with sequential indices.
+# Shuffling is handled by random_split with a deterministic seed.
 if is_packed:
     base_dataset = PtychographyDatasetPacked(
         pack_dir=data_dir,
@@ -162,12 +165,14 @@ if is_packed:
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('normalization_dict_path'),
         default_normalization=config['data'].get('default_normalization', 100000.0),
-        apply_noise=config['data'].get('apply_noise', True),
+        apply_noise=apply_noise,
+        deterministic_noise=deterministic_noise,
+        noise_seed=noise_seed,
         max_probe_modes=config['data'].get('max_probe_modes', 8),
         target_size=config['data'].get('target_size', 256),
         max_shards=config['data'].get('max_files'),
-        debug=DEBUG_MODE
-)
+        debug=DEBUG_MODE,
+    )
 else:
     base_dataset = CombinedDataset(
         file_paths=data_dir,
@@ -176,12 +181,14 @@ else:
         scale=config['data']['scale'],
         normalization_dict_path=config['data'].get('normalization_dict_path'),
         default_normalization=config['data'].get('default_normalization', 100000.0),
-        apply_noise=config['data'].get('apply_noise', True),
+        apply_noise=apply_noise,
+        deterministic_noise=deterministic_noise,
+        noise_seed=noise_seed,
         cache_object=config['data'].get('cache_object', False),
         max_probe_modes=config['data'].get('max_probe_modes', 8),
         target_size=config['data'].get('target_size', 256),
         max_files=config['data'].get('max_files'),
-        debug=DEBUG_MODE
+        debug=DEBUG_MODE,
     )
 
 total_size = len(base_dataset)
@@ -470,6 +477,10 @@ if is_main_process:
 #    print(f"Number of paired files: {len(base_dataset.file_paths)}", flush=True)
     print(f"Total patterns: {len(base_dataset)}", flush=True)
     print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
+    print(f"Apply Poisson noise: {apply_noise}", flush=True)
+    print(f"Deterministic noise: {deterministic_noise}", flush=True)
+    if apply_noise and deterministic_noise:
+        print(f"Noise seed: {noise_seed}", flush=True)
     print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
     print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
     print(f"Valid batch size: {VALID_BATCH_SIZE}", flush=True)

@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH -t 01:00:00
+#SBATCH -t 03:00:00
 #SBATCH -A amsc006
 #SBATCH --image=registry.nersc.gov/amsc006/shas1693/ptychofm:26.01
 #SBATCH --module=gpu,nccl-cu13-plugin

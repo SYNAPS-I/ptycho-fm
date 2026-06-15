@@ -13,6 +13,9 @@ data:
   normalization_dict_path: '/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl'
   test_normalization: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/test2probes_norm.pkl'
   default_normalization: 100000.0
+  apply_noise: true
+  deterministic_noise: true
+  noise_seed: 42
 
   cache_object: true
   max_probe_modes: 10  # Maximum number of probe modes to pad to
@@ -73,7 +76,7 @@ training:
 
   epochs: 100  # Total epochs to train for (not additional epochs when resuming)
   log_every: 4000 # Log every N iterations
-  log_at_flops: [6.0e17, 1.0e18, 3.0e18] # Raw FLOP targets for logging/validation, e.g. [6.0e16, 6.0e19]; empty uses log_every
+  log_at_flops: [6.0e17, 1.0e18, 3.0e18] # Raw FLOP targets for logging/validation, e.g. [6.0e17, 1.0e18, 3.0e18]; empty uses log_every
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
@@ -148,10 +151,10 @@ wandb:
   project: 'ptycho-vit'
   dataset_name: 'simulated full data'
   notes: 'Custom ViT, 43M'
-  run_name: 'scaling-lr1em6'
+  run_name: 'scaling-lr1em6-check5'
   resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 'scaling-lr1em6'
+  run_num: 'scaling-lr1em6-check5'
 

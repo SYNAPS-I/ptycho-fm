@@ -37,6 +37,8 @@ class PtychographyDataset(Dataset):
         normalization_dict_path: Optional[str] = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
+        deterministic_noise: bool = False,
+        noise_seed: int = 0,
         cache_object: bool = True,
         max_probe_modes: int = 8,
         target_size: Optional[int] = 256,
@@ -47,6 +49,8 @@ class PtychographyDataset(Dataset):
         self.normalization_dict_path = normalization_dict_path
         self.default_normalization = default_normalization
         self.apply_noise = apply_noise
+        self.deterministic_noise = deterministic_noise
+        self.noise_seed = int(noise_seed)
         self.cache_object = cache_object
         self.max_probe_modes = max_probe_modes
         self.target_size = target_size  # Target size for diffraction patterns (e.g., 256)
@@ -434,7 +438,8 @@ class PtychographyDataset(Dataset):
         diffraction_pattern = self.normalize(diffraction_pattern)
         # Add noise by sampling from a Poisson distribution
         if self.apply_noise:
-            diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern)
+            seed = self.noise_seed + pattern_idx if self.deterministic_noise else None
+            diffraction_pattern = np.random.default_rng(seed).poisson(diffraction_pattern)
         diffraction_amp = np.sqrt(diffraction_pattern.astype(np.float32))
 
         # Zero-pad diffraction pattern to target size if needed
@@ -786,6 +791,8 @@ class CombinedDataset(Dataset):
         if file_path not in self.dataset_cache:
             # Create new dataset
             lazy_kwargs = self.dataset_kwargs.copy()
+            if lazy_kwargs.get("deterministic_noise", False):
+                lazy_kwargs["noise_seed"] = int(lazy_kwargs.get("noise_seed", 0)) + int(self.file_offsets[file_idx])
             # Disable object caching for lazily created datasets to prevent memory accumulation
             # Objects will be loaded on-demand from HDF5 files instead
             dataset = PtychographyDataset(

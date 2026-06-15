@@ -77,6 +77,8 @@ class PtychographyDatasetPacked(Dataset):
         normalization_dict_path: Optional[str] = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
+        deterministic_noise: bool = False,
+        noise_seed: int = 0,
         max_probe_modes: int = 8,
         target_size: Optional[int] = 256,
     ):
@@ -91,6 +93,8 @@ class PtychographyDatasetPacked(Dataset):
 
         self.scale = scale
         self.apply_noise = apply_noise
+        self.deterministic_noise = deterministic_noise
+        self.noise_seed = int(noise_seed)
         self.max_probe_modes = max_probe_modes
         self.target_size = target_size
         self.default_normalization = default_normalization
@@ -195,7 +199,8 @@ class PtychographyDatasetPacked(Dataset):
         img = np.asarray(f["dp"][o, pi], dtype=np.float32)
         img = (img / norm) * self.scale
         if self.apply_noise:
-            img = np.random.default_rng().poisson(img).astype(np.float32)
+            seed = self.noise_seed + idx if self.deterministic_noise else None
+            img = np.random.default_rng(seed).poisson(img).astype(np.float32)
         amp = np.sqrt(np.float32(img))
         ts = self.target_size
         if ts is not None and amp.shape[0] != ts:
