@@ -1,0 +1,86 @@
+# PtychoViT — RUN 1 of 3: SUPERVISED + single 4-mode probe
+# Aileen 2-probe dataset. Keeps only the 4-mode-probe objects (astronaut, coffee, rocket).
+# Identical to config_supervised_modes8.yaml except probe_filter / test object / run_num.
+
+# Data Configuration
+data:
+  data_path: '/flare/SYNAPS-I/aileen/data'
+  test_path: '/flare/SYNAPS-I/aileen/test_data/scan807_dp.hdf5'    # 4-mode test object (matches probe)
+  scale: 10000.0
+
+  normalization_dict_path: '/flare/SYNAPS-I/aileen/data/normalization.pkl'
+  test_normalization: '/flare/SYNAPS-I/aileen/test_data/test2probes_norm.pkl'
+  data_fraction: 1.0
+  probe_filter: 'modes=4'   # <-- SINGLE PROBE: keep only the 4-mode-probe objects
+  cache_object: true
+  train_split: 0.95
+  random_seed: 8
+  max_probe_modes: 10
+
+  sharding_strategy: 'static'
+  num_workers: 0
+  prefetch_factor: 1
+  pin_memory: true
+  persistent_workers: true
+  use_cuda_prefetcher: false
+
+# Training Configuration
+training:
+  mode: 'supervised'
+  batch_size: 64
+  learning_rate: 1.0e-4
+  epochs: 50
+
+  encoder_lr: 1.0e-4
+  amp_decoder_lr: 1.0e-4
+  ph_decoder_lr: 1.0e-4
+
+  loss_function: 'mse'
+
+  validation_plot_freq: 10
+  test_plot_freq: 20
+  resume_from_checkpoint: false
+
+# Model Architecture (identical across all 3 runs)
+model:
+  encoder_type: 'pretrained'
+  encoder:
+    img_size: 256
+    patch_size: 32
+    in_channels: 1
+    embed_dim: 1024
+    depth: 24
+    num_heads: 16
+    mlp_ratio: 4.0
+    use_cls_token: false
+    dropout: 0.1
+    attn_dropout: 0.0
+    timm_model_name: 'vit_large_patch32_224'
+    timm_kwargs:
+      pretrained: false
+    checkpoint_path: '/lus/flare/projects/PPFL_FM/pretrained_model_weights/model.safetensors'
+    checkpoint_kwargs:
+      strict: true
+  decoder:
+    base_channels: 64
+    latent_dim: null
+    num_stages: 5
+    use_batchnorm: true
+    dropout: 0.1
+
+# Paths
+paths:
+  model_save_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/scratch/models'
+
+# WandB Configuration
+wandb:
+  enabled: True
+  entity: 'varunisastry'
+  project: 'PtychoViT'
+  dataset_name: 'aileen 4-mode only'
+  notes: 'supervised, single 4-mode probe (3 objects)'
+  resume_run_id: null
+
+# Trainer Configuration
+trainer:
+  run_num: 4       # RUN 1 of 3 (only 4-mode)

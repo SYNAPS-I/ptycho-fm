@@ -306,13 +306,17 @@ class CombinedMergedDataset(Dataset):
     def _synthetic_sample(self):
         import math
         img_size = self.synthetic_img_size
-        diff_amp = torch.rand((1, img_size, img_size), dtype=torch.float32)
-        amp_patch = torch.rand((1, img_size, img_size), dtype=torch.float32)
-        ph_patch = torch.rand((1, img_size, img_size), dtype=torch.float32)
-        ph_patch = (ph_patch * (2.0 * math.pi)) - math.pi
-        real = torch.randn((1, self.synthetic_max_probe_modes, img_size, img_size), dtype=torch.float32)
-        imag = torch.randn((1, self.synthetic_max_probe_modes, img_size, img_size), dtype=torch.float32)
-        probe = torch.complex(real, imag)
+        diff_amp_np = np.random.rand(1, img_size, img_size).astype(np.float32)
+        amp_patch_np = np.random.rand(1, img_size, img_size).astype(np.float32)
+        ph_patch_np = np.random.rand(1, img_size, img_size).astype(np.float32)
+        ph_patch_np = (ph_patch_np * (2.0 * math.pi)) - math.pi
+        real_np = np.random.randn(1, self.synthetic_max_probe_modes, img_size, img_size).astype(np.float32)
+        imag_np = np.random.randn(1, self.synthetic_max_probe_modes, img_size, img_size).astype(np.float32)
+        probe_np = real_np + 1j * imag_np
+        diff_amp = torch.from_numpy(diff_amp_np)
+        amp_patch = torch.from_numpy(amp_patch_np)
+        ph_patch = torch.from_numpy(ph_patch_np)
+        probe = torch.from_numpy(probe_np)
         probe_pos = torch.zeros((2,), dtype=torch.float32)
         return diff_amp, amp_patch, ph_patch, probe, probe_pos, self.synthetic_normalization, self.synthetic_scale
 

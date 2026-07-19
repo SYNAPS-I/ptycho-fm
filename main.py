@@ -197,6 +197,13 @@ print(
     flush=True,
 )
 
+# Warm up XPU context to avoid concurrent first-transfer hangs
+if str(DEVICE).startswith("xpu"):
+    _warmup = torch.zeros(1).to(DEVICE)
+    torch.xpu.synchronize(DEVICE)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Dataset & Dataloaders
 # ────────────────────────────────────────────────────────────────────────────────
@@ -242,7 +249,8 @@ else:
         cache_object=config['data'].get('cache_object', False),
         max_probe_modes=config['data'].get('max_probe_modes', 8),
         debug=DEBUG_MODE,
-        data_fraction=config['data'].get('data_fraction', 1.0)
+        data_fraction=config['data'].get('data_fraction', 1.0),
+        probe_filter=config['data'].get('probe_filter')
     )
 
 # Split into train and validation using PyTorch's random_split

@@ -14,6 +14,11 @@ data:
   #normalization_dict_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/normalization.pkl' #'/scratch/aileenluo/ptycho-vit/data/normalization.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   test_normalization: '/lus/flare/projects/PPFL_FM/test_data/test2probes_norm.pkl' 
   data_fraction: 0.2  # Fraction of data to use for training (for debugging purposes)
+  # Single-probe sanity check: restrict training to objects whose probe_file matches
+  # this substring (case-insensitive). null = use all probes. First run scan_probes.py
+  # to list available probes, then set e.g. 's26_20200218'. data_fraction is applied
+  # AFTER this filter (i.e. a fraction of the chosen probe's objects).
+  probe_filter: null
   cache_object: true
   train_split: 0.95  # Fraction of data for training (remainder used for validation)
   random_seed: 8

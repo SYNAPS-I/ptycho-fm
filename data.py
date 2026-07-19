@@ -411,7 +411,98 @@ class CombinedDataset(Dataset):
 
         return paired_files
 
-    def __init__(self, file_paths, rank=0, world_size=1, debug=False, data_fraction=1.0, **dataset_kwargs):
+    @staticmethod
+    def filter_by_probe(file_paths, data_dir, probe_filter, rank=0):
+        """
+        Keep only the objects whose probe matches ``probe_filter``.
+
+        ``probe_filter`` is matched as a case-insensitive substring against a
+        per-object descriptor combining several identifiers, so it works whether
+        the probe is identified by a ``probe_file`` string (50k simulated set) or
+        only by array content / mode count (the 2-probe test set). Recognized forms:
+
+          - ``'s26_20200218'``  -> match the probe_file path substring
+          - ``'probe1'``        -> match the probe_id assigned by analyze_dataset.py
+          - ``'modes=4'``       -> match by number of incoherent probe modes
+
+        Prefers the sidecar ``probe_index.csv`` (written by analyze_dataset.py /
+        scan_probes.py) to avoid opening thousands of _para files; falls back to
+        reading each ``_para.hdf5`` directly if the CSV is absent.
+
+        Args:
+            file_paths: list of Path to *_dp.hdf5 files (from find_paired_files)
+            data_dir: dataset directory (where probe_index.csv is expected)
+            probe_filter: substring to match against the descriptor (see above)
+            rank: process rank, for logging
+
+        Returns:
+            Filtered list of Path (subset of file_paths). Raises ValueError if empty.
+        """
+        needle = str(probe_filter).lower()
+        data_dir = Path(data_dir)
+
+        def descriptor(probe_file="", probe_id="", probe_name="", n_modes=""):
+            """A single lowercased string that all identifier forms can match against."""
+            n = "" if n_modes in ("", None) else f"modes={int(float(n_modes))}"
+            return " ".join(str(x) for x in (probe_id, probe_file, probe_name, n)).lower()
+
+        # dp filename -> descriptor string, from the sidecar CSV if available
+        desc_by_name = {}
+        index_path = data_dir / "probe_index.csv"
+        if index_path.exists():
+            try:
+                df = pd.read_csv(index_path)
+                for _, row in df.iterrows():
+                    key = Path(str(row["dp_path"])).name
+                    desc_by_name[key] = descriptor(
+                        probe_file=row.get("probe_file", ""),
+                        probe_id=row.get("probe_id", ""),
+                        probe_name=row.get("probe_name", ""),
+                        n_modes=row.get("n_probe_modes", ""),
+                    )
+                print(f"[Rank {rank}] probe_filter: loaded {len(desc_by_name)} probe entries "
+                      f"from {index_path.name}", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[Rank {rank}] probe_filter: failed to read {index_path.name} ({e}); "
+                      f"will read _para files directly", flush=True)
+                desc_by_name = {}
+        else:
+            print(f"[Rank {rank}] probe_filter: {index_path.name} not found; reading _para files "
+                  f"directly (slow -- run analyze_dataset.py to speed this up)", flush=True)
+
+        kept = []
+        for dp_file in file_paths:
+            desc = desc_by_name.get(dp_file.name)
+            if desc is None:
+                # Fallback: read the small _para.hdf5 for this object (no probe_id available)
+                para = dp_file.with_name(f"{dp_file.stem[:-3]}_para.hdf5")
+                try:
+                    with h5py.File(para, "r") as f:
+                        pf = ""
+                        if "probe_file" in f:
+                            v = f["probe_file"][()]
+                            pf = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+                        n_modes = f["probe"].shape[1] if "probe" in f else ""
+                    desc = descriptor(probe_file=pf, probe_name=Path(pf).name, n_modes=n_modes)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[Rank {rank}] probe_filter: skipping {dp_file.name} "
+                          f"(cannot read probe info: {e})", flush=True)
+                    continue
+            if needle in desc:
+                kept.append(dp_file)
+
+        print(f"[Rank {rank}] probe_filter='{probe_filter}': kept {len(kept)}/{len(file_paths)} objects",
+              flush=True)
+        if not kept:
+            raise ValueError(
+                f"probe_filter='{probe_filter}' matched 0 objects in {data_dir}. "
+                f"Try a probe_id (probe1/probe2), 'modes=N', or a probe_file substring "
+                f"-- see the values printed by analyze_dataset.py."
+            )
+        return kept
+
+    def __init__(self, file_paths, rank=0, world_size=1, debug=False, data_fraction=1.0,
+                 probe_filter=None, **dataset_kwargs):
         """
         Initialize CombinedDataset with sequential global indexing.
 
@@ -421,6 +512,13 @@ class CombinedDataset(Dataset):
             world_size: Total number of processes (default: 1)
             debug: If True, enable debug logging for CSV usage and data access (default: False)
             data_fraction: Fraction of data to use (0 < data_fraction <= 1.0, default: 1.0 for all data)
+            probe_filter: If set (str), restrict the dataset to objects whose probe matches.
+                The match is a case-insensitive substring test against the object's
+                'probe_file' (e.g. 's26_20200218' matches
+                '/.../probes_256/s26_20200218_26_0_0_10.npy'). Uses the sidecar
+                probe_index.csv produced by scan_probes.py when present (fast); otherwise
+                falls back to opening each _para.hdf5 to read its probe_file (slow).
+                Default None = use all probes.
             **dataset_kwargs: Additional arguments passed to PtychographyDataset
         """
         # file_paths must be a directory
@@ -434,7 +532,12 @@ class CombinedDataset(Dataset):
 
         # Scan directory for all paired files
         all_file_paths = self.find_paired_files(data_dir)
-        
+
+        # Restrict to a single probe (sanity-check runs). Done BEFORE data_fraction
+        # sampling so the fraction is taken from within the chosen probe's objects.
+        if probe_filter:
+            all_file_paths = self.filter_by_probe(all_file_paths, data_dir, probe_filter, rank)
+
         # Apply data fraction if specified
         if data_fraction < 1.0:
             total_files = len(all_file_paths)
