@@ -122,7 +122,7 @@ class PtychoViT(nn.Module):
         self._logpolar_hw = None
 
         # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.1), dtype=torch.float32), requires_grad=False)
+        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(0.2), dtype=torch.float32), requires_grad=False)
         self.log_scale_ph = nn.Parameter(torch.tensor(math.log(math.pi), dtype=torch.float32), requires_grad=False)
 
     def forward(self, x, probe, normalization, scale):
