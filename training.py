@@ -139,17 +139,19 @@ def compute_ssim(
 
 class Trainer(object):
     def __init__(
-        self, 
-        model, 
-        mode, 
-        run_num, 
-        device, 
+        self,
+        model,
+        mode,
+        run_num,
+        device,
         model_save_path,
-        is_main_process=True, 
-        use_ddp=False, 
-        wandb_enabled=True, 
+        is_main_process=True,
+        use_ddp=False,
+        wandb_enabled=True,
         debug_mode=False,
-        skip_batch_if_grad_norm_greater_than=None
+        skip_batch_if_grad_norm_greater_than=None,
+        mlflow_logger=None,
+        mlflow_log_every_n_batches=50,
     ):
         super().__init__()
         self.model = model
@@ -162,6 +164,8 @@ class Trainer(object):
         self.wandb_enabled = wandb_enabled
         self.debug_mode = debug_mode
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
+        self.mlflow_logger = mlflow_logger
+        self.mlflow_log_every_n_batches = max(int(mlflow_log_every_n_batches), 1)
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -421,6 +425,9 @@ class Trainer(object):
         if self.wandb_enabled:
             wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")}, step=epoch, commit=True)
 
+        if self.mlflow_logger is not None:
+            self.mlflow_logger.log_artifact(os.path.join(run_path, filename), artifact_path="test_plots")
+
     def train(self, dataloader, criterion, optimizer, metrics, profile=False, epoch=None):
         """
         Training loop.
@@ -559,13 +566,37 @@ class Trainer(object):
                 if self.is_main_process:
                     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
 
-            running_loss += loss.detach().item()
+            batch_loss = loss.detach().item()
+            running_loss += batch_loss
 
             # Track amp/phase losses (targets now guaranteed on same device)
             loss_amp = criterion(output_amp.detach(), amp_patch)
             loss_ph  = criterion(output_ph.detach(), ph_patch)
-            running_amp_loss += loss_amp.item()
-            running_ph_loss  += loss_ph.item()
+            batch_amp_loss = loss_amp.item()
+            batch_ph_loss = loss_ph.item()
+            running_amp_loss += batch_amp_loss
+            running_ph_loss  += batch_ph_loss
+
+            # Sub-epoch MLflow granularity: per-N-batch loss + GPU mem, so the
+            # UI shows loss actually moving during a long epoch rather than
+            # only redrawing at end-of-epoch. Global step monotonically
+            # increases across epochs: epoch * total_batches + batch_idx.
+            if (
+                self.mlflow_logger is not None
+                and self.is_main_process
+                and (batch_idx % self.mlflow_log_every_n_batches == 0)
+            ):
+                global_step = (epoch or 0) * total_batches + batch_idx
+                batch_metrics = {
+                    "train_batch_loss": batch_loss,
+                    "train_batch_amp_loss": batch_amp_loss,
+                    "train_batch_ph_loss": batch_ph_loss,
+                }
+                if torch.cuda.is_available():
+                    batch_metrics["train_gpu_mem_gb"] = (
+                        torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
+                    )
+                self.mlflow_logger.log_metrics(batch_metrics, step=global_step)
 
             if batch_idx > 0 and self.is_main_process:
                 if batch_idx < 1000 and (batch_idx + 1) % 1000 == 0:
@@ -611,6 +642,17 @@ class Trainer(object):
             wandb.log({"train_loss": avg_train_loss}, step=epoch)
             wandb.log({"train_amp_loss": avg_amp_loss}, step=epoch)
             wandb.log({"train_ph_loss": avg_ph_loss}, step=epoch)
+
+        if self.mlflow_logger is not None and self.is_main_process:
+            self.mlflow_logger.log_metrics(
+                {
+                    "train_epoch_loss": avg_train_loss,
+                    "train_epoch_amp_loss": avg_amp_loss,
+                    "train_epoch_ph_loss": avg_ph_loss,
+                    "train_epoch_time_s": epoch_time,
+                },
+                step=epoch,
+            )
 
         metrics['training_loss'].append(avg_train_loss)
         metrics['train_amp_loss'].append(avg_amp_loss)
@@ -769,6 +811,20 @@ class Trainer(object):
             wandb.log({"val_ph_ssim": avg_ph_ssim}, step=epoch)
             wandb.log({"val_ph_psnr": avg_ph_psnr}, step=epoch)
 
+        if self.mlflow_logger is not None and self.is_main_process:
+            self.mlflow_logger.log_metrics(
+                {
+                    "val_loss": avg_val_loss,
+                    "val_amp_loss": avg_val_amp_loss,
+                    "val_ph_loss": avg_val_ph_loss,
+                    "val_amp_ssim": avg_amp_ssim,
+                    "val_amp_psnr": avg_amp_psnr,
+                    "val_ph_ssim": avg_ph_ssim,
+                    "val_ph_psnr": avg_ph_psnr,
+                },
+                step=epoch,
+            )
+
         metrics['validation_loss'].append(avg_val_loss)
         metrics['val_amp_loss'].append(avg_val_amp_loss)
         metrics['val_ph_loss'].append(avg_val_ph_loss)
@@ -801,10 +857,14 @@ class Trainer(object):
 
             filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff_np, output_diff_np, input_amp, output_amp, input_ph, output_ph, filename)
+            run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+            plot_path = os.path.join(run_path, filename)
 
             if self.wandb_enabled:
-                run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
-                wandb.log({"val_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Epoch {epoch}")}, step=epoch)
+                wandb.log({"val_plot": wandb.Image(plot_path, caption=f"Epoch {epoch}")}, step=epoch)
+
+            if self.mlflow_logger is not None:
+                self.mlflow_logger.log_artifact(plot_path, artifact_path="val_plots")
 
         if scheduler:
             # Only ReduceLROnPlateau expects a monitored metric; others use epoch progression.
@@ -817,6 +877,10 @@ class Trainer(object):
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=epoch)
+            if self.is_main_process and self.mlflow_logger is not None:
+                self.mlflow_logger.log_metrics(
+                    {"lr": optimizer.param_groups[0]['lr']}, step=epoch
+                )
 
         if avg_val_loss < metrics['best_val_loss']:
             if self.is_main_process:

@@ -23,6 +23,7 @@ from data_simple_pack import PtychographyDatasetPacked
 from model.model import PtychoViT
 from custom_loss import WeightedLoss
 from training import Trainer
+from mlflow_logger import MLflowLogger
 from torch.utils.data import DataLoader, random_split, DistributedSampler, Subset
 from prefetcher import CUDAPrefetcher
 from utils.utils import compute_sha256
@@ -784,6 +785,8 @@ if FINETUNE_PATH:
     if is_main_process:
         print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
     
+mlflow_logger = MLflowLogger(config, is_main_process)
+
 trainer = Trainer(
     model,
     MODE,
@@ -794,8 +797,30 @@ trainer = Trainer(
     use_ddp=(world_size > 1),
     wandb_enabled=config['wandb']['enabled'],
     debug_mode=DEBUG_MODE,
-    skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than
+    skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than,
+    mlflow_logger=mlflow_logger,
+    mlflow_log_every_n_batches=config.get('mlflow', {}).get('log_every_n_batches', 50),
 )
+
+if is_main_process:
+    mlflow_logger.log_params({
+        "learning_rate": LR,
+        "encoder_lr": encoder_lr,
+        "amp_decoder_lr": amp_decoder_lr,
+        "ph_decoder_lr": ph_decoder_lr,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "loss_function": config['training']['loss_function'],
+        "encoder_type": config['model'].get('encoder_type', 'custom'),
+        "world_size": world_size,
+        "model": config['model'],
+        "data": config['data'],
+        "training": config['training'],
+        "trainer": config['trainer'],
+    })
+    mlflow_logger.log_artifact(config_path)
+    if FINETUNE_PATH and finetune_checkpoint_sha256 is not None:
+        mlflow_logger.log_params({"finetune_checkpoint_sha256": finetune_checkpoint_sha256})
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -1048,4 +1073,7 @@ if is_main_process:
     print('\nFinished Training!', flush=True)
 
 if is_main_process and config['wandb']['enabled']:
-    wandb.finish() 
+    wandb.finish()
+
+if is_main_process:
+    mlflow_logger.finish()
