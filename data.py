@@ -491,8 +491,12 @@ class CombinedDataset(Dataset):
             if needle in desc:
                 kept.append(dp_file)
 
+        kept_names = sorted(p.stem[:-3] for p in kept)          # strip trailing '_dp'
+        dropped_names = sorted(p.stem[:-3] for p in file_paths if p not in kept)
         print(f"[Rank {rank}] probe_filter='{probe_filter}': kept {len(kept)}/{len(file_paths)} objects",
               flush=True)
+        print(f"[Rank {rank}] probe_filter='{probe_filter}': KEEP  -> {kept_names}", flush=True)
+        print(f"[Rank {rank}] probe_filter='{probe_filter}': DROP  -> {dropped_names}", flush=True)
         if not kept:
             raise ValueError(
                 f"probe_filter='{probe_filter}' matched 0 objects in {data_dir}. "
