@@ -44,31 +44,44 @@ training:
 
 # Model Architecture (identical across all 3 runs)
 model:
-  encoder_type: 'pretrained'
+  init:
+    enabled: false
+    method: 'trunc_normal'  # options: trunc_normal, kaiming
+    mean: 0.0
+    std: 0.02
+    apply_to: ['encoder', 'decoders']  # options: encoder, decoders
+    override_pretrained: false
+    kaiming:
+      distribution: 'uniform'  # options: uniform, normal
+      mode: 'fan_in'           # options: fan_in, fan_out
+      nonlinearity: 'relu'     # options: relu, leaky_relu, linear, etc.
+      a: 0.0                   # negative slope for leaky_relu
+  encoder_type: 'custom'  # Options: 'custom', 'pretrained'
+  # Encoder Configuration
   encoder:
     img_size: 256
-    patch_size: 32
+    patch_size: 16
     in_channels: 1
-    embed_dim: 1024
-    depth: 24
-    num_heads: 16
+    embed_dim: 512
+    depth: 12
+    num_heads: 8
     mlp_ratio: 4.0
     use_cls_token: false
     dropout: 0.1
     attn_dropout: 0.0
-    timm_model_name: 'vit_large_patch32_224'
+    # Pretrained source
+    timm_model_name: 'vit_large_patch32_224' #initialization with ViT_L_32 model weights'
     timm_kwargs:
-      pretrained: false
-    checkpoint_path: '/lus/flare/projects/PPFL_FM/pretrained_model_weights/model.safetensors'
+      pretrained: false          # set true to download timm weights instead of local checkpoint
+    checkpoint_path: 'model.safetensors'  # local pretrained weights
     checkpoint_kwargs:
       strict: true
   decoder:
     base_channels: 64
-    latent_dim: null
-    num_stages: 5
+    latent_dim: 512
+    num_stages: 4        # 8x8 → 256x256 for patch_size=32
     use_batchnorm: true
     dropout: 0.1
-
 # Paths
 paths:
   model_save_path: '/flare/datascience/vsastry/projects/ptcho_vit/ptycho-vit/scratch/models'

@@ -278,7 +278,7 @@ class Trainer(object):
     def trace_handler(self,p):
         #if self.is_main_process:
         local_r = os.environ.get('PALS_LOCAL_RANKID')
-        print(f"tracing the profiler from {local_r}")
+        #print(f"tracing the profiler from {local_r}")
         p.export_chrome_trace("./trace_" + str(p.step_num) + "_" + str(local_r) + ".json")
 
     def train(self, dataloader, criterion, optimizer, metrics):
@@ -361,11 +361,11 @@ class Trainer(object):
             move_data = time.perf_counter()
             # Unpack batch (this is fast - data is already loaded from DataLoader)
             diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = batch
-            print(f"diff_amp.device={diff_amp.device} probe.device={probe.device} norm.device={norm.device}, {self.device}", flush=True)
+            #print(f"diff_amp.device={diff_amp.device} probe.device={probe.device} norm.device={norm.device}, {self.device}", flush=True)
             input_diff = diff_amp.to(self.device)
-            print("got the input diff", flush=True)
+            #print("got the input diff", flush=True)
             input_probe = torch.view_as_real(probe.clone().detach()).to(self.device)
-            print("got the probe", flush=True)
+            #print("got the probe", flush=True)
             input_norm = norm.to(self.device)
             input_scale = scale.to(self.device)
             if self.use_prefetch == False:
@@ -374,10 +374,10 @@ class Trainer(object):
             #_sync_device()
             fwd_pass_st = time.perf_counter()
             if profiling:
-                print("start_fwd_pass", flush=True)
+                #print("start_fwd_pass", flush=True)
                 with torch.profiler.record_function("model_fwdpass"):
                     output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
-                print("end_fwd_pass", flush=True)
+                #print("end_fwd_pass", flush=True)
             else:
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
             #_sync_device()
@@ -648,7 +648,7 @@ class Trainer(object):
             output_amp = last_output_amp[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
             input_ph = last_ph_patch[0, 0].cpu()  # [B, C, H, W] -> [H, W]
             output_ph = last_output_ph[0, 0].detach().cpu().numpy()  # [B, C, H, W] -> [H, W]
-            print(f"input_diff:{input_diff.shape}")
+            #print(f"input_diff:{input_diff.shape}")
             filename = 'plot_epoch' + str(epoch) + '.png'
             print("generate plot for validation")
             self.generate_plot(input_diff, output_diff, input_amp, output_amp, input_ph, output_ph, filename)
@@ -661,7 +661,7 @@ class Trainer(object):
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
             if self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']})
-        print(f"eval loss")
+        #print(f"eval loss")
         # Check if this is the best model (use synchronized validation loss)
         # Only save on main process to avoid multiple saves
         if avg_val_loss < metrics['best_val_loss']:
