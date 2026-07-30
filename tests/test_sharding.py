@@ -14,9 +14,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import random_split
-from ptycho_vit.data import CombinedDataset, RankShardedSubset
 import yaml
+from torch.utils.data import random_split
+
+from ptycho_vit.data import CombinedDataset, RankShardedSubset
 
 
 def load_config(config_path='config.yaml'):

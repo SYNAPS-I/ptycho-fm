@@ -5,14 +5,13 @@ from __future__ import annotations
 import bisect
 import pickle
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import h5py
 import numpy as np
 import torch
+from scipy.ndimage import zoom
 from torch import Tensor
 from torch.utils.data import Dataset
-from scipy.ndimage import zoom
 
 from ptycho_vit.utils.ptychi_utils import extract_patches_fourier_shift
 
@@ -59,7 +58,7 @@ class PtychographyDatasetPacked(Dataset):
     """
 
     @staticmethod
-    def find_packed_shards(directory: Path) -> List[Path]:
+    def find_packed_shards(directory: Path) -> list[Path]:
         directory = Path(directory)
         paths = sorted(directory.glob("packed_*.hdf5"))
         if not paths:
@@ -72,13 +71,13 @@ class PtychographyDatasetPacked(Dataset):
         rank: int = 0,
         world_size: int = 1,
         debug: bool = False,
-        max_shards: Optional[int] = None,
+        max_shards: int | None = None,
         scale: float = 100000.0,
-        normalization_dict_path: Optional[str] = None,
+        normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         max_probe_modes: int = 8,
-        target_size: Optional[int] = 256,
+        target_size: int | None = 256,
     ):
         _ = world_size, debug
         self.pack_dir = Path(pack_dir)
@@ -96,9 +95,9 @@ class PtychographyDatasetPacked(Dataset):
         self.default_normalization = default_normalization
         self.fake_data = None
 
-        self._open_shards: Dict[Path, h5py.File] = {}
+        self._open_shards: dict[Path, h5py.File] = {}
 
-        self._norm_override: Optional[dict] = None
+        self._norm_override: dict | None = None
         if normalization_dict_path:
             with open(normalization_dict_path, "rb") as f:
                 m = pickle.load(f)
@@ -107,8 +106,8 @@ class PtychographyDatasetPacked(Dataset):
             self._norm_override = m
 
         # shard_offsets[k] = pattern index where shard k starts; length n_shards+1
-        self.shard_offsets: List[int] = [0]
-        self._obj_starts: List[np.ndarray] = []
+        self.shard_offsets: list[int] = [0]
+        self._obj_starts: list[np.ndarray] = []
         for p in self.shard_paths:
             with h5py.File(p, "r", libver="latest", swmr=True) as f:
                 n_dp = f["n_dp"][:].astype(np.int64)
@@ -136,7 +135,7 @@ class PtychographyDatasetPacked(Dataset):
     def __len__(self) -> int:
         return self._len
 
-    def _norm_for_slot(self, f: h5py.File, o: int, key: Optional[str]) -> float:
+    def _norm_for_slot(self, f: h5py.File, o: int, key: str | None) -> float:
         v = float(f["normalization"][o])
         if self._norm_override is not None and key is not None:
             v = float(self._norm_override.get(key, v if not np.isnan(v) else self.default_normalization))

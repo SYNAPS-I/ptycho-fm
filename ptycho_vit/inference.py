@@ -1,13 +1,14 @@
 import os
+
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 import yaml
+from torch.utils.data import DataLoader
 
 from ptycho_vit.data import PtychographyDataset
-from ptycho_vit.model.model import PtychoViT
 from ptycho_vit.legacy.model512 import PtychoViT as PtychoViT512
 from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
+from ptycho_vit.model.model import PtychoViT
 
 
 def main() -> None:

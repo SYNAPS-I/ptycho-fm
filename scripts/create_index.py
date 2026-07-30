@@ -1,9 +1,9 @@
-import os
 import argparse
 import logging
+import os
 
-import pandas as pd
 import h5py
+import pandas as pd
 import tqdm
 
 logger = logging.getLogger(__name__)
@@ -39,8 +39,8 @@ def update_table(
     probe_height: int,
     probe_width: int,
     pixel_size_m: float,
-    object_height: int = None, 
-    object_width: int = None
+    object_height: int | None = None,
+    object_width: int | None = None,
 ):
     table.loc[len(table)] = [
         dp_path, 
@@ -76,7 +76,7 @@ def create_index(
                     
                     para_path = os.path.join(root, dp_fname.replace("dp", "para"))
                     if not os.path.exists(para_path):
-                        logger.warning("{} does not exist".format(para_path))
+                        logger.warning(f"{para_path} does not exist")
                         continue
                     
                     with h5py.File(para_path, "r") as f:
@@ -108,8 +108,8 @@ def create_index(
                         object_height=object_height,
                         object_width=object_width
                     )
-                except Exception as e:
-                    logger.error("Error processing {}: {}".format(dp_path, e))
+                except (OSError, KeyError, ValueError) as e:
+                    logger.error(f"Error processing {dp_path}: {e}")
                     continue
                 
                 pbar.update(1)

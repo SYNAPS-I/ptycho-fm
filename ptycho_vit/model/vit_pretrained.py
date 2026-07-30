@@ -1,7 +1,6 @@
 import math
 import os
 import warnings
-from typing import Dict, Optional, Tuple
 
 import timm
 import torch
@@ -26,9 +25,9 @@ class VisionTransformer(nn.Module):
         use_cls_token: bool = False,
         *,
         timm_model_name: str = "vit_large_patch32_224",
-        timm_kwargs: Optional[Dict[str, object]] = None,
-        checkpoint_path: Optional[str] = None,
-        strict_load: Optional[bool] = None,
+        timm_kwargs: dict[str, object] | None = None,
+        checkpoint_path: str | None = None,
+        strict_load: bool | None = None,
     ) -> None:
         super().__init__()
 
@@ -58,7 +57,7 @@ class VisionTransformer(nn.Module):
                 strict_load = False
 
         # --- Build kwargs for timm.create_model ---
-        create_kwargs: Dict[str, object] = {
+        create_kwargs: dict[str, object] = {
             "pretrained": True,                   # default: download/cached weights
             "in_chans": in_channels,
             "img_size": (img_size, img_size),
@@ -86,7 +85,7 @@ class VisionTransformer(nn.Module):
 
         # Update attributes with actual backbone configuration.
         self.backbone = backbone
-        self.embed_dim = getattr(backbone, "embed_dim")
+        self.embed_dim = backbone.embed_dim
         blocks = getattr(backbone, "blocks", [])
         if blocks:
             self.depth = len(blocks)
@@ -129,7 +128,7 @@ class VisionTransformer(nn.Module):
         self.attn_dropout = attn_dropout
 
         # Internal cache for the last class token (useful if requested downstream).
-        self._last_cls_token: Optional[torch.Tensor] = None
+        self._last_cls_token: torch.Tensor | None = None
 
     def _load_checkpoint(self, backbone: nn.Module, checkpoint_path: str, strict_load: bool) -> None:
         checkpoint_path = os.path.expanduser(checkpoint_path)
@@ -139,7 +138,7 @@ class VisionTransformer(nn.Module):
         state_dict = self._read_state_dict(checkpoint_path)
         target_state = backbone.state_dict()
 
-        cleaned_state: Dict[str, torch.Tensor] = {}
+        cleaned_state: dict[str, torch.Tensor] = {}
         for key, tensor in state_dict.items():
             stripped_key = self._strip_prefix(key)
             if stripped_key in target_state:
@@ -189,7 +188,7 @@ class VisionTransformer(nn.Module):
                 )
 
     @staticmethod
-    def _read_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
+    def _read_state_dict(checkpoint_path: str) -> dict[str, torch.Tensor]:
         if checkpoint_path.endswith(".safetensors"):
             try:
                 from safetensors.torch import load_file  # type: ignore
@@ -204,7 +203,7 @@ class VisionTransformer(nn.Module):
         return state_dict
 
     @staticmethod
-    def _extract_state_dict(checkpoint: object) -> Dict[str, torch.Tensor]:
+    def _extract_state_dict(checkpoint: object) -> dict[str, torch.Tensor]:
         if isinstance(checkpoint, dict):
             for key in ("state_dict", "model_state_dict", "model", "net"):
                 nested = checkpoint.get(key)
@@ -236,13 +235,13 @@ class VisionTransformer(nn.Module):
         return key
 
     @staticmethod
-    def _resolve_pos_grid(num_tokens: int) -> Tuple[int, bool]:
+    def _resolve_pos_grid(num_tokens: int) -> tuple[int, bool]:
         if num_tokens <= 0:
             raise ValueError("Number of tokens must be positive.")
-        sqrt_tokens = int(round(num_tokens ** 0.5))
+        sqrt_tokens = round(num_tokens ** 0.5)
         if sqrt_tokens * sqrt_tokens == num_tokens:
             return sqrt_tokens, False
-        sqrt_minus_cls = int(round((num_tokens - 1) ** 0.5)) if num_tokens > 1 else 0
+        sqrt_minus_cls = round((num_tokens - 1) ** 0.5) if num_tokens > 1 else 0
         if sqrt_minus_cls * sqrt_minus_cls == num_tokens - 1:
             return sqrt_minus_cls, True
         raise ValueError(f"Cannot infer positional grid for token count {num_tokens}.")
@@ -293,7 +292,7 @@ class VisionTransformer(nn.Module):
         if weight.shape == target_shape:
             return weight
 
-        out_channels, in_channels_target, *_ = target_shape
+        _, in_channels_target, *_ = target_shape
         _, in_channels_source, *_ = weight.shape
 
         if in_channels_source == in_channels_target:
@@ -311,7 +310,7 @@ class VisionTransformer(nn.Module):
         if feats.ndim != 3:
             raise ValueError("Backbone forward_features is expected to return (B, N, C) token embeddings.")
 
-        cls_token: Optional[torch.Tensor] = None
+        cls_token: torch.Tensor | None = None
         if feats.shape[1] == self.n_patches + 1:
             cls_token, tokens = feats[:, :1], feats[:, 1:]
         elif feats.shape[1] == self.n_patches:
@@ -330,7 +329,7 @@ class VisionTransformer(nn.Module):
         return x
 
     @property
-    def cls_token(self) -> Optional[torch.Tensor]:
+    def cls_token(self) -> torch.Tensor | None:
         """Return the last class token emitted by forward, if available."""
         if self._last_cls_token is None:
             return None

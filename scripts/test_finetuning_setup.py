@@ -7,10 +7,12 @@ Tests: data loading, model loading, forward pass, and SSIM/PSNR metrics.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import torch
 import yaml
-from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_config(config_path: Path):
@@ -85,7 +87,7 @@ def test_data_loading(config, num_samples=3):
 
         # Load one sample
         sample = dataset[0]
-        diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = sample
+        diff_amp, amp_patch, ph_patch, probe, _probe_pos, _norm, _scale = sample
 
         print("  Sample shapes:")
         print(f"    diff_amp: {diff_amp.shape}, dtype: {diff_amp.dtype}")
@@ -180,7 +182,7 @@ def test_metrics():
     print("TEST 5: SSIM/PSNR Metrics")
     print("=" * 60)
 
-    from ptycho_vit.training import compute_ssim, compute_psnr
+    from ptycho_vit.training import compute_psnr, compute_ssim
 
     # Create test tensors
     img_size = 256
@@ -226,7 +228,7 @@ def test_real_inference(model, config):
     print("=" * 60)
 
     from ptycho_vit.data import PtychographyDataset
-    from ptycho_vit.training import compute_ssim, compute_psnr
+    from ptycho_vit.training import compute_psnr, compute_ssim
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
@@ -234,7 +236,7 @@ def test_real_inference(model, config):
 
     # Load real data
     data_path = Path(config['data']['data_path'])
-    dp_file = sorted(data_path.glob("*_dp.hdf5"))[0]
+    dp_file = min(data_path.glob("*_dp.hdf5"))
 
     dataset = PtychographyDataset(
         file_path=str(dp_file),
@@ -249,7 +251,7 @@ def test_real_inference(model, config):
     print(f"  Target pattern shape: {dataset.pattern_shape}")
 
     # Get a sample
-    diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = dataset[0]
+    diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = dataset[0]
 
     # Add batch dimension and move to device
     diff_amp = diff_amp.unsqueeze(0).to(device)
@@ -265,7 +267,7 @@ def test_real_inference(model, config):
     print(f"GT ph_patch range: [{ph_patch.min():.3f}, {ph_patch.max():.3f}]")
 
     with torch.no_grad():
-        output_diff, output_amp, output_ph = model(diff_amp, probe, norm, scale)
+        _output_diff, output_amp, output_ph = model(diff_amp, probe, norm, scale)
 
     print(f"\nPredicted output_amp range: [{output_amp.min():.3f}, {output_amp.max():.3f}]")
     print(f"Predicted output_ph range: [{output_ph.min():.3f}, {output_ph.max():.3f}]")
@@ -321,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  python main.py")
         print()
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- top-level CLI sanity check: any error is a test failure to surface
         print(f"\n[FAILED] Error: {e}")
         import traceback
         traceback.print_exc()

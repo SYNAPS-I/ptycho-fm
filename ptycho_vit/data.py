@@ -1,14 +1,15 @@
+import pickle
+from collections import OrderedDict
+from pathlib import Path
+
+import h5py
 import numpy as np
+import pandas as pd
 import torch
+from scipy.ndimage import zoom
 from torch import Tensor
 from torch.utils.data import Dataset, Subset
-import h5py
-import pickle
-import pandas as pd
-from pathlib import Path
-from typing import Optional, Tuple, Dict
-from collections import OrderedDict
-from scipy.ndimage import zoom
+
 from ptycho_vit.utils.ptychi_utils import extract_patches_fourier_shift
 
 
@@ -34,13 +35,13 @@ class PtychographyDataset(Dataset):
         self,
         file_path: str,
         scale: float = 100000.,
-        normalization_dict_path: Optional[str] = None,
+        normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         cache_object: bool = True,
         max_probe_modes: int = 8,
-        target_size: Optional[int] = 256,
-        object_name: Optional[str] = None
+        target_size: int | None = 256,
+        object_name: str | None = None
     ):
         self.file_path = Path(file_path)
         self.scale = scale
@@ -81,7 +82,7 @@ class PtychographyDataset(Dataset):
             self.object_name = object_name
         else:
             stem = self.dp_file.stem
-            self.object_name = stem[:-3] if stem.endswith('_dp') else stem
+            self.object_name = stem.removesuffix('_dp')
 
         # Load normalization factor
         self._load_normalization()
@@ -100,7 +101,7 @@ class PtychographyDataset(Dataset):
                     normalization_dict = pickle.load(f)
 
                 if not isinstance(normalization_dict, dict):
-                    raise ValueError(f"Normalization file must contain a dictionary, got {type(normalization_dict)}")
+                    raise TypeError(f"Normalization file must contain a dictionary, got {type(normalization_dict)}")
 
                 # Look up normalization factor using object name
                 if self.object_name in normalization_dict:
@@ -114,7 +115,7 @@ class PtychographyDataset(Dataset):
                 print(f"Warning: Normalization file not found at {self.normalization_dict_path}. "
                       f"Using default: {self.default_normalization}", flush=True)
                 self.normalization = self.default_normalization
-            except Exception as e:
+            except (OSError, pickle.UnpicklingError, TypeError, ValueError) as e:
                 print(f"Warning: Error loading normalization file: {e}. "
                       f"Using default: {self.default_normalization}", flush=True)
                 self.normalization = self.default_normalization
@@ -148,7 +149,7 @@ class PtychographyDataset(Dataset):
     def _load_file_info(self):
         """Load file and extract basic information about the dataset using persistent handles."""
         # Use persistent handles (already opened in __init__)
-        if 'dp' not in self.dp_handle.keys():
+        if 'dp' not in self.dp_handle:
             raise KeyError(f"Missing diffraction patterns 'dp' in {self.dp_file.name}")
         self.num_patterns = self.dp_handle['dp'].shape[0]
         self._raw_pattern_shape = self.dp_handle['dp'].shape[1:]  # Original shape from file
@@ -161,7 +162,7 @@ class PtychographyDataset(Dataset):
 
         # Load from parameters file
         required_keys = ['object', 'probe', 'probe_position_x_m', 'probe_position_y_m']
-        missing_keys = [key for key in required_keys if key not in self.para_handle.keys()]
+        missing_keys = [key for key in required_keys if key not in self.para_handle]
         if missing_keys:
             raise KeyError(f"Missing required keys in {self.para_file.name}: {missing_keys}")
 
@@ -170,7 +171,7 @@ class PtychographyDataset(Dataset):
     def __len__(self) -> int:
         return self.num_patterns
         
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get a single data sample.
         
@@ -188,9 +189,9 @@ class PtychographyDataset(Dataset):
         # Load data from file
         try:
             diffraction_amp, amplitude_patch, phase_patch, probe, probe_position = self._load_hdf5_pattern(idx)
-        except Exception as e:
+        except Exception:
             print(f"[Error] Failed to load pattern {idx} from {self.file_path}", flush=True)
-            raise e
+            raise
         
         # Convert to tensors
         diffraction_amp = torch.from_numpy(diffraction_amp) if isinstance(diffraction_amp, np.ndarray) else diffraction_amp
@@ -417,7 +418,7 @@ class PtychographyDataset(Dataset):
                 probe = self._upsample_probe(probe, self.target_size)
             self._cached_probe = probe 
     
-    def _load_hdf5_pattern(self, pattern_idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _load_hdf5_pattern(self, pattern_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Load specific pattern from paired HDF5 files with efficient caching and persistent handles."""
         # Always cache positions on first access
         self._cache_positions()
@@ -556,17 +557,17 @@ class CombinedDataset(Dataset):
         return paired_files
 
     @staticmethod
-    def derive_relative_path(file_path: Path, base_dir: Optional[Path]) -> Optional[Path]:
+    def derive_relative_path(file_path: Path, base_dir: Path | None) -> Path | None:
         """Return file_path relative to base_dir when possible."""
         if base_dir is None:
             return None
         try:
             return Path(file_path).resolve().relative_to(Path(base_dir).resolve())
-        except Exception:
+        except (OSError, ValueError):
             return None
 
     @staticmethod
-    def derive_object_name(file_path: Path, base_dir: Optional[Path]) -> str:
+    def derive_object_name(file_path: Path, base_dir: Path | None) -> str:
         """Derive a unique object name from a file path relative to base_dir."""
         file_path = Path(file_path)
         rel = CombinedDataset.derive_relative_path(file_path, base_dir)
@@ -578,7 +579,7 @@ class CombinedDataset(Dataset):
             return rel_no_suffix.as_posix()
 
         stem = file_path.stem
-        return stem[:-3] if stem.endswith('_dp') else stem
+        return stem.removesuffix('_dp')
 
     def __init__(self, file_paths, rank=0, world_size=1, debug=False, max_files=None, **dataset_kwargs):
         """
@@ -606,7 +607,7 @@ class CombinedDataset(Dataset):
             self.file_paths = self.file_paths[:max_files]
 
         self.data_dir = data_dir
-        self.file_object_names: Dict[Path, str] = {}
+        self.file_object_names: dict[Path, str] = {}
         for file_path in self.file_paths:
             object_name = self.derive_object_name(file_path, self.data_dir)
             self.file_object_names[file_path] = object_name
@@ -631,7 +632,7 @@ class CombinedDataset(Dataset):
 
         # Try to load index.csv to avoid opening all HDF5 files
         self.index_df = None
-        self.pattern_counts: Dict[Path, int] = {}
+        self.pattern_counts: dict[Path, int] = {}
         
         if self.data_dir is not None:
             index_csv_path = Path(self.data_dir) / 'index.csv'
@@ -675,7 +676,7 @@ class CombinedDataset(Dataset):
                         sample_files = list(self.pattern_counts.items())[:5]
                         for file_path, count in sample_files:
                             print(f"[DEBUG Rank {rank}] CSV Sample: {file_path.name} -> {count} patterns", flush=True)
-                except Exception as e:
+                except (OSError, ValueError, KeyError) as e:
                     print(f"[Rank {rank}] Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
                     self.index_df = None
                     if debug:

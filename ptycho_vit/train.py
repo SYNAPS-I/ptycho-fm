@@ -1,34 +1,34 @@
-import os
-from typing import Literal
 import argparse
+import os
 import pickle
-import yaml
 import socket
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torchinfo import summary
-from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 import torch.distributed as dist
+import yaml
+from torch import nn, optim
+from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+from torchinfo import summary
+
 try:
     from mpi4py import MPI
 except ImportError:
     MPI = None
 
-from ptycho_vit.data import PtychographyDataset, CombinedDataset, RankShardedSubset
-from ptycho_vit.data_simple_pack import PtychographyDatasetPacked
-from ptycho_vit.model.model import PtychoViT
-from ptycho_vit.custom_loss import WeightedLoss
-from ptycho_vit.training import Trainer
-from ptycho_vit.mlflow_logger import MLflowLogger
-from torch.utils.data import DataLoader, random_split, DistributedSampler, Subset
-from ptycho_vit.prefetcher import CUDAPrefetcher
-from ptycho_vit.utils.utils import compute_sha256
-
 import wandb
+from torch.utils.data import DataLoader, DistributedSampler, Subset, random_split
+
+from ptycho_vit.custom_loss import WeightedLoss
+from ptycho_vit.data import CombinedDataset, PtychographyDataset, RankShardedSubset
+from ptycho_vit.data_simple_pack import PtychographyDatasetPacked
+from ptycho_vit.mlflow_logger import MLflowLogger
+from ptycho_vit.model.model import PtychoViT
+from ptycho_vit.prefetcher import CUDAPrefetcher
+from ptycho_vit.training import Trainer
+from ptycho_vit.utils.utils import compute_sha256
 
 
 def main() -> None:
@@ -47,7 +47,7 @@ def main() -> None:
             config = yaml.safe_load(f)
         if config.get('trainer', {}).get('run_num') is None:
             # Ensure run folder name is "run_yyyymmdd_hhmmss"
-            config.setdefault('trainer', {})['run_num'] = datetime.now().strftime("_%Y%m%d_%H%M%S")
+            config.setdefault('trainer', {})['run_num'] = datetime.now(tz=UTC).astimezone().strftime("_%Y%m%d_%H%M%S")
         return config
 
     # Parse command-line arguments
@@ -75,7 +75,7 @@ def main() -> None:
         epochs = schedule_cfg.get('epochs')
         fractions = schedule_cfg.get('fractions')
         if not isinstance(epochs, list) or not isinstance(fractions, list):
-            raise ValueError("training.data_subsetting_schedule.epochs and fractions must be lists.")
+            raise TypeError("training.data_subsetting_schedule.epochs and fractions must be lists.")
         if len(epochs) == 0 or len(fractions) == 0 or len(epochs) != len(fractions):
             raise ValueError("training.data_subsetting_schedule.epochs and fractions must be non-empty and the same length.")
         if epochs[0] != 0:
@@ -313,22 +313,23 @@ def main() -> None:
         # Set MASTER_ADDR and MASTER_PORT if not already set
         if "MASTER_ADDR" not in os.environ:
             if "SLURM_JOB_NODELIST" in os.environ:
-                import subprocess
                 import socket
+                import subprocess
                 nodelist = os.environ["SLURM_JOB_NODELIST"]
                 try:
                     result = subprocess.run(
                         ["scontrol", "show", "hostnames", nodelist],
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=5,
+                        check=False,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         first_node = result.stdout.strip().split('\n')[0]
                         os.environ["MASTER_ADDR"] = first_node
                     else:
                         os.environ["MASTER_ADDR"] = socket.gethostname()
-                except Exception:
+                except (OSError, subprocess.SubprocessError):
                     os.environ["MASTER_ADDR"] = socket.gethostname()
             else:
                 import socket
@@ -367,8 +368,8 @@ def main() -> None:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 dist.barrier()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 -- shutdown path: swallow anything so destroy_process_group still runs
+                print(f"[cleanup_distributed] barrier failed: {exc!r}", flush=True)
             dist.destroy_process_group()
 
     # Load configuration
@@ -688,7 +689,7 @@ def main() -> None:
                 },
                 device='cpu',
             )
-        except Exception as e:
+        except (RuntimeError, TypeError, AttributeError) as e:
             print(f"[Warning] torchinfo summary failed and will be skipped: {e}", flush=True)
 
     # Move model to device and wrap with DDP (multinode.py approach)
@@ -784,9 +785,8 @@ def main() -> None:
     wandb_run_id = None
 
     # If finetuning weights are provided, skip optimizer state resume to keep optimizer fresh
-    if FINETUNE_PATH:
-        if is_main_process:
-            print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
+    if FINETUNE_PATH and is_main_process:
+        print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
 
     mlflow_logger = MLflowLogger(config, is_main_process)
 
@@ -980,8 +980,7 @@ def main() -> None:
 
             # Log epoch start with timestamp
             if is_main_process:
-                from datetime import datetime
-                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+                print(f"\n[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] ========== Starting Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
             
             # Debug logging for first epoch
             if DEBUG_MODE and epoch < 3:
@@ -1029,13 +1028,13 @@ def main() -> None:
                         val_dataset.debug_call_count = 0  # Reset counter for validation
             
             if is_main_process:
-                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
+                print(f"\n[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
             trainer.validate(val_prefetcher, criterion, optimizer, metrics, 
                 plot=plot, epoch=epoch, scheduler=scheduler, profile=profile)
 
             # Generate test plot only on main process
             if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and (not profile) and test_loader is not None:
-                print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
+                print(f"\n[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Generating test plot...", flush=True)
                 trainer.generate_test_plot(
                     test_loader,
                     epoch,
@@ -1059,9 +1058,8 @@ def main() -> None:
                 trainer.update_saved_model(f'model_epoch_{epoch + 1:03d}')
 
             if is_main_process:
-                from datetime import datetime
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
+                print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
+                print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
     finally:
         cleanup_distributed()
 

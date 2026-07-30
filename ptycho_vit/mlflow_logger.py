@@ -11,7 +11,7 @@ Reference: gwbischof/mlflow-examples/mlflow_tool.py.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -47,7 +47,7 @@ class MLflowLogger:
         run_name = mlflow_cfg.get('run_name')
         if not run_name:
             run_num = config.get('trainer', {}).get('run_num', 'run')
-            run_name = f"{run_num}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            run_name = f"{run_num}-{datetime.now(tz=UTC).astimezone().strftime('%Y%m%d-%H%M%S')}"
 
         tags = mlflow_cfg.get('tags') or {}
         self.run = mlflow.start_run(run_name=run_name, tags=tags)
@@ -63,7 +63,7 @@ class MLflowLogger:
         try:
             import mlflow.tracking._model_registry.client as _rc
             _rc.is_prompt_supported_registry = lambda *_a, **_k: False
-        except Exception:
+        except (ImportError, AttributeError):
             pass
 
     def log_params(self, params: dict[str, Any]) -> None:
@@ -111,9 +111,10 @@ class MLflowLogger:
         self._mlflow.pytorch.log_model(pytorch_model=model, artifact_path='model')
         artifact_uri = f"{self.run.info.artifact_uri}/model"
 
+        from mlflow.exceptions import MlflowException
         try:
             self._client.get_registered_model(model_name)
-        except Exception:
+        except MlflowException:
             self._client.create_registered_model(
                 model_name,
                 description="ptycho-vit fine-tuned model",

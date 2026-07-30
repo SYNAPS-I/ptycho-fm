@@ -1,19 +1,18 @@
 import argparse
 import os
-from pathlib import Path
 
 import h5py
 import numpy as np
+import tifffile
 import torch
 import yaml
-import tifffile
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ptycho_vit.data import PtychographyDataset
-from ptycho_vit.model.model import PtychoViT
 from ptycho_vit.legacy.model512 import PtychoViT as PtychoViT512
 from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
+from ptycho_vit.model.model import PtychoViT
 from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
 
 
@@ -53,8 +52,7 @@ def compute_dp_max(dp_dataset, chunk_size: int = 256) -> float:
         end = min(start + chunk_size, total)
         chunk = dp_dataset[start:end]
         chunk_max = float(np.max(chunk))
-        if chunk_max > max_val:
-            max_val = chunk_max
+        max_val = max(max_val, chunk_max)
     return max_val
 
 

@@ -1,10 +1,11 @@
 """Tests for data loading components."""
 import tempfile
-from pathlib import Path
+
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from ptycho_vit.data import PtychographyDataset, CombinedDataset
+from ptycho_vit.data import CombinedDataset, PtychographyDataset
+
 from .test_utils import create_dummy_hdf5_pair
 
 
@@ -16,7 +17,7 @@ def test_ptychography_dataset():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create dummy data
-        dp_file, para_file, num_patterns = create_dummy_hdf5_pair(tmpdir, 'test_object')
+        dp_file, _para_file, num_patterns = create_dummy_hdf5_pair(tmpdir, 'test_object')
 
         # Create dataset
         dataset = PtychographyDataset(str(dp_file), patch_size=128)
@@ -72,7 +73,7 @@ def test_combined_dataset_basic():
         # Test indexing
         print("\nTesting dataset indexing:")
         sample = combined[0]
-        diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale = sample
+        diff_amp, amp_patch, ph_patch, probe, probe_pos, _norm, _scale = sample
 
         print("Sample 0 shapes:")
         print(f"  diff_amp: {diff_amp.shape}")
@@ -90,7 +91,7 @@ def test_combined_dataset_basic():
         total_samples = 0
         for batch in dataloader:
             batch_count += 1
-            diff_amps, amp_patches, ph_patches, probes, probe_pos, norms, scales = batch
+            diff_amps, _amp_patches, _ph_patches, _probes, probe_pos, _norms, _scales = batch
             total_samples += diff_amps.shape[0]
             if batch_count <= 2:  # Print first 2 batches
                 print(f"  Batch {batch_count}: {diff_amps.shape[0]} samples")

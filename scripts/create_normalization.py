@@ -7,11 +7,13 @@ Normalizes each scan by its maximum photon count.
 from __future__ import annotations
 
 import argparse
-import h5py
 import pickle
-import numpy as np
 from pathlib import Path
+
+import h5py
+import numpy as np
 from tqdm import tqdm
+
 
 def get_max_photons(dp_file: Path, chunk_size: int = 100) -> float:
     """Get the maximum photon count from a diffraction pattern file."""
@@ -30,8 +32,7 @@ def get_max_photons(dp_file: Path, chunk_size: int = 100) -> float:
             end = min(start + chunk_size, n_patterns)
             chunk = dp_dataset[start:end]
             chunk_max = float(np.max(chunk))
-            if chunk_max > max_val:
-                max_val = chunk_max
+            max_val = max(max_val, chunk_max)
 
         return max_val
 
@@ -58,12 +59,12 @@ def create_normalization_dict(
 
     for dp_file in tqdm(dp_files, desc="Computing max photons"):
         # Extract scan name (e.g., "S02252" from "S02252_dp.hdf5")
-        scan_name = dp_file.stem[:-3] if dp_file.stem.endswith("_dp") else dp_file.stem
+        scan_name = dp_file.stem.removesuffix("_dp")
 
         try:
             max_photons = get_max_photons(dp_file, chunk_size=chunk_size)
             normalization_dict[scan_name] = max_photons
-        except Exception as e:
+        except (OSError, KeyError, ValueError) as e:
             print(f"\nWARNING: Failed to process {dp_file.name}: {e}")
             continue
 

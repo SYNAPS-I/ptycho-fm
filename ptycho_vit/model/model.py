@@ -5,12 +5,15 @@ This module contains Vision Transformer-based models for ptychography reconstruc
 All models are fixed at 256x256 image size.
 """
 
-import torch
-import torch.nn as nn
 import math
+
+import torch
+from torch import nn
+
+from ptycho_vit.model.decoders import Decoder256
 from ptycho_vit.model.vit import CustomViT
 from ptycho_vit.model.vit_pretrained import VisionTransformer
-from ptycho_vit.model.decoders import Decoder256
+
 # from utils.math import create_logpolar_grid, apply_logpolar_transform
 
 
@@ -67,12 +70,11 @@ class PtychoViT(nn.Module):
         override_pretrained = bool(init_config.get('override_pretrained', False))
         if init_enabled and init_method not in ['trunc_normal', 'kaiming']:
             raise ValueError(f"Unknown init method: {init_method}. Use 'trunc_normal' or 'kaiming'.")
-        if init_enabled and init_method == 'kaiming':
-            if kaiming_distribution not in ['uniform', 'normal']:
-                raise ValueError(
-                    f"Unknown kaiming distribution: {kaiming_distribution}. "
-                    "Use 'uniform' or 'normal'."
-                )
+        if init_enabled and init_method == 'kaiming' and kaiming_distribution not in ['uniform', 'normal']:
+            raise ValueError(
+                f"Unknown kaiming distribution: {kaiming_distribution}. "
+                "Use 'uniform' or 'normal'."
+            )
 
         # Vision Transformer Encoder
         if encoder_type == 'pretrained':

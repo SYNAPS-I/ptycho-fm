@@ -1,5 +1,6 @@
 import torch
-import torch.nn as nn
+from torch import nn
+
 
 class WeightedLoss(nn.Module):
     def __init__(self, loss_type='mse', threshold=0.0, alpha=1.0):
@@ -12,7 +13,7 @@ class WeightedLoss(nn.Module):
             alpha: Weight exponent controlling emphasis on low intensities (default: 1.0)
                    alpha=1 → inverse weighting (1/intensity)
         """
-        super(WeightedLoss, self).__init__()
+        super().__init__()
         if loss_type not in ['mse', 'mae']:
             raise ValueError(f"loss_type must be 'mse' or 'mae', got '{loss_type}'")
         self.loss_type = loss_type

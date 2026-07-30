@@ -1,5 +1,6 @@
 """Utility functions for generating dummy test data."""
 from pathlib import Path
+
 import h5py
 import numpy as np
 

@@ -1,16 +1,18 @@
 import os
 import shutil
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.distributed as dist
+import time
+from datetime import UTC, datetime
+
 import matplotlib.pyplot as plt
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+import wandb
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-from datetime import datetime
-import time
+from torch import nn
+
 from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
-import wandb
 
 
 def _move_to_cpu(obj):
@@ -137,7 +139,7 @@ def compute_ssim(
     return ssim_map.mean().item()
 
 
-class Trainer(object):
+class Trainer:
     def __init__(
         self,
         model,
@@ -448,8 +450,8 @@ class Trainer(object):
 
 
         if self.is_main_process:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Loading first batch... (this may take a while with lazy data loading)", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Loading first batch... (this may take a while with lazy data loading)", flush=True)
 
         batch_0_io_start = time.time()
         train_end_time = None  # Will be set after each batch completes
@@ -477,9 +479,9 @@ class Trainer(object):
                     io_time = time.time() - train_end_time
 
             if batch_idx == 0 and self.is_main_process:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] First batch loaded! Starting training... (batch 1/{total_batches})", flush=True)
+                print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] First batch loaded! Starting training... (batch 1/{total_batches})", flush=True)
             elif batch_idx < 10 and self.is_main_process:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
+                print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Processing batch {batch_idx + 1}/{total_batches}", flush=True)
 
             # ── Unpack ──────────────────────────────────────────────────────────
             if isinstance(batch, (list, tuple)) and len(batch) == 8:
@@ -547,7 +549,7 @@ class Trainer(object):
             if skip_threshold is not None and global_max_norm is not None and global_max_norm > skip_threshold:
                 if self.is_main_process:
                     print(
-                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] "
                         f"[Skip Batch] Grad norm {global_max_norm:.2f} > {skip_threshold} "
                         f"(batch {batch_idx + 1}/{total_batches})",
                         flush=True
@@ -564,7 +566,7 @@ class Trainer(object):
                 train_time = train_end_time - train_start_time
                 total_time = io_time + train_time
                 if self.is_main_process:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
+                    print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] [Batch {batch_idx + 1} Timing] IO: {io_time:.3f}s | Training: {train_time:.3f}s | Total: {total_time:.3f}s", flush=True)
 
             batch_loss = loss.detach().item()
             running_loss += batch_loss
@@ -598,16 +600,17 @@ class Trainer(object):
                     )
                 self.mlflow_logger.log_metrics(batch_metrics, step=global_step)
 
-            if batch_idx > 0 and self.is_main_process:
-                if batch_idx < 1000 and (batch_idx + 1) % 1000 == 0:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
-                elif (batch_idx + 1) % 1000 == 0:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
+            if (
+                batch_idx > 0
+                and self.is_main_process
+                and ((batch_idx < 1000 and (batch_idx + 1) % 1000 == 0) or (batch_idx + 1) % 1000 == 0)
+            ):
+                print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] [Training] Batch {batch_idx + 1}/{total_batches} ({(batch_idx + 1) * 100.0 / total_batches:.2f}%)", flush=True)
 
             if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
                 progress_pct = int(progress_milestones[next_milestone_idx] * 100)
                 if self.is_main_process:
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
+                    print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] [Training Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                 next_milestone_idx += 1
 
 
@@ -631,8 +634,8 @@ class Trainer(object):
         epoch_time = epoch_end_time - epoch_start_time
 
         if self.is_main_process:
-            #print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed in {epoch_time:.3f} seconds", flush=True)
+            #print(f"[{datetime.now(tz=timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed in {epoch_time:.3f} seconds", flush=True)
 
         avg_train_loss = self.synchronize_loss(avg_train_loss)
         avg_amp_loss = self.synchronize_loss(avg_amp_loss)
@@ -663,8 +666,7 @@ class Trainer(object):
         Validation loop with SSIM and PSNR metrics.
         """
         if self.is_main_process:
-            from datetime import datetime
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting validation loop: {len(dataloader)} batches", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Starting validation loop: {len(dataloader)} batches", flush=True)
 
         val_loss = 0.0
         val_amp_loss = 0.0
@@ -692,10 +694,9 @@ class Trainer(object):
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
-                if profile:
-                    if batch_idx == 50:
-                        # early stop if profiling
-                        break
+                if profile and batch_idx == 50:
+                    # early stop if profiling
+                    break
                 if isinstance(batch, (list, tuple)) and len(batch) == 8:
                     diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
                 else:
@@ -757,10 +758,9 @@ class Trainer(object):
                 num_samples += batch_size
 
                 if next_milestone_idx < len(milestone_batches) and batch_idx >= milestone_batches[next_milestone_idx]:
-                    from datetime import datetime
                     progress_pct = int(progress_milestones[next_milestone_idx] * 100)
                     if self.is_main_process:
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Validation Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
+                        print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] [Validation Progress] {progress_pct}% complete ({batch_idx + 1}/{total_batches} batches)", flush=True)
                     next_milestone_idx += 1
 
                 if plot and self.is_main_process:
@@ -790,9 +790,8 @@ class Trainer(object):
         avg_ph_psnr = val_ph_psnr / num_samples if num_samples > 0 else 0.0
 
         if self.is_main_process:
-            from datetime import datetime
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed", flush=True)
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Metrics - Amp SSIM: {avg_amp_ssim:.4f}, Amp PSNR: {avg_amp_psnr:.2f} dB, Phase SSIM: {avg_ph_ssim:.4f}, Phase PSNR: {avg_ph_psnr:.2f} dB", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Validation epoch complete: {num_batches} batches processed", flush=True)
+            print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Metrics - Amp SSIM: {avg_amp_ssim:.4f}, Amp PSNR: {avg_amp_psnr:.2f} dB, Phase SSIM: {avg_ph_ssim:.4f}, Phase PSNR: {avg_ph_psnr:.2f} dB", flush=True)
 
         avg_val_loss = self.synchronize_loss(avg_val_loss)
         avg_val_amp_loss = self.synchronize_loss(avg_val_amp_loss)
@@ -884,8 +883,10 @@ class Trainer(object):
 
         if avg_val_loss < metrics['best_val_loss']:
             if self.is_main_process:
-                print("Saving improved model after Val. Loss improved from %.4f to %.5f"
-                      % (metrics['best_val_loss'], avg_val_loss), flush=True)
+                print(
+                    f"Saving improved model after Val. Loss improved from {metrics['best_val_loss']:.4f} to {avg_val_loss:.5f}",
+                    flush=True,
+                )
                 self.update_saved_model('best_model')
             metrics['best_val_loss'] = avg_val_loss
 
