@@ -28,22 +28,36 @@ All models combine learned representations with physics-based constraints to rec
 
 ```
 ptycho-vit/
-├── vit.py                # Vision Transformer encoder
-├── model.py              # PtychoViT model (unified ViT-based model)
-├── model_cnn.py          # PtychoCNN and PtychoCNN256 models, Encoder/Decoder classes
-├── ptychi_utils.py       # Image processing utilities (Fourier shift, patch extraction)
-├── data.py               # PtychographyDataset and CombinedDataset
-├── training.py           # Trainer class with train/validation loops
-├── main.py               # Main training script with DDP initialization
-├── inference.py          # Inference script for model evaluation
-├── config.yaml           # Configuration file for all parameters
-├── custom_loss.py        # Custom loss functions
-├── tests/
-│   ├── test_data.py              # Data loading tests
-│   ├── test_model_selection.py  # Model selection tests
-│   └── test_utils.py             # Utility function tests
-├── development_logs/     # Archive of deprecated code (gitignored)
-└── pyproject.toml        # Project dependencies
+├── ptycho_vit/                    # Installable package (import ptycho_vit)
+│   ├── __init__.py
+│   ├── train.py                   # Training entry point (ptycho-vit-train)
+│   ├── inference.py               # Inference entry point (ptycho-vit-infer)
+│   ├── training.py                # Trainer class with train/validation loops
+│   ├── data.py                    # PtychographyDataset, CombinedDataset, RankShardedSubset
+│   ├── data_simple.py             # Simplified dataset variant
+│   ├── data_simple_pack.py        # Packed-HDF5 dataset (PtychographyDatasetPacked)
+│   ├── custom_loss.py             # Custom loss functions (WeightedLoss)
+│   ├── prefetcher.py              # CUDAPrefetcher
+│   ├── model/
+│   │   ├── model.py               # PtychoViT (unified ViT-based model)
+│   │   ├── vit.py                 # Custom ViT encoder
+│   │   ├── vit_pretrained.py      # Pretrained ViT encoder
+│   │   └── decoders.py            # Decoder256
+│   ├── utils/
+│   │   ├── math.py
+│   │   ├── ptychi_utils.py        # Fourier-shift patch extraction / placement
+│   │   └── utils.py               # compute_sha256, misc
+│   └── legacy/                    # Archived earlier model variants (imported by inference.py)
+│       ├── model512.py            # PtychoViT512 (legacy 512×512)
+│       ├── model_cnn.py           # PtychoCNN, PtychoCNN256
+│       └── decoders_old.py
+├── tests/                         # Tests (not shipped in the wheel)
+├── scripts/                       # Standalone CLIs / HPC helpers (not shipped in the wheel)
+├── hpc_submission_scripts/        # Cluster submission wrappers
+├── docker/                        # Container build
+├── configs/                       # Per-cluster configs
+├── config.yaml                    # Default training config
+└── pyproject.toml                 # Package + dependencies
 ```
 
 ## Requirements
@@ -61,6 +75,11 @@ ptycho-vit/
 ```bash
 pip install -e .
 ```
+
+After install, the package is importable as `ptycho_vit`, and two console scripts are on PATH:
+
+- `ptycho-vit-train --config config.yaml` — training entry point (equivalent to `python -m ptycho_vit.train`)
+- `ptycho-vit-infer` — inference entry point (equivalent to `python -m ptycho_vit.inference`)
 
 ## Data Format
 
@@ -219,19 +238,23 @@ predicted_diffraction = |Psi|²
 ### Single-GPU Training
 
 ```bash
-python main.py
+ptycho-vit-train --config config.yaml
+# equivalent:
+python -m ptycho_vit.train --config config.yaml
 ```
 
 ### Multi-GPU Training with DDP
 
 ```bash
-torchrun --nnodes 1 --nproc-per-node 2 main.py
+torchrun --nnodes 1 --nproc-per-node 2 -m ptycho_vit.train --config config.yaml
 ```
 
 ### Inference
 
 ```bash
-python inference.py --model_path /path/to/checkpoint.pt --config config.yaml
+ptycho-vit-infer
+# equivalent:
+python -m ptycho_vit.inference
 ```
 
 ## Data Loading
@@ -294,32 +317,25 @@ wandb:
 
 ## Testing
 
-Run tests to verify functionality:
+Run tests to verify functionality (after `pip install -e .`):
 
 ```bash
-# Test model selection and initialization
-python tests/test_model_selection.py
-
-# Test data loading
-python tests/test_data.py
-
-# Test utility functions
-python tests/test_utils.py
+pytest tests/
 ```
 
 ## Development
 
 ### Code Organization
-- **model.py**: ViT-based model (PtychoViT - unified, supports any image size)
-- **model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
-- **ptychi_utils.py**: Image processing utilities adapted from pty-chi
-- **data.py**: Dataset classes for loading Ptychodus format files
-- **training.py**: Training and validation logic
+- **ptycho_vit/model/model.py**: ViT-based model (PtychoViT - unified, supports any image size)
+- **ptycho_vit/legacy/model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
+- **ptycho_vit/utils/ptychi_utils.py**: Image processing utilities adapted from pty-chi
+- **ptycho_vit/data.py**: Dataset classes for loading Ptychodus format files
+- **ptycho_vit/training.py**: Training and validation logic
 
 ### Adding New Models
-1. Define model class in `model.py` or `model_cnn.py`
+1. Define model class in `ptycho_vit/model/model.py` (or `ptycho_vit/legacy/model_cnn.py`)
 2. Add config section in `config.yaml` under `model:`
-3. Update model selection logic in `main.py`
+3. Update model selection logic in `ptycho_vit/train.py`
 
 ## License
 

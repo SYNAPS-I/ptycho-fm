@@ -58,5 +58,5 @@ echo "=============================================="
 
 # --- Launch distributed training ---
 # MPI handles rank coordination; Python code uses MPI broadcast for MASTER_ADDR
-mpiexec -np ${NTOTRANKS} -ppn ${NRANKS_PER_NODE} --cpu-bind depth \ #python main.py --config /eagle/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/config.yaml 
-    python main.py --config /eagle/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/config_res_ckpt.yaml
+mpiexec -np ${NTOTRANKS} -ppn ${NRANKS_PER_NODE} --cpu-bind depth \ #python -m ptycho_vit.train --config /eagle/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/config.yaml
+    python -m ptycho_vit.train --config /eagle/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/config_res_ckpt.yaml

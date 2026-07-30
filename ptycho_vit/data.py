@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 from collections import OrderedDict
 from scipy.ndimage import zoom
-from utils.ptychi_utils import extract_patches_fourier_shift
+from ptycho_vit.utils.ptychi_utils import extract_patches_fourier_shift
 
 
 class PtychographyDataset(Dataset):

@@ -14,7 +14,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from scipy.ndimage import zoom
 
-from utils.ptychi_utils import extract_patches_fourier_shift
+from ptycho_vit.utils.ptychi_utils import extract_patches_fourier_shift
 
 
 def _pad_probe(probe: np.ndarray, max_modes: int) -> np.ndarray:

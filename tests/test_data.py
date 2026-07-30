@@ -1,15 +1,11 @@
 """Tests for data loading components."""
-import sys
 import tempfile
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, random_split
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from data import PtychographyDataset, CombinedDataset
-from tests.test_utils import create_dummy_hdf5_pair
+from ptycho_vit.data import PtychographyDataset, CombinedDataset
+from .test_utils import create_dummy_hdf5_pair
 
 
 def test_ptychography_dataset():

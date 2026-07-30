@@ -8,9 +8,9 @@ All models are fixed at 256x256 image size.
 import torch
 import torch.nn as nn
 import math
-from model.vit import CustomViT
-from model.vit_pretrained import VisionTransformer
-from model.decoders import Decoder256
+from ptycho_vit.model.vit import CustomViT
+from ptycho_vit.model.vit_pretrained import VisionTransformer
+from ptycho_vit.model.decoders import Decoder256
 # from utils.math import create_logpolar_grid, apply_logpolar_transform
 
 

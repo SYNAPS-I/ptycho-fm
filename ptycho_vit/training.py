@@ -9,7 +9,7 @@ from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from datetime import datetime
 import time
-from utils.ptychi_utils import place_patches_fourier_shift
+from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
 import wandb
 
 

@@ -1,6 +1,5 @@
 import argparse
 import os
-import sys
 from pathlib import Path
 
 import h5py
@@ -11,14 +10,11 @@ import tifffile
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from data import PtychographyDataset  # noqa: E402
-from model.model import PtychoViT  # noqa: E402
-from development_logs.model512 import PtychoViT as PtychoViT512  # noqa: E402
-from development_logs.model_cnn import PtychoCNN, PtychoCNN256  # noqa: E402
-from utils.ptychi_utils import place_patches_fourier_shift  # noqa: E402
+from ptycho_vit.data import PtychographyDataset
+from ptycho_vit.model.model import PtychoViT
+from ptycho_vit.legacy.model512 import PtychoViT as PtychoViT512
+from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
+from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
 
 
 def load_config(path: str) -> dict:

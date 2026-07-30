@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from pathlib import Path
 
-from data import PtychographyDataset
+from ptycho_vit.data import PtychographyDataset
 
 
 class CombinedDataset:

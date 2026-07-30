@@ -7,14 +7,11 @@ Tests: data loading, model loading, forward pass, and SSIM/PSNR metrics.
 from __future__ import annotations
 
 import argparse
-import sys
 
 import torch
 import yaml
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
 
 def test_config(config_path: Path):
     """Test that config loads and paths exist."""
@@ -64,7 +61,7 @@ def test_data_loading(config, num_samples=3):
     print("TEST 2: Data Loading")
     print("=" * 60)
 
-    from data import PtychographyDataset
+    from ptycho_vit.data import PtychographyDataset
 
     # Get first file from data path
     data_path = Path(config['data']['data_path'])
@@ -108,7 +105,7 @@ def test_model_loading(config):
     print("TEST 3: Model Loading")
     print("=" * 60)
 
-    from model.model import PtychoViT
+    from ptycho_vit.model.model import PtychoViT
 
     # Create model
     model = PtychoViT(config=config['model'])
@@ -183,7 +180,7 @@ def test_metrics():
     print("TEST 5: SSIM/PSNR Metrics")
     print("=" * 60)
 
-    from training import compute_ssim, compute_psnr
+    from ptycho_vit.training import compute_ssim, compute_psnr
 
     # Create test tensors
     img_size = 256
@@ -228,8 +225,8 @@ def test_real_inference(model, config):
     print("TEST 6: Real Data Inference")
     print("=" * 60)
 
-    from data import PtychographyDataset
-    from training import compute_ssim, compute_psnr
+    from ptycho_vit.data import PtychographyDataset
+    from ptycho_vit.training import compute_ssim, compute_psnr
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)

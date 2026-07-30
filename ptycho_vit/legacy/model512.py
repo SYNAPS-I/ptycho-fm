@@ -119,7 +119,7 @@ class PtychoViT(nn.Module):
     def __init__(self, config=None):
         super().__init__()
         # Import CustomViT here to avoid circular imports
-        from model.vit import CustomViT
+        from ptycho_vit.model.vit import CustomViT
 
         # Use config if provided, otherwise use default values
         if config is None:

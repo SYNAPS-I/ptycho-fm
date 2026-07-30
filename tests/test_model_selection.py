@@ -1,15 +1,10 @@
 """
 Test script to verify model selection between ViT and CNN works correctly.
 """
-import sys
-import os
-# Add parent directory to path to import models
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 import yaml
-from development_logs.model512 import PtychoViT
-from development_logs.model_cnn import PtychoCNN, PtychoCNN256
+from ptycho_vit.legacy.model512 import PtychoViT
+from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
 
 
 def load_config(config_path='../config.yaml'):

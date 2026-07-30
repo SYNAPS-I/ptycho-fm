@@ -13,16 +13,11 @@ from __future__ import annotations
 import argparse
 import copy
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 @dataclass(frozen=True)
@@ -329,7 +324,7 @@ def build_reconstruction_wrapper(
 def export_onnx(config: ExportConfig) -> None:
     import torch
 
-    from model.model import PtychoViT
+    from ptycho_vit.model.model import PtychoViT
 
     raw_cfg = load_yaml(config.config_path)
     model_cfg, export_overrides = resolve_model_config(raw_cfg, config.config_path)

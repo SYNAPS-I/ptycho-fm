@@ -127,7 +127,7 @@ set -euo pipefail
 cd "${WORKDIR}"
 mkdir -p "${LOG_DIR}"
 export WANDB_API_KEY=$(cat /home/mingdu/Documents/api_keys/wandb.txt)
-tmux new-session -d -s "${session_name}" "bash -lc 'source \"${WORKDIR}/.venv/bin/activate\"; ${PYTHON_BIN} main.py --config \"${CONFIG}\" > \"${log_file}\" 2>&1'"
+tmux new-session -d -s "${session_name}" "bash -lc 'source \"${WORKDIR}/.venv/bin/activate\"; ${PYTHON_BIN} -m ptycho_vit.train --config \"${CONFIG}\" > \"${log_file}\" 2>&1'"
 tmux has-session -t "${session_name}"
 EOF
     return 0
@@ -155,7 +155,7 @@ tmux new-session -d -s "${session_name}" "bash -lc 'source \"${WORKDIR}/.venv/bi
   --node_rank ${rank} \
   --master_addr ${MASTER_ADDR} \
   --master_port ${MASTER_PORT} \
-  main.py --config \"${CONFIG}\" > \"${log_file}\" 2>&1'"
+  -m ptycho_vit.train --config \"${CONFIG}\" > \"${log_file}\" 2>&1'"
 tmux has-session -t "${session_name}"
 EOF
 }
