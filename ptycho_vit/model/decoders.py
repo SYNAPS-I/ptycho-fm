@@ -5,7 +5,7 @@ This module contains decoder architectures used in ptychography reconstruction m
 """
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class TransposeConvBlock(nn.Module):

@@ -1,7 +1,8 @@
+import hashlib
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import hashlib
 
 
 def compute_sha256(file_path: str, chunk_size: int = 1024 * 1024) -> str:
@@ -34,7 +35,6 @@ def computemeanattentiondistance(patch_size: int,
     num_patches = attention_weights.shape[-1]
     length = int(np.sqrt(num_patches))
     distance_matrix = computedistancematrix(patch_size, num_patches, length)
-    h, w = distance_matrix.shape
     mean_distances = attention_weights * distance_matrix
     mean_distances = np.sum(mean_distances, axis=-1)
     mean_distances = np.mean(mean_distances, axis=-1)

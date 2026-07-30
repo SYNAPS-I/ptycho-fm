@@ -5,12 +5,14 @@
 # Position creation for raster scans adapted from Ming Du's ptycho_simulation_factory
 # https://github.com/mdw771/ptycho_simulation_factory
 
+from typing import Literal
+
 import numpy as np
 import torch
 from torch import Tensor
-from typing import Optional, Tuple, Literal
 
-def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, int]) -> Tensor:
+
+def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: tuple[int, int]) -> Tensor:
     """
     Slice patches from an image at given window positions. The patch size is determined
     from the starting and ending coordinates in each direction, and is assumed to be
@@ -32,11 +34,11 @@ def batch_slice(image: Tensor, sy: Tensor, sx: Tensor, patch_size: Tuple[int, in
     Tensor
         A tensor of shape (N, h, w) containing the extracted patches.
     """
-    h, w = image.shape[-2:]
+    w = image.shape[-1]
     if (
-        sy.min() < 0 
-        or sy.max() + patch_size[0] > image.shape[-2] 
-        or sx.min() < 0 
+        sy.min() < 0
+        or sy.max() + patch_size[0] > image.shape[-2]
+        or sx.min() < 0
         or sx.max() + patch_size[1] > image.shape[-1]
     ):
         raise ValueError(
@@ -175,7 +177,7 @@ def fourier_shift(images: Tensor, shifts: Tensor, strictly_preserve_zeros: bool 
     return shifted_images
 
 def extract_patches_fourier_shift(
-    image: Tensor, positions: Tensor, shape: Tuple[int, int], pad: Optional[int] = 1
+    image: Tensor, positions: Tensor, shape: tuple[int, int], pad: int | None = 1
 ) -> Tensor:
     """
     Extract patches from 2D object. If a patch's footprint goes outside the image,
@@ -238,7 +240,7 @@ def place_patches_fourier_shift(
     patches: Tensor, 
     op: Literal["add", "set"] = "add", 
     adjoint_mode: bool = False,
-    pad: Optional[int] = 1 
+    pad: int | None = 1 
 ) -> Tensor:
     """
     Place patches into a 2D object. If a patch's footprint goes outside the image,
@@ -391,7 +393,7 @@ def place_patches_bilinear_shift(
     patches: Tensor, 
     op: Literal["add", "set"] = "add", 
     adjoint_mode: bool = False,
-    pad: Optional[int] = 1 
+    pad: int | None = 1 
 ) -> Tensor:
     """
     Place patches into a 2D object. If a patch's footprint goes outside the image,

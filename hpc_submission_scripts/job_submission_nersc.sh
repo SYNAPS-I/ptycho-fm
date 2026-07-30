@@ -22,5 +22,5 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 srun -u --mpi=pmi2 --module=gpu \
     shifter bash -c "
-    python main.py
+    python -m ptycho_vit.train
 "

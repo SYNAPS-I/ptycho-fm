@@ -18,7 +18,7 @@ mkdir -p "$PROFILE_DIR"
 export PROFILE_CMD="nsys profile $NSYS_ARGS -o $PROFILE_DIR/vit-profile"
 
 # Run command
-cmd="$PROFILE_CMD python main.py"
+cmd="$PROFILE_CMD python -m ptycho_vit.train"
 
 nodes=4
 ngpu=4 # number of GPUs (single node)

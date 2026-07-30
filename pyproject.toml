@@ -20,8 +20,29 @@ dependencies = [
     "wandb>=0.22.2",
 ]
 
+[project.scripts]
+ptycho-vit-train = "ptycho_vit.train:main"
+ptycho-vit-infer = "ptycho_vit.inference:main"
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.0.1",
     "jupyter>=1.1.1",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ptycho_vit"]
+
+[tool.pytest.ini_options]
+# test_pack_hdf5_consistency is a standalone verification script that reads
+# sys.argv[1] and hardcodes NERSC paths; it is not a pytest-collectable test.
+addopts = "--ignore=tests/test_pack_hdf5_consistency.py"
+
+[tool.ruff]
+# ptycho_vit/legacy/ holds frozen reference implementations kept for provenance;
+# they are not imported by the package and are not maintained.
+extend-exclude = ["ptycho_vit/legacy"]

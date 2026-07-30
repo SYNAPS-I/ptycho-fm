@@ -39,6 +39,6 @@ export MASTER_PORT=29500
 
 # --- Launch (128 nodes × 4 tasks/node = 512 GPUs) ---
 srun -N 4 --ntasks-per-node=4 --ntasks=16 --gpus-per-task=1 --gpu-bind=none -l -u \
-    python main.py 
-    
+    python -m ptycho_vit.train
+
     # --config "$CFG"

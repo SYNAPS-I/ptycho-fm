@@ -1,12 +1,10 @@
 """Utility functions for generating dummy test data."""
-import sys
 from pathlib import Path
+
 import h5py
 import numpy as np
 
-# Add parent directory to path to import data module
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data import create_positions
+from ptycho_vit.utils.ptychi_utils import create_positions
 
 
 def create_dummy_hdf5_pair(output_dir, object_name, num_patterns=None, pattern_size=128,

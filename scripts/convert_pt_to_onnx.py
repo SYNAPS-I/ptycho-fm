@@ -13,16 +13,13 @@ from __future__ import annotations
 import argparse
 import copy
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -239,7 +236,7 @@ def sanitize_state_dict_for_model(
     filtered = {key: value for key, value in state_dict.items() if key in model_keys}
     extras = {key: value for key, value in state_dict.items() if key not in model_keys}
 
-    missing = [key for key in model_state.keys() if key not in filtered]
+    missing = [key for key in model_state if key not in filtered]
     if missing:
         preview = ", ".join(missing[:20])
         if len(missing) > 20:
@@ -261,7 +258,7 @@ def build_reconstruction_wrapper(
     ph_scale: float | None = None,
 ) -> Any:
     import torch
-    import torch.nn as nn
+    from torch import nn
 
     class PtychoViTReconstruction(nn.Module):
         def __init__(self, base_model: nn.Module) -> None:
@@ -329,7 +326,7 @@ def build_reconstruction_wrapper(
 def export_onnx(config: ExportConfig) -> None:
     import torch
 
-    from model.model import PtychoViT
+    from ptycho_vit.model.model import PtychoViT
 
     raw_cfg = load_yaml(config.config_path)
     model_cfg, export_overrides = resolve_model_config(raw_cfg, config.config_path)

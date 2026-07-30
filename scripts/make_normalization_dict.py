@@ -4,19 +4,21 @@ To run with multiple processes, use torchrun, e.g.:
   torchrun --nproc_per_node=4 scripts/make_normalization_dict.py /path/to/data_root
 """
 
-import os
-import numpy as np
-from pathlib import Path
-import h5py
-import pickle
 import argparse
+import os
+import pickle
+from pathlib import Path
+
+import h5py
+import numpy as np
+
 try:
     import tqdm
-except Exception:
+except ImportError:
     tqdm = None
 try:
     import torch.distributed as dist
-except Exception:
+except ImportError:
     dist = None
 
 parser = argparse.ArgumentParser(
@@ -48,7 +50,7 @@ def _init_dist():
             # Use gloo to avoid NCCL GPU affinity issues for this CPU-bound script.
             dist.init_process_group(backend="gloo", init_method="env://")
             return dist.get_rank(), dist.get_world_size()
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             print(f"Warning: Failed to initialize torch.distributed ({e}). Falling back to single process.", flush=True)
             return 0, 1
     return 0, 1
@@ -64,7 +66,7 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
 
     try:
         rel = file_path.resolve().relative_to(base_dir.resolve())
-    except Exception:
+    except (OSError, ValueError):
         rel = None
 
     if rel is not None:

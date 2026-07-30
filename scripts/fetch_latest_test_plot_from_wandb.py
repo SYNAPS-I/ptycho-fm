@@ -8,16 +8,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 
 try:
     import yaml  # type: ignore
-except Exception:
+except ImportError:
     yaml = None
 
 try:
     import wandb  # type: ignore
-except Exception as exc:
+except ImportError as exc:
     print(f"ERROR: wandb is required to run this script: {exc}", file=sys.stderr)
     sys.exit(1)
 
@@ -49,7 +49,7 @@ def _extract_path(val) -> str | None:
 
 
 def _pick_latest_run(
-    api: "wandb.Api",
+    api: wandb.Api,
     entity: str,
     project: str,
     run_id: str | None,
@@ -83,7 +83,7 @@ def _find_latest_test_plot_path(run) -> str | None:
             val = row.get("test_plot")
             if val:
                 latest_val = val
-    except Exception:
+    except Exception:  # noqa: BLE001 -- wandb API surfaces many error types; fall back to file scan on any of them
         # History may be large or restricted; fall back to file scan.
         latest_val = None
 
@@ -196,12 +196,12 @@ def main() -> int:
             config_path=args.config,
             output=args.output,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- top-level CLI error boundary: surface any error to stderr as a message
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"Saved latest test_plot to {output_path}")
-    print(f"Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Fetched at: {datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}")
     return 0
 
 

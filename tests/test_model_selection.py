@@ -1,15 +1,11 @@
 """
 Test script to verify model selection between ViT and CNN works correctly.
 """
-import sys
-import os
-# Add parent directory to path to import models
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 import yaml
-from development_logs.model512 import PtychoViT
-from development_logs.model_cnn import PtychoCNN, PtychoCNN256
+
+from ptycho_vit.legacy.model512 import PtychoViT
+from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
 
 
 def load_config(config_path='../config.yaml'):
@@ -80,21 +76,21 @@ if __name__ == "__main__":
     # Test ViT model
     try:
         test_model_initialization('vit')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
         print(f"✗ ViT model test failed: {e}")
         success = False
 
     # Test CNN model
     try:
         test_model_initialization('cnn')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
         print(f"✗ CNN model test failed: {e}")
         success = False
 
     # Test CNN256 model
     try:
         test_model_initialization('cnn256')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
         print(f"✗ CNN256 model test failed: {e}")
         success = False
 

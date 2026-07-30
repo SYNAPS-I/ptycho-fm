@@ -7,9 +7,10 @@ This avoids opening all HDF5 files every time training starts.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+
 import h5py
 import pandas as pd
-from pathlib import Path
 from tqdm import tqdm
 
 
@@ -42,7 +43,7 @@ def create_index_csv(
                 'dp_path': str(dp_file),
                 'n_dps': n_dps
             })
-        except Exception as e:
+        except (OSError, KeyError) as e:
             print(f"Warning: Failed to read {dp_file}: {e}")
 
     # Create DataFrame and save

@@ -3,19 +3,18 @@ import pickle
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
 import h5py
 import numpy as np
 from mpi4py import MPI
 
 
-def find_paired_files(directory: Path) -> List[Path]:
+def find_paired_files(directory: Path) -> list[Path]:
     """Return sorted ``*_dp.hdf5`` paths that have a matching ``*_para.hdf5`` sibling."""
     directory = Path(directory)
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
-    out: List[Path] = []
+    out: list[Path] = []
     for dp in sorted(directory.rglob("*_dp.hdf5")):
         para = dp.with_name(f"{dp.stem[:-3]}_para{dp.suffix}")
         if para.is_file():
@@ -31,7 +30,7 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
     fp, bd = file_path.resolve(), Path(base_dir).resolve()
     if not fp.is_relative_to(bd):
         stem = file_path.stem
-        return stem[:-3] if stem.endswith("_dp") else stem
+        return stem.removesuffix("_dp")
     rel = fp.relative_to(bd).with_suffix("")
     name = rel.name
     if name.endswith("_dp"):
@@ -42,13 +41,13 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
 SOURCE = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2")
 OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed")
 MAX_SHARDS = 500
-MAX_OBJECTS: Optional[int] = None  # e.g. 200 for a short test; None = full catalog
+MAX_OBJECTS: int | None = None  # e.g. 200 for a short test; None = full catalog
 MAX_PROBE_MODES = 10
-NORMALIZATION_DICT: Optional[Path] = Path("/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl")
+NORMALIZATION_DICT: Path | None = Path("/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl")
 
 
 def _para_path(dp_path: Path) -> Path:
-    stem = dp_path.stem[:-3] if dp_path.stem.endswith("_dp") else dp_path.stem
+    stem = dp_path.stem.removesuffix("_dp")
     return dp_path.parent / f"{stem}_para{dp_path.suffix}"
 
 
@@ -73,14 +72,14 @@ def fillvalue_for(dtype):
 
 def write_packed_shard(
     shard_idx: int,
-    chunk: List[Path],
+    chunk: list[Path],
     *,
     source: Path,
     out_dir: Path,
     norm_map: dict,
     dt,
     mpi_rank: int,
-) -> tuple[int, float, List[str]]:
+) -> tuple[int, float, list[str]]:
     """Build one packed_{shard_idx:05d}.hdf5 from source pair paths in chunk.
 
     Returns (n_objects, seconds, object_keys) — keys match row order in the HDF5 ``object_key`` dataset.
@@ -313,7 +312,7 @@ if __name__ == "__main__":
     dt = h5py.string_dtype("utf-8")
     n_local = 0
     t_pack_local0 = time.perf_counter()
-    local_index: List[tuple[int, str, List[str]]] = []
+    local_index: list[tuple[int, str, list[str]]] = []
 
     for shard_idx in range(rank, n_shards, size):
         start = shard_idx * per
@@ -347,7 +346,7 @@ if __name__ == "__main__":
 
     if rank == 0:
         index_path = out_dir / "pack_index.json"
-        rows: List[tuple[int, str, List[str]]] = []
+        rows: list[tuple[int, str, list[str]]] = []
         for part in gathered:
             rows.extend(part)
         rows.sort(key=lambda r: r[0])

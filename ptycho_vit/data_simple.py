@@ -1,17 +1,17 @@
 import bisect
 import pickle
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import h5py
 import numpy as np
 import pandas as pd
 import torch
+from scipy.ndimage import zoom
 from torch import Tensor
 from torch.utils.data import Dataset
-from scipy.ndimage import zoom
 
-from utils.ptychi_utils import extract_patches_fourier_shift
+from ptycho_vit.utils.ptychi_utils import extract_patches_fourier_shift
 
 
 class PtychographyDatasetSimple(Dataset):
@@ -37,7 +37,7 @@ class PtychographyDatasetSimple(Dataset):
         fp, bd = file_path.resolve(), Path(base_dir).resolve()
         if not fp.is_relative_to(bd):
             stem = file_path.stem
-            return stem[:-3] if stem.endswith("_dp") else stem
+            return stem.removesuffix("_dp")
         rel = fp.relative_to(bd).with_suffix("")
         name = rel.name
         if name.endswith("_dp"):
@@ -50,13 +50,13 @@ class PtychographyDatasetSimple(Dataset):
         rank: int = 0,
         world_size: int = 1,
         debug: bool = False,
-        max_files: Optional[int] = None,
+        max_files: int | None = None,
         scale: float = 100000.0,
-        normalization_dict_path: Optional[str] = None,
+        normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         max_probe_modes: int = 8,
-        target_size: Optional[int] = 256,
+        target_size: int | None = 256,
     ):
         _ = world_size, debug
 
@@ -74,14 +74,14 @@ class PtychographyDatasetSimple(Dataset):
         self.target_size = target_size
         self.fake_data = None
 
-        norm_map: Optional[dict] = None
+        norm_map: dict | None = None
         if normalization_dict_path:
             with open(normalization_dict_path, "rb") as f:
                 norm_map = pickle.load(f)
             if not isinstance(norm_map, dict):
                 raise ValueError("normalization file must contain a dict")
 
-        self._norm_by_path: Dict[Path, float] = {}
+        self._norm_by_path: dict[Path, float] = {}
         for fp in self.file_paths:
             key = self.derive_object_name(fp, self.data_dir)
             if norm_map is None:
@@ -89,7 +89,7 @@ class PtychographyDatasetSimple(Dataset):
             else:
                 self._norm_by_path[fp] = float(norm_map.get(key, default_normalization))
 
-        csv_counts: Dict[Path, int] = {}
+        csv_counts: dict[Path, int] = {}
         idx_csv = self.data_dir / "index.csv"
         if idx_csv.is_file():
             for _, row in pd.read_csv(idx_csv).iterrows():
@@ -121,7 +121,7 @@ class PtychographyDatasetSimple(Dataset):
         return self._len
 
     @staticmethod
-    def _state_for_pair(dp_path: Path, para_path: Path, normalization: float) -> Dict[str, Any]:
+    def _state_for_pair(dp_path: Path, para_path: Path, normalization: float) -> dict[str, Any]:
         return {
             "dp_path": dp_path,
             "para_path": para_path,
@@ -134,7 +134,7 @@ class PtychographyDatasetSimple(Dataset):
             "pos_origin": None,
         }
 
-    def _layout(self, s: Dict[str, Any], d: h5py.File, p: h5py.File) -> None:
+    def _layout(self, s: dict[str, Any], d: h5py.File, p: h5py.File) -> None:
         if s["n_dp"] is not None:
             return
         if "dp" not in d:
@@ -146,7 +146,7 @@ class PtychographyDatasetSimple(Dataset):
                 raise KeyError(f"{s['para_path'].name} missing {k}")
         s["object_shape"] = tuple(int(x) for x in p["object"].shape[1:])
 
-    def _init_pos_rules(self, s: Dict[str, Any], d: h5py.File, p: h5py.File) -> None:
+    def _init_pos_rules(self, s: dict[str, Any], d: h5py.File, p: h5py.File) -> None:
         if s["pos_in_px"] is not None:
             return
         self._layout(s, d, p)
@@ -161,7 +161,7 @@ class PtychographyDatasetSimple(Dataset):
         origin = ((np.array(s["object_shape"], dtype=np.float32) / 2.0).round() + 0.5).astype(np.float32)
         s["pos_in_px"], s["pos_ps"], s["pos_origin"] = in_px, ps, origin
 
-    def _probe_xy(self, s: Dict[str, Any], d: h5py.File, p: h5py.File, i: int) -> Tensor:
+    def _probe_xy(self, s: dict[str, Any], d: h5py.File, p: h5py.File, i: int) -> Tensor:
         self._init_pos_rules(s, d, p)
         py, px = float(p["probe_position_y_m"][i]), float(p["probe_position_x_m"][i])
         v = np.array([py, px], dtype=np.float32)
@@ -205,11 +205,11 @@ class PtychographyDatasetSimple(Dataset):
             out_i[0, i] = zoom(u.imag, (zh, zw), order=1)
         return (out_r + 1j * out_i).astype(probe.dtype)
 
-    def _patch(self, s: Dict[str, Any], obj: np.ndarray, xy: Tensor) -> Tensor:
+    def _patch(self, s: dict[str, Any], obj: np.ndarray, xy: Tensor) -> Tensor:
         rh, rw = s["raw_shape"]
         return extract_patches_fourier_shift(torch.from_numpy(obj), xy.unsqueeze(0), (rh, rw))[0]
 
-    def _sample(self, s: Dict[str, Any], d: h5py.File, p: h5py.File, i: int):
+    def _sample(self, s: dict[str, Any], d: h5py.File, p: h5py.File, i: int):
         img = d["dp"][i]
         img = (img / s["normalization"]) * self.scale
         if self.apply_noise:
@@ -246,7 +246,7 @@ class PtychographyDatasetSimple(Dataset):
         fi = bisect.bisect_right(self.file_offsets, idx) - 1
         local = idx - self.file_offsets[fi]
         dp_path = self.file_paths[fi]
-        stem = dp_path.stem[:-3] if dp_path.stem.endswith("_dp") else dp_path.stem
+        stem = dp_path.stem.removesuffix("_dp")
         para_path = dp_path.parent / f"{stem}_para{dp_path.suffix}"
         if not para_path.is_file():
             raise FileNotFoundError(para_path)
