@@ -296,6 +296,9 @@ class Trainer(object):
             self.next_flops_log_idx += 1
         return True
 
+    def _completed_flops_logging(self):
+        return bool(self.log_at_tflops) and self.next_flops_log_idx >= len(self.log_at_tflops)
+
     def write_logs(self, logs=None):
         """Append scalar logs to logs.txt so completed runs can be queried offline."""
         if not self.is_main_process:
@@ -636,6 +639,15 @@ class Trainer(object):
         total_batches = len(dataloader)
         self._sync_flops_log_index_to_current()
 
+        if self._completed_flops_logging():
+            if self.is_main_process:
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    "All configured FLOP log targets are complete; stopping training.",
+                    flush=True,
+                )
+            return True
+
         if self.is_main_process:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting training loop: {total_batches} total batches", flush=True)
 
@@ -729,6 +741,15 @@ class Trainer(object):
                 self.validate_and_log(profile=profile, at_epoch_boundary=at_boundary)
                 if torch.distributed.is_initialized():
                     ddp_barrier(torch.distributed.get_world_size(), self.device)
+                if self._completed_flops_logging():
+                    if self.is_main_process:
+                        print(
+                            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                            "Final FLOP log target reached; stopping training.",
+                            flush=True,
+                        )
+                    epoch_completed = False
+                    break
 
         if epoch_completed:
             self.iters_in_epoch = 0
@@ -745,6 +766,7 @@ class Trainer(object):
                 flush=True,
             )
         torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+        return self._completed_flops_logging()
 
 
     def validate_and_log(self, profile=False, at_epoch_boundary=False):

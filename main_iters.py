@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import pickle
 import socket
@@ -33,6 +34,39 @@ def resolve_config_path(config_path: str) -> str:
     return config_path
 
 
+def _deep_merge_config(base, override):
+    """Recursively merge override into base without mutating either input."""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def load_config(config_path: str, _seen=None):
+    """Load a YAML config, optionally merging an `extends` parent first."""
+    config_path = resolve_config_path(config_path)
+    config_path = os.path.abspath(config_path)
+    _seen = set() if _seen is None else _seen
+    if config_path in _seen:
+        raise ValueError(f"Circular config extends detected at {config_path}")
+    _seen.add(config_path)
+
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+
+    parent = config.pop('extends', None)
+    if parent is None:
+        return config
+
+    if not os.path.isabs(parent):
+        parent = os.path.join(os.path.dirname(config_path), parent)
+    parent_config = load_config(parent, _seen=_seen)
+    return _deep_merge_config(parent_config, config)
+
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='PtychoViT Training Script')
 parser.add_argument(
@@ -45,8 +79,7 @@ parser.add_argument('--debug', action='store_true',
 args = parser.parse_args()
 DEBUG_MODE = args.debug
 config_path = resolve_config_path(args.config)
-with open(config_path, 'r') as f:
-    config = yaml.safe_load(f)
+config = load_config(config_path)
 
 # Training parameters
 MODE = config['training']['mode']
@@ -547,6 +580,7 @@ if is_main_process:
 # ────────────────────────────────────────────────────────────────────────────────
 # Train / Validate
 # ────────────────────────────────────────────────────────────────────────────────
+stop_training = False
 for epoch in range(start_epoch, EPOCHS):
     # Set epoch for DistributedSampler (dynamic sharding only)
     if sharding_strategy == 'dynamic':
@@ -557,7 +591,10 @@ for epoch in range(start_epoch, EPOCHS):
 
     # Save config to run path at the first epoch this job runs
     if epoch == start_epoch and is_main_process:
-        trainer.save_config(config_path)
+        run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+        os.makedirs(run_path, exist_ok=True)
+        with open(os.path.join(run_path, 'config.yaml'), 'w') as f:
+            yaml.safe_dump(config, f, sort_keys=False)
         print('Saved config to run path', flush=True)
 
     ddp_barrier(world_size, DEVICE)
@@ -569,13 +606,17 @@ for epoch in range(start_epoch, EPOCHS):
     # Training loop
     model.train()
     profile = config['training'].get('profile', False)
-    trainer.train(profile=profile, epoch=epoch) 
+    stop_training = trainer.train(profile=profile, epoch=epoch)
 
     ddp_barrier(world_size, DEVICE)
 
+    if stop_training:
+        break
+
 
 if is_main_process:
-    trainer.save_final(wandb_run_id=wandb_run_id)
+    if not stop_training:
+        trainer.save_final(wandb_run_id=wandb_run_id)
     run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
     os.makedirs(run_path, exist_ok=True)
     with open(os.path.join(run_path, 'metrics_iters.pickle'), 'wb') as file:

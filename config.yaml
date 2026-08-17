@@ -76,7 +76,7 @@ training:
 
   epochs: 100  # Total epochs to train for (not additional epochs when resuming)
   log_every: 4000 # Log every N iterations
-  log_at_flops: [6.0e17, 1.0e18, 3.0e18] # Raw FLOP targets for logging/validation, e.g. [6.0e17, 1.0e18, 3.0e18]; empty uses log_every
+  log_at_flops: [6.0e17, 1.0e18, 3.0e18, 6.0e18, 8.0e18, 1.0e19] # Raw FLOP targets for logging/validation, e.g. [6.0e17, 1.0e18, 3.0e18]; empty uses log_every
   loss_function: 'weighted'  # Options: smooth_l1, mse, l1, poisson_nll, weighted
   # Skip batch update if grad norm exceeds this value (null disables)
   skip_batch_if_grad_norm_greater_than: null
