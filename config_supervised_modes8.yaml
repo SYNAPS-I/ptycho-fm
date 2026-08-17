@@ -39,8 +39,8 @@ training:
   loss_function: 'mse'      # <-- plain MSE for object-space. ('weighted' is for diffraction, don't use here)
 
   validation_plot_freq: 10
-  test_plot_freq: 20
-  resume_from_checkpoint: false
+  test_plot_freq: 10
+  resume_from_checkpoint: true
 
 # Model Architecture (unchanged from config.yaml)
 model:
@@ -98,4 +98,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: 8       # RUN 2 of 3 (only 8-mode)
+  run_num: mode_8       # RUN 2 of 3 (only 8-mode)

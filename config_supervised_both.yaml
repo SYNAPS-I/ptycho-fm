@@ -38,9 +38,9 @@ training:
 
   loss_function: 'mse'
 
-  validation_plot_freq: 10
-  test_plot_freq: 20
-  resume_from_checkpoint: false
+  validation_plot_freq: 5
+  test_plot_freq: 5
+  resume_from_checkpoint: true
 
 # Model Architecture (identical across all 3 runs)
 model:
@@ -97,4 +97,4 @@ wandb:
 
 # Trainer Configuration
 trainer:
-  run_num: 48      # RUN 3 of 3 (both probes)
+  run_num: modes_48      # RUN 3 of 3 (both probes)

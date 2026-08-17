@@ -37,9 +37,9 @@ training:
 
   loss_function: 'mse'
 
-  validation_plot_freq: 10
-  test_plot_freq: 20
-  resume_from_checkpoint: false
+  validation_plot_freq: 5
+  test_plot_freq: 10
+  resume_from_checkpoint: true
 
 # Model Architecture
 # All models are fixed at 256x256 image size
