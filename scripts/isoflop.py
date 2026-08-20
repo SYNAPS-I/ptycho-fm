@@ -66,6 +66,14 @@ plt.rcParams.update(
 )
 
 
+def display_path(path: Path) -> str:
+    """Return a repository-relative path without exposing absolute locations."""
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return path.name
+
+
 def deep_merge_config(base: dict, override: dict) -> dict:
     merged = copy.deepcopy(base)
     for key, value in override.items():
@@ -161,7 +169,7 @@ def collect_points(
     for config_name, target_flops_list in config_flops.items():
         config_path = REPO_ROOT / config_name
         if not config_path.exists():
-            print(f"[warn] Missing config: {config_path}")
+            print(f"[warn] Missing config: {config_name}")
             continue
         if not target_flops_list:
             print(f"[warn] No FLOP targets configured for {config_name}; skipping")
@@ -172,12 +180,12 @@ def collect_points(
         run_num = config["trainer"]["run_num"]
         run_dir = Path(config["paths"]["model_save_path"]) / f"run{run_num}"
         if not run_dir.is_dir():
-            print(f"[warn] Run does not exist for {config_name}: {run_dir}")
+            print(f"[warn] Run does not exist for {config_name} (run {run_num})")
             continue
 
         rows = read_logs(run_dir / "logs.txt")
         if not rows:
-            print(f"[warn] No logs found for {config_path}: {run_dir / 'logs.txt'}")
+            print(f"[warn] No logs found for {config_name} (run {run_num})")
             continue
 
         label = label_for_config(config_path, config)
@@ -198,7 +206,7 @@ def collect_points(
 
             points.append(
                 {
-                    "config": str(config_path),
+                    "config": config_name,
                     "label": label,
                     "run_num": run_num,
                     "target_flops": target_flops,
@@ -309,7 +317,7 @@ def plot_points(
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=PNG_DPI, bbox_inches="tight")
     plt.close(fig)
-    print(f"Wrote plot: {output}")
+    print(f"Wrote plot: {display_path(output)}")
 
 
 def write_summary(points: list[dict], path: Path) -> None:
@@ -331,7 +339,7 @@ def write_summary(points: list[dict], path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(points)
-    print(f"Wrote summary: {path}")
+    print(f"Wrote summary: {display_path(path)}")
 
 
 def main() -> None:
@@ -341,7 +349,7 @@ def main() -> None:
     parser.add_argument(
         "--fit-space",
         choices=["loglog", "log_params", "params"],
-        default="log_params",
+        default="loglog",
         help="Fit the quadratic in log-log space, log10(parameter count), or raw parameter count.",
     )
     parser.add_argument(
