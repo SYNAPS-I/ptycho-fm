@@ -1,104 +1,92 @@
-"""
-Test script to verify model selection between ViT and CNN works correctly.
-"""
+"""Current-model inference and checkpoint compatibility checks."""
+
+from pathlib import Path
+
+import pytest
 import torch
 import yaml
 
-from ptycho_vit.legacy.model512 import PtychoViT
-from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
+from ptycho_fm.model.model import PtychoFM
+from scripts.run_inference_and_stitch import (
+    build_dataloader,
+    load_checkpoint,
+    resolve_model_and_size,
+)
 
 
-def load_config(config_path='../config.yaml'):
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+@pytest.fixture
+def config():
+    return {
+        "model": {
+            "encoder_type": "custom",
+            "encoder": {
+                "img_size": 32,
+                "patch_size": 4,
+                "embed_dim": 16,
+                "depth": 1,
+                "num_heads": 2,
+                "dropout": 0.0,
+            },
+            "decoder": {
+                "base_channels": 4,
+                "num_stages": 2,
+                "use_batchnorm": False,
+            },
+        },
+    }
 
 
-def test_model_initialization(model_type):
-    """Test model initialization for given model type."""
-    print(f"\n{'='*60}")
-    print(f"Testing {model_type.upper()} model initialization")
-    print(f"{'='*60}")
+def test_inference_checkpoint_round_trip(config, tmp_path):
+    trained_model = PtychoFM(config=config["model"]).eval()
+    checkpoint = tmp_path / "model.pth"
+    torch.save(trained_model.state_dict(), checkpoint)
 
-    # Load config
-    config = load_config()
+    model, img_size = resolve_model_and_size(config)
+    load_checkpoint(model, checkpoint, torch.device("cpu"))
+    model.eval()
+    assert img_size == 32
 
-    # Override model type
-    config['model']['model_type'] = model_type
+    inputs = (
+        torch.rand(2, 1, img_size, img_size),
+        torch.randn(2, 1, 2, img_size, img_size, 2),
+        torch.ones(2),
+        torch.ones(2),
+    )
+    with torch.no_grad():
+        expected = trained_model(*inputs)
+        actual = model(*inputs)
 
-    # Initialize model based on type
-    if model_type == 'vit':
-        model = PtychoViT(config=config['model'])
-        img_size = config['model']['encoder']['img_size']
-    elif model_type == 'cnn':
-        model = PtychoCNN(config=config['model']['cnn'])
-        img_size = 512
-    elif model_type == 'cnn256':
-        model = PtychoCNN256(config=config['model']['cnn256'])
-        img_size = 256
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-
-    print(f"✓ Model created successfully: {model.__class__.__name__}")
-
-    # Test forward pass
-    batch_size = 2
-    x = torch.randn(batch_size, 1, img_size, img_size)
-    probe = torch.randn(batch_size, 1, 8, img_size, img_size, 2)
-    normalization = torch.randn(batch_size, 1)
-    scale = torch.randn(batch_size, 1)
-
-    pred_diff_amp, amp, ph = model(x, probe, normalization, scale)
-
-    print("✓ Forward pass successful")
-    print(f"  Input shape: {x.shape}")
-    print(f"  Predicted diffraction amplitude: {pred_diff_amp.shape}")
-    print(f"  Amplitude: {amp.shape}")
-    print(f"  Phase: {ph.shape}")
-
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\n  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-
-    return True
+    for result, reference in zip(actual, expected, strict=True):
+        assert result.shape == (2, 1, img_size, img_size)
+        assert torch.isfinite(result).all()
+        torch.testing.assert_close(result, reference)
 
 
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("Model Selection Test Suite")
-    print("="*60)
+@pytest.mark.parametrize("target_size", [None, 64])
+def test_inference_data_size(config, monkeypatch, target_size):
+    class DatasetStub:
+        def __init__(self, path, **kwargs):
+            self.target_size = kwargs["target_size"]
 
-    success = True
+        def __len__(self):
+            return 1
 
-    # Test ViT model
-    try:
-        test_model_initialization('vit')
-    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
-        print(f"✗ ViT model test failed: {e}")
-        success = False
+    monkeypatch.setattr(
+        "scripts.run_inference_and_stitch.PtychographyDataset", DatasetStub
+    )
+    config["data"] = {"target_size": target_size}
+    dataset, loader = build_dataloader("unused.hdf5", config, 25.0, batch_size=2)
 
-    # Test CNN model
-    try:
-        test_model_initialization('cnn')
-    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
-        print(f"✗ CNN model test failed: {e}")
-        success = False
+    assert dataset.target_size == (32 if target_size is None else target_size)
+    assert dataset.normalization == 25.0
+    assert loader.dataset is dataset
 
-    # Test CNN256 model
-    try:
-        test_model_initialization('cnn256')
-    except Exception as e:  # noqa: BLE001 -- test-suite driver: any exception means the model failed to initialize
-        print(f"✗ CNN256 model test failed: {e}")
-        success = False
 
-    print("\n" + "="*60)
-    if success:
-        print("✓ All tests passed!")
-        print("\nYou can now select between models by setting 'model_type'")
-        print("in config.yaml to 'vit', 'cnn' (512x512), or 'cnn256' (256x256)")
-    else:
-        print("✗ Some tests failed")
-    print("="*60 + "\n")
+def test_polaris_model_config_uses_current_schema():
+    config_path = Path(__file__).resolve().parents[1] / "configs/polaris/config.yaml"
+    with config_path.open() as f:
+        model_config = yaml.safe_load(f)["model"]
+
+    assert model_config["encoder_type"] == "custom"
+    assert model_config["encoder"]["img_size"] == 256
+    assert model_config["encoder"]["embed_dim"] == model_config["decoder"]["latent_dim"]

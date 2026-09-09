@@ -10,14 +10,14 @@ import math
 import torch
 from torch import nn
 
-from ptycho_vit.model.decoders import Decoder256
-from ptycho_vit.model.vit import CustomViT
-from ptycho_vit.model.vit_pretrained import VisionTransformer
+from ptycho_fm.model.decoders import Decoder256
+from ptycho_fm.model.vit import CustomViT
+from ptycho_fm.model.vit_pretrained import VisionTransformer
 
 # from utils.math import create_logpolar_grid, apply_logpolar_transform
 
 
-class PtychoViT(nn.Module):
+class PtychoFM(nn.Module):
     """Vision Transformer-based ptychography reconstruction model.
 
     Supports both CustomViT (train from scratch) and VisionTransformer (pretrained) encoders.

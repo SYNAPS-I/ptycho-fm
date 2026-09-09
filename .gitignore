@@ -13,3 +13,9 @@ wandb/
 
 # compiled python
 *.pyc
+
+# miscellaneous
+.vscode
+.codex
+.loglogin
+.python-version

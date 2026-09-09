@@ -12,7 +12,7 @@ from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from torch import nn
 
-from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
+from ptycho_fm.utils.ptychi_utils import place_patches_fourier_shift
 
 
 def _move_to_cpu(obj):

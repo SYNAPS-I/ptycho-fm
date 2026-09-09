@@ -7,6 +7,7 @@ Tests: data loading, model loading, forward pass, and SSIM/PSNR metrics.
 from __future__ import annotations
 
 import argparse
+import shlex
 from pathlib import Path
 
 import torch
@@ -63,7 +64,7 @@ def test_data_loading(config, num_samples=3):
     print("TEST 2: Data Loading")
     print("=" * 60)
 
-    from ptycho_vit.data import PtychographyDataset
+    from ptycho_fm.data import PtychographyDataset
 
     # Get first file from data path
     data_path = Path(config['data']['data_path'])
@@ -107,11 +108,11 @@ def test_model_loading(config):
     print("TEST 3: Model Loading")
     print("=" * 60)
 
-    from ptycho_vit.model.model import PtychoViT
+    from ptycho_fm.model.model import PtychoFM
 
     # Create model
-    model = PtychoViT(config=config['model'])
-    print("Model created: PtychoViT")
+    model = PtychoFM(config=config['model'])
+    print("Model created: PtychoFM")
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -182,7 +183,7 @@ def test_metrics():
     print("TEST 5: SSIM/PSNR Metrics")
     print("=" * 60)
 
-    from ptycho_vit.training import compute_psnr, compute_ssim
+    from ptycho_fm.training import compute_psnr, compute_ssim
 
     # Create test tensors
     img_size = 256
@@ -227,8 +228,8 @@ def test_real_inference(model, config):
     print("TEST 6: Real Data Inference")
     print("=" * 60)
 
-    from ptycho_vit.data import PtychographyDataset
-    from ptycho_vit.training import compute_psnr, compute_ssim
+    from ptycho_fm.data import PtychographyDataset
+    from ptycho_fm.training import compute_psnr, compute_ssim
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
@@ -320,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ALL TESTS PASSED!")
         print("=" * 60)
         print("\nYou're ready to run fine-tuning:")
-        print("  python main.py")
+        print(f"  ptycho-fm-train --config {shlex.quote(str(Path(args.config).resolve()))}")
         print()
 
     except Exception as e:  # noqa: BLE001 -- top-level CLI sanity check: any error is a test failure to surface

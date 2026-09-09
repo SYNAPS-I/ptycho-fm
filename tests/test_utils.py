@@ -4,7 +4,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ptycho_vit.utils.ptychi_utils import create_positions
+from ptycho_fm.utils.ptychi_utils import create_positions
 
 
 def create_dummy_hdf5_pair(output_dir, object_name, num_patterns=None, pattern_size=128,

@@ -4,7 +4,7 @@ import tempfile
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from ptycho_vit.data import CombinedDataset, PtychographyDataset
+from ptycho_fm.data import CombinedDataset, PtychographyDataset
 
 from .test_utils import create_dummy_hdf5_pair
 

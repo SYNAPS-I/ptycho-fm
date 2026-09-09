@@ -1,4 +1,4 @@
-"""MLflow integration for ptycho-vit training.
+"""MLflow integration for ptycho-fm training.
 
 Wraps the MLflow client so main.py / training.py can call log_params,
 log_metrics, log_artifact, register_best_model, and finish without sprinkling

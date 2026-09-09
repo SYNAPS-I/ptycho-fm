@@ -1,10 +1,10 @@
-"""Export a trained PtychoViT checkpoint to an ONNX reconstruction model.
+"""Export a trained PtychoFM checkpoint to an ONNX reconstruction model.
 
 This exports the edge-inference script used by edge-ptycho-vit:
 
     diffraction amplitude [B, 1, H, W] -> amplitude, phase, or both
 
-It intentionally bypasses PtychoViT.forward because the training forward also
+It intentionally bypasses PtychoFM.forward because the training forward also
 requires probe, normalization, and scale tensors to synthesize diffraction.
 """
 
@@ -145,7 +145,7 @@ def resolve_model_config(
     raw_cfg: dict[str, Any],
     config_path: Path,
 ) -> tuple[dict[str, Any], dict[str, float | None]]:
-    """Normalize supported training config schemas into PtychoViT(config=...)."""
+    """Normalize supported training config schemas into PtychoFM(config=...)."""
 
     model_cfg = raw_cfg.get("model", raw_cfg)
     if not isinstance(model_cfg, dict):
@@ -260,7 +260,7 @@ def build_reconstruction_wrapper(
     import torch
     from torch import nn
 
-    class PtychoViTReconstruction(nn.Module):
+    class PtychoFMReconstruction(nn.Module):
         def __init__(self, base_model: nn.Module) -> None:
             super().__init__()
             self.base = base_model
@@ -320,13 +320,13 @@ def build_reconstruction_wrapper(
                 return torch.stack([amp, ph], dim=1)
             raise ValueError(f"Unsupported output kind: {self.output_kind}")
 
-    return PtychoViTReconstruction(model)
+    return PtychoFMReconstruction(model)
 
 
 def export_onnx(config: ExportConfig) -> None:
     import torch
 
-    from ptycho_vit.model.model import PtychoViT
+    from ptycho_fm.model.model import PtychoFM
 
     raw_cfg = load_yaml(config.config_path)
     model_cfg, export_overrides = resolve_model_config(raw_cfg, config.config_path)
@@ -337,7 +337,7 @@ def export_onnx(config: ExportConfig) -> None:
             "subtract_probe_intensity enabled and would need probe input for equivalent results."
         )
 
-    model = PtychoViT(config=model_cfg)
+    model = PtychoFM(config=model_cfg)
     checkpoint_path = resolve_checkpoint_path(config.checkpoint_path)
     state_dict = load_state_dict(checkpoint_path)
     state_dict, extras = sanitize_state_dict_for_model(model, state_dict)
@@ -354,7 +354,7 @@ def export_onnx(config: ExportConfig) -> None:
         suffix = ", ..." if len(extras) > 10 else ""
         print(
             f"[convert_pt_to_onnx] Ignoring {len(extras)} checkpoint key(s) not present "
-            f"in PtychoViT: {preview}{suffix}"
+            f"in PtychoFM: {preview}{suffix}"
         )
 
     model.load_state_dict(state_dict, strict=True)
@@ -399,7 +399,7 @@ def export_onnx(config: ExportConfig) -> None:
 
 def parse_args() -> ExportConfig:
     parser = argparse.ArgumentParser(
-        description="Convert a trained PtychoViT .pth/.pt checkpoint to an ONNX model."
+        description="Convert a trained PtychoFM .pth/.pt checkpoint to an ONNX model."
     )
     parser.add_argument(
         "--config",

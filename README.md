@@ -1,21 +1,14 @@
-# ptycho-vit
+# ptycho-fm
 
-Physics-informed Vision Transformer and CNN for Ptychography Reconstruction
+Physics-informed Vision Transformer with CNN Decoders for Ptychography Reconstruction
 
 ## Overview
 
-This project implements physics-informed deep learning architectures for ptychographic image reconstruction. The framework supports multiple model variants optimized for different image sizes and computational requirements:
-
-- **PtychoViT**: Unified Vision Transformer encoder with CNN decoders (supports any image size via config)
-- **PtychoCNN** (512×512): Symmetric CNN encoder-decoder architecture
-- **PtychoCNN256** (256×256): CNN encoder-decoder with log-polar transform
-
-All models combine learned representations with physics-based constraints to reconstruct amplitude and phase information from diffraction patterns.
+This project implements **PtychoFM**, a Vision Transformer encoder with CNN decoders for ptychographic image reconstruction. It supports custom and pretrained encoders and combines learned representations with physics-based constraints to reconstruct amplitude and phase information from diffraction patterns.
 
 ## Key Features
 
-- **Multiple architectures**: Four model variants optimized for different image sizes
-- **Log-polar preprocessing**: Enhanced feature extraction for 256×256 models
+- **Encoder options**: Custom or pretrained Vision Transformer with CNN decoders
 - **Physics-informed**: Enforces ptychographic forward model during training
 - **Distributed training**: PyTorch DDP (DistributedDataParallel) for multi-GPU training
 - **Flexible configuration**: YAML-based config with unified decoder specification
@@ -27,11 +20,11 @@ All models combine learned representations with physics-based constraints to rec
 ## Project Structure
 
 ```
-ptycho-vit/
-├── ptycho_vit/                    # Installable package (import ptycho_vit)
+ptycho-fm/
+├── ptycho_fm/                     # Installable package (import ptycho_fm)
 │   ├── __init__.py
-│   ├── train.py                   # Training entry point (ptycho-vit-train)
-│   ├── inference.py               # Inference entry point (ptycho-vit-infer)
+│   ├── train.py                   # Training entry point (ptycho-fm-train)
+│   ├── inference.py               # Inference entry point (ptycho-fm-infer)
 │   ├── training.py                # Trainer class with train/validation loops
 │   ├── data.py                    # PtychographyDataset, CombinedDataset, RankShardedSubset
 │   ├── data_simple.py             # Simplified dataset variant
@@ -39,18 +32,14 @@ ptycho-vit/
 │   ├── custom_loss.py             # Custom loss functions (WeightedLoss)
 │   ├── prefetcher.py              # CUDAPrefetcher
 │   ├── model/
-│   │   ├── model.py               # PtychoViT (unified ViT-based model)
+│   │   ├── model.py               # PtychoFM (unified ViT-based model)
 │   │   ├── vit.py                 # Custom ViT encoder
 │   │   ├── vit_pretrained.py      # Pretrained ViT encoder
 │   │   └── decoders.py            # Decoder256
-│   ├── utils/
-│   │   ├── math.py
-│   │   ├── ptychi_utils.py        # Fourier-shift patch extraction / placement
-│   │   └── utils.py               # compute_sha256, misc
-│   └── legacy/                    # Archived earlier model variants (imported by inference.py)
-│       ├── model512.py            # PtychoViT512 (legacy 512×512)
-│       ├── model_cnn.py           # PtychoCNN, PtychoCNN256
-│       └── decoders_old.py
+│   └── utils/
+│       ├── math.py
+│       ├── ptychi_utils.py        # Fourier-shift patch extraction / placement
+│       └── utils.py               # compute_sha256, misc
 ├── tests/                         # Tests (not shipped in the wheel)
 ├── scripts/                       # Standalone CLIs / HPC helpers (not shipped in the wheel)
 ├── hpc_submission_scripts/        # Cluster submission wrappers
@@ -76,10 +65,26 @@ ptycho-vit/
 pip install -e .
 ```
 
-After install, the package is importable as `ptycho_vit`, and two console scripts are on PATH:
+After install, the package is importable as `ptycho_fm`, and two console scripts are on PATH:
 
-- `ptycho-vit-train --config config.yaml` — training entry point (equivalent to `python -m ptycho_vit.train`)
-- `ptycho-vit-infer` — inference entry point (equivalent to `python -m ptycho_vit.inference`)
+- `ptycho-fm-train --config "$PWD/config.yaml"` — training entry point (equivalent to `python -m ptycho_fm.train`)
+- `ptycho-fm-infer` — inference entry point (equivalent to `python -m ptycho_fm.inference`)
+
+The distribution is named `ptycho-fm`; the Python import name is `ptycho_fm`.
+Existing code should update imports from `ptycho_vit` to `ptycho_fm` and use
+the new command names above. Import the model as
+`from ptycho_fm.model.model import PtychoFM` (formerly `PtychoViT`).
+Developers can access `scripts/` and `visualization.ipynb` from their repository
+checkout; these files are not included in the installed wheel.
+
+The class rename preserves the architecture and parameter names. Existing
+state-dict weights from the same architecture can be loaded for inference or
+fine-tuning with the original model configuration. Training resumes from
+`checkpoint_model.pth` plus `checkpoint.state`, which stores optimizer and
+scheduler state, epoch, metrics, and the WandB run ID. Keep the same optimizer
+parameter groups when resuming. Whole-model pickle files created with
+`torch.save(model, ...)` depend on the old class/module path and require
+conversion to a state dict in an environment containing the original class.
 
 ## Data Format
 
@@ -110,7 +115,7 @@ All training parameters are configured in `config.yaml`. The configuration uses 
 
 ### Model Architecture
 
-Select model type via `model_type`:
+Training and inference use `PtychoFM`. Select its encoder via `encoder_type`:
 
 ```yaml
 model:
@@ -121,7 +126,7 @@ The model configuration has two main sections:
 - `encoder`: Encoder-specific parameters (supports any image size)
 - `decoder`: Decoder configuration (independent of encoder)
 
-**Example - PtychoViT (256×256):**
+**Example - PtychoFM (256×256):**
 ```yaml
 model:
   encoder_type: 'custom'
@@ -180,42 +185,19 @@ training:
   resume_from_checkpoint: false
 ```
 
-## Model Comparison
+## Model Architecture Details
 
-| Model | Image Size | Parameters | Key Features |
-|-------|-----------|------------|--------------|
-| **PtychoViT** | Configurable | 7M - 50M+ | ViT encoder, flexible architecture, log-polar transform |
-| **PtychoCNN** | 512×512 | 7.5M - 30M | CNN encoder-decoder, configurable size |
-| **PtychoCNN256** | 256×256 | ~3M | CNN encoder-decoder, log-polar transform |
-
-### Model Architecture Details
-
-#### PtychoViT (Unified, Configurable)
-1. **Log-polar Transform**: Preprocesses diffraction patterns to enhance rotational features
-2. **ViT Encoder**: Processes images at any resolution (configurable via `img_size` and `patch_size`)
+1. **ViT Encoder**: Processes images at the configured resolution (`img_size` and `patch_size`)
    - Example 256×256: 16×16 patches with patch_size=16 → 16×16 feature map
    - Example 512×512: 32×32 patches with patch_size=16 → 32×32 feature map
    - Supports both custom (train from scratch) and pretrained encoders
-3. **CNN Decoders**: Two symmetric decoders (amplitude/phase) with configurable stages
-   - Automatically adjusts upsampling based on encoder output size
-4. **Physics Forward Model**: Enforces ptychographic physics
-
-#### PtychoCNN (512×512)
-1. **CNN Encoder**: 5-stage encoder with progressive downsampling
-   - 512×512 → 256×256 → 128×128 → 64×64 → 32×32 → 16×16
-2. **Dual Decoders**: Symmetric decoders for amplitude and phase
-   - 5 upsampling stages: 16×16 → 512×512
-3. **Configurable Size**: Adjust via `base_channels` and `latent_dim`
-
-#### PtychoCNN256 (256×256)
-1. **Log-polar Transform**: Preprocesses diffraction patterns
-2. **CNN Encoder**: 5-stage encoder: 256×256 → 8×8
-3. **Dual Decoders**: 5 upsampling stages: 8×8 → 256×256
-4. **Compact Design**: Optimized for smaller images
+2. **CNN Decoders**: Two symmetric decoders (amplitude/phase) with configurable stages
+   - Set `num_stages` to match the required upsampling from the encoder output
+3. **Physics Forward Model**: Enforces ptychographic physics
 
 ### Physics Integration
 
-All models enforce ptychographic physics:
+PtychoFM enforces ptychographic physics:
 ```python
 # Subtract probe intensity contribution
 x = x - sqrt(probe_intensity)
@@ -237,24 +219,26 @@ predicted_diffraction = |Psi|²
 
 ### Single-GPU Training
 
+Run from the repository root to use its `config.yaml`:
+
 ```bash
-ptycho-vit-train --config config.yaml
+ptycho-fm-train --config "$PWD/config.yaml"
 # equivalent:
-python -m ptycho_vit.train --config config.yaml
+python -m ptycho_fm.train --config "$PWD/config.yaml"
 ```
 
 ### Multi-GPU Training with DDP
 
 ```bash
-torchrun --nnodes 1 --nproc-per-node 2 -m ptycho_vit.train --config config.yaml
+torchrun --nnodes 1 --nproc-per-node 2 -m ptycho_fm.train --config "$PWD/config.yaml"
 ```
 
 ### Inference
 
 ```bash
-ptycho-vit-infer
+ptycho-fm-infer
 # equivalent:
-python -m ptycho_vit.inference
+python -m ptycho_fm.inference
 ```
 
 ## Data Loading
@@ -309,7 +293,7 @@ Configure in `config.yaml`:
 wandb:
   enabled: true
   entity: 'your-entity'
-  project: 'PtychoViT'
+  project: 'PtychoFM'
   dataset_name: 'dataset-description'
   notes: 'Experiment notes'
   resume_run_id: null  # Optional: resume existing run
@@ -326,16 +310,16 @@ pytest tests/
 ## Development
 
 ### Code Organization
-- **ptycho_vit/model/model.py**: ViT-based model (PtychoViT - unified, supports any image size)
-- **ptycho_vit/legacy/model_cnn.py**: CNN-based models (PtychoCNN, PtychoCNN256) and shared Encoder/Decoder classes
-- **ptycho_vit/utils/ptychi_utils.py**: Image processing utilities adapted from pty-chi
-- **ptycho_vit/data.py**: Dataset classes for loading Ptychodus format files
-- **ptycho_vit/training.py**: Training and validation logic
+- **ptycho_fm/model/model.py**: ViT-based model (PtychoFM - unified, supports any image size)
+- **ptycho_fm/model/decoders.py**: CNN decoders used by PtychoFM
+- **ptycho_fm/utils/ptychi_utils.py**: Image processing utilities adapted from pty-chi
+- **ptycho_fm/data.py**: Dataset classes for loading Ptychodus format files
+- **ptycho_fm/training.py**: Training and validation logic
 
 ### Adding New Models
-1. Define model class in `ptycho_vit/model/model.py` (or `ptycho_vit/legacy/model_cnn.py`)
+1. Define model class in `ptycho_fm/model/model.py`
 2. Add config section in `config.yaml` under `model:`
-3. Update model selection logic in `ptycho_vit/train.py`
+3. Update model selection logic in `ptycho_fm/train.py`
 
 ## License
 

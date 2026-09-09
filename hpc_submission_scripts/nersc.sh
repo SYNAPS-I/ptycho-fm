@@ -20,7 +20,11 @@ export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
+# Submit from the repository root; optionally pass an absolute config path.
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+CONFIG="${1:-${PROJECT_DIR}/config.yaml}"
+
+cd "$PROJECT_DIR" || exit 1
+
 srun -u --mpi=pmi2 --module=gpu \
-    shifter bash -c "
-    python -m ptycho_vit.train
-"
+    shifter python -m ptycho_fm.train --config "$CONFIG"
