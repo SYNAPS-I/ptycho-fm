@@ -1,1 +1,1 @@
-"""Test suite for ptycho-vit."""
+"""Test suite for ptycho-fm."""

@@ -1,5 +1,5 @@
 [project]
-name = "ptycho-vit"
+name = "ptycho-fm"
 version = "0.1.0"
 description = "A foundation model for single-shot coherent diffractive imaging"
 readme = "README.md"
@@ -21,8 +21,8 @@ dependencies = [
 ]
 
 [project.scripts]
-ptycho-vit-train = "ptycho_vit.train:main"
-ptycho-vit-infer = "ptycho_vit.inference:main"
+ptycho-fm-train = "ptycho_fm.train:main"
+ptycho-fm-infer = "ptycho_fm.inference:main"
 
 [dependency-groups]
 dev = [
@@ -35,14 +35,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ptycho_vit"]
+packages = ["ptycho_fm"]
 
 [tool.pytest.ini_options]
 # test_pack_hdf5_consistency is a standalone verification script that reads
 # sys.argv[1] and hardcodes NERSC paths; it is not a pytest-collectable test.
 addopts = "--ignore=tests/test_pack_hdf5_consistency.py"
-
-[tool.ruff]
-# ptycho_vit/legacy/ holds frozen reference implementations kept for provenance;
-# they are not imported by the package and are not maintained.
-extend-exclude = ["ptycho_vit/legacy"]

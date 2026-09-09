@@ -5,14 +5,12 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from ptycho_vit.data import PtychographyDataset
-from ptycho_vit.legacy.model512 import PtychoViT as PtychoViT512
-from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
-from ptycho_vit.model.model import PtychoViT
+from ptycho_fm.data import PtychographyDataset
+from ptycho_fm.model.model import PtychoFM
 
 
 def main() -> None:
-    """Entry point for `ptycho-vit-infer` and `python -m ptycho_vit.inference`."""
+    """Entry point for `ptycho-fm-infer` and `python -m ptycho_fm.inference`."""
     config_path = '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run1/config.yaml'
     test_data_path = '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
 
@@ -51,23 +49,8 @@ def main() -> None:
 
     # Load model
     print('Loading model')
-    model_type = config['model'].get('model_type', 'vit')  # Default to 'vit' if not specified
-    if model_type == 'vit':
-        # New unified PtychoViT model 
-        model = PtychoViT(config=config['model'])
-        img_size = config['model']['encoder']['img_size']
-    elif model_type == 'vit512':
-        # Legacy 512x512 model from development_logs
-        model = PtychoViT512(config=config['model']['vit'])
-        img_size = config['model']['vit']['encoder']['img_size']
-    elif model_type == 'cnn':
-        model = PtychoCNN(config=config['model']['cnn'])
-        img_size = 512  # CNN models are fixed at 512x512
-    elif model_type == 'cnn256':
-        model = PtychoCNN256(config=config['model']['cnn256'])
-        img_size = 256  # CNN256 models are fixed at 256x256
-    else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose 'vit', 'vit512', 'cnn', or 'cnn256'")
+    img_size = config['model']['encoder']['img_size']
+    model = PtychoFM(config=config['model'])
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

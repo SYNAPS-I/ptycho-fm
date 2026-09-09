@@ -9,11 +9,9 @@ import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ptycho_vit.data import PtychographyDataset
-from ptycho_vit.legacy.model512 import PtychoViT as PtychoViT512
-from ptycho_vit.legacy.model_cnn import PtychoCNN, PtychoCNN256
-from ptycho_vit.model.model import PtychoViT
-from ptycho_vit.utils.ptychi_utils import place_patches_fourier_shift
+from ptycho_fm.data import PtychographyDataset
+from ptycho_fm.model.model import PtychoFM
+from ptycho_fm.utils.ptychi_utils import place_patches_fourier_shift
 
 
 def load_config(path: str) -> dict:
@@ -22,26 +20,9 @@ def load_config(path: str) -> dict:
 
 
 def resolve_model_and_size(config: dict):
-    model_type = config.get("model", {}).get("model_type", "vit256")
-    model_cfg = config.get("model", {})
-
-    if model_type == "vit":
-        model = PtychoViT512(config=model_cfg["vit"])
-        img_size = model_cfg["vit"]["encoder"]["img_size"]
-    elif model_type == "vit256":
-        model = PtychoViT(config=model_cfg["vit256"])
-        img_size = model_cfg["vit256"]["encoder"]["img_size"]
-    elif model_type == "cnn":
-        model = PtychoCNN(config=model_cfg["cnn"])
-        img_size = 512
-    elif model_type == "cnn256":
-        model = PtychoCNN256(config=model_cfg["cnn256"])
-        img_size = 256
-    else:
-        raise ValueError(
-            f"Unknown model type: {model_type}. Choose 'vit', 'vit256', 'cnn', or 'cnn256'"
-        )
-
+    model_cfg = config["model"]
+    img_size = model_cfg["encoder"]["img_size"]
+    model = PtychoFM(config=model_cfg)
     return model, img_size
 
 
@@ -63,17 +44,9 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device) -> None:
 
 def build_dataloader(data_path: str, config: dict, normalization_value: float, batch_size: int):
     data_cfg = config.get("data", {})
-    model_type = config.get("model", {}).get("model_type", "vit256")
     target_size = data_cfg.get("target_size")
     if target_size is None:
-        if model_type == "vit":
-            target_size = config["model"]["vit"]["encoder"]["img_size"]
-        elif model_type == "vit256":
-            target_size = config["model"]["vit256"]["encoder"]["img_size"]
-        elif model_type == "cnn256":
-            target_size = 256
-        else:
-            target_size = 512
+        target_size = config["model"]["encoder"]["img_size"]
 
     dataset = PtychographyDataset(
         data_path,

@@ -1,4 +1,4 @@
-# PtychoViT Training Configuration
+# PtychoFM Training Configuration
 
 # Data Configuration
 data:
@@ -73,126 +73,28 @@ training:
 
 # Model Architecture
 model:
-  # Model type selection: 'vit', 'cnn', 'cnn256', or 'vit256'
-  model_type: 'vit256'  # Options: 'vit' (ViT for 512x512), 'cnn' (CNN for 512x512), 'cnn256' (CNN for 256x256), 'vit256' (ViT with CNN decoders for 256x256)
+  encoder_type: 'custom'
   amp_scale: 0.2
   ph_scale: 3.14159
   amp_offset: 1.0
 
-  # ViT Model Configuration for 512x512 images (used when model_type='vit')
-  vit:
-    encoder:
-      img_size: 512
-      patch_size: 16
-      in_channels: 1
-      embed_dim: 192
-      depth: 12
-      num_heads: 3
-      mlp_ratio: 4.0
-      use_cls_token: false
-      dropout: 0.1
-      attn_dropout: 0.0
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 192     # Must match encoder embed_dim
-      num_stages: 5       # 32x32 -> 512x512
-      use_batchnorm: true
-      dropout: 0.0
-
-  # CNN Model Configuration for 512x512 images (used when model_type='cnn')
-  cnn:
-    encoder:
-      in_channels: 1
-      base_channels: 32
-      latent_dim: 256
-      num_stages: 5       # 512 -> 16
-      use_batchnorm: true
-      dropout: 0.1
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 32
-      latent_dim: 256
-      num_stages: 5
-      use_batchnorm: true
-      dropout: 0.1
-
-  # CNN Model Configuration for 256x256 images (used when model_type='cnn256')
-  cnn256:
-    encoder:
-      in_channels: 1
-      base_channels: 64
-      latent_dim: 1024
-      num_stages: 5       # 256 -> 8
-      use_batchnorm: true
-      dropout: 0.1
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 1024
-      num_stages: 5
-      use_batchnorm: true
-      dropout: 0.1
-
-  # ViT with CNN Decoders for 256x256 images (used when model_type='vit256')
-  vit256:
-    encoder:
-      img_size: 256
-      patch_size: 16
-      in_channels: 1
-      embed_dim: 512
-      depth: 12
-      num_heads: 8
-      mlp_ratio: 4.0
-      use_cls_token: false
-      dropout: 0.1
-      attn_dropout: 0.0
-    decoder:  # Shared decoder config (amp uses sigmoid, phase uses tanh)
-      base_channels: 64
-      latent_dim: 512     # Must match encoder embed_dim
-      num_stages: 4       # 16x16 -> 256x256
-      use_batchnorm: true
-      dropout: 0.1
-  # model_type: 'vit'  # Options: 'vit' (Vision Transformer), 'cnn' (Convolutional Neural Network)
-
-  # Vision Transformer Encoder (used when model_type='vit')
-
-  pretrained256:
-    encoder:
-      img_size: 256
-      patch_size: 32
-      in_channels: 1
-      embed_dim: 1024
-      depth: 24
-      num_heads: 16
-      mlp_ratio: 4.0
-      use_cls_token: false
-      dropout: 0.1  # Dropout for positional embedding and MLP layers
-      attn_dropout: 0.0  # Dropout for attention weights
-      timm_model_name: 'vit_large_patch32_224'
-      timm_kwargs:
-        pretrained: false                # <-- change this to false
-        checkpoint_path: 'model.safetensors'
-        # checkpoint_kwargs:
-            # strict: true 
-        # pretrained: true  # Set to true if pretrained weights are cached/available
-
-  # Amplitude Decoder
-    amp_decoder:
-      embed_dim: 1024
-      out_channels: 1
-      # hidden_dims: [512, 256, 128, 64, 32]
-      num_stages: 5
-      activation: 'custom'
-      dropout: 0.1  # Dropout after each conv block
-
-  # Phase Decoder
-    ph_decoder:
-      embed_dim: 1024
-      out_channels: 1
-      # hidden_dims: [512, 256, 128, 64, 32]
-      num_stages: 5
-      activation: 'custom'
-      dropout: 0.1  # Dropout after each conv block
-
-      
+  encoder:
+    img_size: 256
+    patch_size: 16
+    in_channels: 1
+    embed_dim: 512
+    depth: 12
+    num_heads: 8
+    mlp_ratio: 4.0
+    use_cls_token: false
+    dropout: 0.1
+    attn_dropout: 0.0
+  decoder:
+    base_channels: 64
+    latent_dim: 512     # Must match encoder embed_dim
+    num_stages: 4       # 16x16 -> 256x256
+    use_batchnorm: true
+    dropout: 0.1
 # Paths
 paths:
   model_save_path: '/lus/eagle/projects/SYNAPS-I/mingdu/ptycho-vit/workspace/models_for_FT/Fine_tune_360/finetuned_model'

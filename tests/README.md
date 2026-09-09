@@ -1,6 +1,6 @@
-# Ptycho-ViT Test Suite
+# Ptycho-FM Test Suite
 
-This directory contains tests for the data loading components of the ptycho-vit project.
+This directory contains tests for the data loading components of the ptycho-fm package.
 
 ## Test Files
 

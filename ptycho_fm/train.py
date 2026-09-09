@@ -21,24 +21,21 @@ except ImportError:
 import wandb
 from torch.utils.data import DataLoader, DistributedSampler, Subset, random_split
 
-from ptycho_vit.custom_loss import WeightedLoss
-from ptycho_vit.data import CombinedDataset, PtychographyDataset, RankShardedSubset
-from ptycho_vit.data_simple_pack import PtychographyDatasetPacked
-from ptycho_vit.mlflow_logger import MLflowLogger
-from ptycho_vit.model.model import PtychoViT
-from ptycho_vit.prefetcher import CUDAPrefetcher
-from ptycho_vit.training import Trainer
-from ptycho_vit.utils.utils import compute_sha256
+from ptycho_fm.custom_loss import WeightedLoss
+from ptycho_fm.data import CombinedDataset, PtychographyDataset, RankShardedSubset
+from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
+from ptycho_fm.mlflow_logger import MLflowLogger
+from ptycho_fm.model.model import PtychoFM
+from ptycho_fm.prefetcher import CUDAPrefetcher
+from ptycho_fm.training import Trainer
+from ptycho_fm.utils.utils import compute_sha256
 
 
 def main() -> None:
-    """Entry point for `ptycho-vit-train` and `python -m ptycho_vit.train`."""
+    """Entry point for `ptycho-fm-train` and `python -m ptycho_fm.train`."""
     def resolve_config_path(config_path):
-        """Resolve configuration path (relative to script directory)."""
-        if not os.path.isabs(config_path):
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(script_dir, config_path)
-        return config_path
+        """Resolve configuration paths relative to the caller's working directory."""
+        return os.path.abspath(os.path.expanduser(config_path))
 
     def load_config(config_path='config.yaml'):
         """Load configuration from YAML file."""
@@ -51,11 +48,11 @@ def main() -> None:
         return config
 
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='PtychoViT Training Script')
+    parser = argparse.ArgumentParser(description='PtychoFM Training Script')
     parser.add_argument(
         '--config',
         default='config.yaml',
-        help='Path to config YAML file (default: config.yaml relative to script)',
+        help='Path to config YAML file (default: config.yaml in the working directory)',
     )
     parser.add_argument('--debug', action='store_true', 
                         help='Enable debug logging to verify CSV usage and shuffling')
@@ -670,12 +667,12 @@ def main() -> None:
     # ────────────────────────────────────────────────────────────────────────────────
     img_size = 256
 
-    # Use unified PtychoViT model with encoder_type selection
-    model = PtychoViT(config=config['model'])
+    # Use unified PtychoFM model with encoder_type selection
+    model = PtychoFM(config=config['model'])
 
     if is_main_process:
         encoder_type = config['model'].get('encoder_type', 'custom')
-        print(f"Using PtychoViT with {encoder_type.upper()} encoder", flush=True)
+        print(f"Using PtychoFM with {encoder_type.upper()} encoder", flush=True)
         dummy_data = torch.randn((1, 1, img_size, img_size))
         dummy_probe = torch.randn((1, 1, 10, img_size, img_size, 2))
         try:

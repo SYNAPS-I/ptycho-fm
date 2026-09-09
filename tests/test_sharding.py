@@ -17,7 +17,7 @@ import torch
 import yaml
 from torch.utils.data import random_split
 
-from ptycho_vit.data import CombinedDataset, RankShardedSubset
+from ptycho_fm.data import CombinedDataset, RankShardedSubset
 
 
 def load_config(config_path='config.yaml'):
