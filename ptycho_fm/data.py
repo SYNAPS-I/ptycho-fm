@@ -28,18 +28,19 @@ class PtychographyDataset(Dataset):
         apply_noise (bool): Whether to simulate noise by sampling from a Poisson distribution (set to False for experimental data)
         cache_object (bool): Whether to cache object and probe data in memory
         max_probe_modes (int): Maximum number of probe modes to pad to (default: 8)
+        max_OPR_modes (int): Maximum number of OPR modes to pad to (default: 1)
     """
 
     def __init__(
         self,
         file_path: str,
-        scale: float = 100000.,
+        scale: float = 10000.,
         normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         cache_object: bool = True,
         max_probe_modes: int = 8,
-        target_size: int | None = 256,
+        max_OPR_modes: int = 1,
         object_name: str | None = None
     ):
         self.file_path = Path(file_path)
@@ -49,7 +50,7 @@ class PtychographyDataset(Dataset):
         self.apply_noise = apply_noise
         self.cache_object = cache_object
         self.max_probe_modes = max_probe_modes
-        self.target_size = target_size  # Target size for diffraction patterns (e.g., 256)
+        self.max_OPR_modes = max_OPR_modes
 
         # Initialize cache variables
         self._cached_object = None
@@ -151,13 +152,7 @@ class PtychographyDataset(Dataset):
         if 'dp' not in self.dp_handle:
             raise KeyError(f"Missing diffraction patterns 'dp' in {self.dp_file.name}")
         self.num_patterns = self.dp_handle['dp'].shape[0]
-        self._raw_pattern_shape = self.dp_handle['dp'].shape[1:]  # Original shape from file
-
-        # Set pattern_shape to target_size if specified, otherwise use raw shape
-        if self.target_size is not None:
-            self.pattern_shape = (self.target_size, self.target_size)
-        else:
-            self.pattern_shape = self._raw_pattern_shape
+        self.pattern_shape = self.dp_handle['dp'].shape[1:]  # Original shape from file
 
         # Load from parameters file
         required_keys = ['object', 'probe', 'probe_position_x_m', 'probe_position_y_m']
@@ -214,122 +209,44 @@ class PtychographyDataset(Dataset):
         return diffraction_amp, amplitude_patch, phase_patch, probe, probe_position, self.normalization, self.scale
     
     def _extract_patch(self, full_object: np.ndarray, probe_position: Tensor) -> Tensor:
-        """Extract patch from full object at given probe position.
+        """Extract patch from full object at given probe position."""
+        return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self.pattern_shape[0], self.pattern_shape[1]))[0]
 
-        Always extracts at the raw pattern size (from file), not the target size.
-        Padding to target size is handled separately after extraction.
+    def _pad_probe(self, probe: np.ndarray, target_modes: int = 15, target_OPR_modes: int = 1) -> np.ndarray:
         """
-        # Use raw pattern shape for extraction (e.g., 128x128), not target size (e.g., 256x256)
-        return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self._raw_pattern_shape[0], self._raw_pattern_shape[1]))[0]
-
-    def _pad_probe(self, probe: np.ndarray, target_modes: int = 30) -> np.ndarray:
-        """
-        Pad probe array to have target number of modes along axis 1.
+        Pad probe array to have target number of modes along axis 1 and target OPR modes along axis 0.
 
         Args:
-            probe: Probe array with shape (1, N, H, W) where N is current number of modes
-            target_modes: Target number of modes (default: 30)
+            probe: Probe array with shape (M, N, H, W) where M is current number of OPR modes, N is current number of incoherent modes
+            target_modes: Target number of modes along axis 1 (default: 15)
+            target_OPR_modes: Target number of OPR modes along axis 0 (default: 1)
 
         Returns:
-            Padded probe array with shape (1, target_modes, H, W)
+            Padded probe array with shape (target_OPR_mods, target_modes, H, W)
         """
         current_shape = probe.shape
         if len(current_shape) != 4:
-            raise ValueError(f"Expected probe shape (1, N, H, W), got {current_shape}")
+            raise ValueError(f"Expected probe shape (M, N, H, W), got {current_shape}")
 
+        current_OPR_modes = current_shape[0]
         current_modes = current_shape[1]
-        if current_modes >= target_modes:
-            # Already has enough modes, no padding needed
-            return probe
 
-        # Calculate padding: add zeros to the end of axis 1
-        modes_to_add = target_modes - current_modes
-        pad_shape = (current_shape[0], modes_to_add, current_shape[2], current_shape[3])
+        # Pad axis 1 (probe modes) first
+        if current_modes < target_modes:
+            modes_to_add = target_modes - current_modes
+            pad_shape = (current_shape[0], modes_to_add, current_shape[2], current_shape[3])
+            padding = np.zeros(pad_shape, dtype=probe.dtype)
+            probe = np.concatenate([probe, padding], axis=1)
 
-        # Create zero padding with same dtype as probe
-        padding = np.zeros(pad_shape, dtype=probe.dtype)
+        # Pad axis 0 (OPR modes) second
+        if current_OPR_modes < target_OPR_modes:
+            OPR_modes_to_add = target_OPR_modes - current_OPR_modes
+            # After axis 1 padding, shape is (current_OPR_modes, target_modes, H, W)
+            pad_shape = (OPR_modes_to_add, target_modes, current_shape[2], current_shape[3])
+            padding = np.zeros(pad_shape, dtype=probe.dtype)
+            probe = np.concatenate([probe, padding], axis=0)
 
-        # Concatenate along axis 1
-        padded_probe = np.concatenate([probe, padding], axis=1)
-
-        return padded_probe
-
-    def _normalize_probe_shape(self, probe: np.ndarray) -> np.ndarray:
-        """
-        Normalize probe array to shape (1, N, H, W).
-
-        Accepted input shapes:
-            - (1, N, H, W): already normalized
-            - (A, N, H, W): drop to first A slice
-        """
-        if probe.ndim != 4:
-            raise ValueError(f"Expected 4D probe array (A, N, H, W), got {probe.shape}")
-        if probe.shape[0] == 1:
-            return probe
-        return probe[:1, ...]
-
-    def _zero_pad_to_target(self, image: np.ndarray, target_size: int) -> np.ndarray:
-        """
-        Zero-pad a 2D image to target size, keeping the original centered.
-
-        Args:
-            image: 2D array of shape (H, W)
-            target_size: Target size for both dimensions
-
-        Returns:
-            Zero-padded array of shape (target_size, target_size)
-        """
-        h, w = image.shape
-        if h == target_size and w == target_size:
-            return image
-
-        if h > target_size or w > target_size:
-            raise ValueError(f"Image size ({h}, {w}) larger than target size ({target_size})")
-
-        # Calculate padding for each side
-        pad_h = target_size - h
-        pad_w = target_size - w
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-
-        # Zero-pad
-        padded = np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
-        return padded
-
-    def _upsample_probe(self, probe: np.ndarray, target_size: int) -> np.ndarray:
-        """
-        Upsample probe to target spatial size using bilinear interpolation.
-
-        Args:
-            probe: Probe array with shape (1, N, H, W) - complex values
-            target_size: Target spatial size
-
-        Returns:
-            Upsampled probe array with shape (1, N, target_size, target_size)
-        """
-        _, n_modes, h, w = probe.shape
-        if h == target_size and w == target_size:
-            return probe
-
-        # Calculate zoom factors for spatial dimensions
-        zoom_h = target_size / h
-        zoom_w = target_size / w
-
-        # Upsample real and imaginary parts separately for each mode
-        upsampled_real = np.zeros((1, n_modes, target_size, target_size), dtype=np.float64)
-        upsampled_imag = np.zeros((1, n_modes, target_size, target_size), dtype=np.float64)
-
-        for mode_idx in range(n_modes):
-            mode_data = probe[0, mode_idx]  # (H, W) complex
-            # Use scipy zoom for upsampling (order=1 for bilinear)
-            upsampled_real[0, mode_idx] = zoom(mode_data.real, (zoom_h, zoom_w), order=1)
-            upsampled_imag[0, mode_idx] = zoom(mode_data.imag, (zoom_h, zoom_w), order=1)
-
-        # Recombine into complex
-        upsampled_probe = upsampled_real + 1j * upsampled_imag
-        return upsampled_probe.astype(probe.dtype)
+        return probe
 
     def _get_handles(self):
         """
@@ -409,13 +326,8 @@ class PtychographyDataset(Dataset):
         probe_data = self.para_handle['probe']
         if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
             probe = probe_data[...]
-            probe = self._normalize_probe_shape(probe)
-            # Pad probe to (1, max_probe_modes, H, W) if needed
-            probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
-            # Upsample probe to target size if needed
-            if self.target_size is not None:
-                probe = self._upsample_probe(probe, self.target_size)
-            self._cached_probe = probe 
+            # Pad probe to (max_OPR_modes, max_probe_modes, H, W) if needed
+            self._cached_probe = self._pad_probe(probe, target_modes=self.max_probe_modes, target_OPR_modes=self.max_OPR_modes) 
     
     def _load_hdf5_pattern(self, pattern_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Load specific pattern from paired HDF5 files with efficient caching and persistent handles."""
@@ -437,10 +349,6 @@ class PtychographyDataset(Dataset):
             diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern)
         diffraction_amp = np.sqrt(diffraction_pattern.astype(np.float32))
 
-        # Zero-pad diffraction pattern to target size if needed
-        if self.target_size is not None and diffraction_amp.shape[0] != self.target_size:
-            diffraction_amp = self._zero_pad_to_target(diffraction_amp, self.target_size)
-
         # Get probe position from cache
         probe_position = self._cached_probe_positions[pattern_idx]
 
@@ -449,12 +357,8 @@ class PtychographyDataset(Dataset):
             probe = self._cached_probe
         else:
             probe = para_handle['probe'][...]
-            probe = self._normalize_probe_shape(probe)
-            # Pad probe to (1, max_probe_modes, H, W) if needed
-            probe = self._pad_probe(probe, target_modes=self.max_probe_modes)
-            # Upsample probe to target size if needed
-            if self.target_size is not None:
-                probe = self._upsample_probe(probe, self.target_size)
+            # Pad probe to (max_OPR_modes, max_probe_modes, H, W) if needed
+            probe = self._pad_probe(probe, target_modes=self.max_probe_modes, target_OPR_modes=self.max_OPR_modes)
         
         # Get object data and extract patches
         if self._cached_object is not None:
@@ -463,19 +367,10 @@ class PtychographyDataset(Dataset):
             # If not cached, load on demand (for memory-constrained situations)
             full_object = para_handle['object'][0]
 
-        # Extract patches at probe position (at raw pattern size, e.g., 128x128)
+        # Extract patches at probe position
         patch = self._extract_patch(full_object, probe_position)
         amplitude_patch = torch.abs(patch)
         phase_patch = torch.angle(patch)
-
-        # Zero-pad amplitude and phase patches to target size if needed
-        if self.target_size is not None and amplitude_patch.shape[0] != self.target_size:
-            amplitude_patch = torch.from_numpy(
-                self._zero_pad_to_target(amplitude_patch.detach().cpu().numpy(), self.target_size)
-            )
-            phase_patch = torch.from_numpy(
-                self._zero_pad_to_target(phase_patch.detach().cpu().numpy(), self.target_size)
-            )
 
         return diffraction_amp, amplitude_patch, phase_patch, probe, probe_position
 
@@ -617,18 +512,6 @@ class CombinedDataset(Dataset):
         self.debug = debug
         self.debug_call_count = 0  # Track number of __getitem__ calls for debug logging
 
-        # dummy: set to below tensor if needed
-        self.fake_data = None
-        # (
-        #     torch.randn([1, 256, 256], dtype=torch.float32),
-        #     torch.randn([1, 256, 256], dtype=torch.float32),
-        #     torch.randn([1, 256, 256], dtype=torch.float32),
-        #     torch.randn([1, 10, 256, 256], dtype=torch.complex64),
-        #     torch.randn([2], dtype=torch.float64),
-        #     torch.randn([1], dtype=torch.float32),
-        #     torch.randn([1], dtype=torch.float32),
-        # )
-
         # Try to load index.csv to avoid opening all HDF5 files
         self.index_df = None
         self.pattern_counts: dict[Path, int] = {}
@@ -752,9 +635,6 @@ class CombinedDataset(Dataset):
         Maps rank-local index to global index, then to file and local file index.
         Uses LRU cache to limit number of open datasets in memory.
         """
-        if self.fake_data:
-            return self.fake_data
-
         if idx >= len(self.current_indices):
             raise IndexError(f"Index {idx} out of range for rank shard with {len(self.current_indices)} patterns")
 
