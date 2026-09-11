@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 from ptychi.image_proc import extract_patches_fourier_shift
-from scipy.ndimage import zoom
 from torch import Tensor
 from torch.utils.data import Dataset, Subset
 
