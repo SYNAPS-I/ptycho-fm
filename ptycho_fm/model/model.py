@@ -10,11 +10,40 @@ import math
 import torch
 from torch import nn
 
-from ptycho_fm.model.decoders import Decoder256
+from ptycho_fm.model.decoders import Decoder256, ResNetDecoder256, CoupledDecoder256
 from ptycho_fm.model.vit import CustomViT
 from ptycho_fm.model.vit_pretrained import VisionTransformer
 
-# from utils.math import create_logpolar_grid, apply_logpolar_transform
+
+def _output_norm_config(config):
+    if config is None:
+        return {}
+    return config.get('output_norm', config.get('scaling', {}))
+
+
+def _log_scale_parameter(output_norm_config, key, default, legacy_key=None):
+    if key in output_norm_config:
+        scale = output_norm_config[key]
+        if scale <= 0:
+            raise ValueError(f"Output norm scale '{key}' must be positive, got {scale}")
+        value = math.log(scale)
+    elif legacy_key is not None and legacy_key in output_norm_config:
+        value = output_norm_config[legacy_key]
+    else:
+        value = math.log(default)
+
+    return nn.Parameter(torch.tensor(value, dtype=torch.float32), requires_grad=False)
+
+
+def _offset_parameter(output_norm_config, key, default, legacy_key=None):
+    if key in output_norm_config:
+        value = output_norm_config[key]
+    elif legacy_key is not None and legacy_key in output_norm_config:
+        value = output_norm_config[legacy_key]
+    else:
+        value = default
+
+    return nn.Parameter(torch.tensor(value, dtype=torch.float32), requires_grad=False)
 
 
 class PtychoFM(nn.Module):
@@ -127,27 +156,49 @@ class PtychoFM(nn.Module):
         if latent_dim is None:
             latent_dim = self.encoder.embed_dim
 
-        # Amplitude Decoder (CNN-based, from latent spatial representation to 256x256)
-        self.amp_decoder = Decoder256(
-            latent_dim=latent_dim,
-            base_channels=decoder_config.get('base_channels', 64),
-            out_channels=1,
-            use_batchnorm=decoder_config.get('use_batchnorm', True),
-            output_activation='custom',
-            dropout=decoder_config.get('dropout', 0.1),
-            num_stages=decoder_config.get('num_stages', 4)
-        )
+        # Determine decoder type
+        decoder_type = config.get('decoder_type', 'standard')
 
-        # Phase Decoder (CNN-based, from latent spatial representation to 256x256)
-        self.ph_decoder = Decoder256(
-            latent_dim=latent_dim,
-            base_channels=decoder_config.get('base_channels', 64),
-            out_channels=1,
-            use_batchnorm=decoder_config.get('use_batchnorm', True),
-            output_activation='custom',
-            dropout=decoder_config.get('dropout', 0.1),
-            num_stages=decoder_config.get('num_stages', 4)
-        )
+        phase_activation = decoder_config.get('phase_activation', 'custom')
+
+        # Select decoder class based on type
+        if decoder_type == 'resnet':
+            decoder_class = ResNetDecoder256
+            amp_decoder_kwargs = {
+                'latent_dim': latent_dim,
+                'base_channels': decoder_config.get('base_channels', 64),
+                'out_channels': 1,
+                'use_batchnorm': decoder_config.get('use_batchnorm', True),
+                'output_activation': 'tanh',
+                'dropout': decoder_config.get('dropout', 0.1),
+                'num_stages': decoder_config.get('num_stages', 4),
+                'blocks_per_stage': decoder_config.get('blocks_per_stage', 2)
+            }
+            ph_decoder_kwargs = {
+                **amp_decoder_kwargs,
+                'output_activation': phase_activation,
+            }
+        else:  # 'standard' or default
+            decoder_class = Decoder256
+            amp_decoder_kwargs = {
+                'latent_dim': latent_dim,
+                'base_channels': decoder_config.get('base_channels', 64),
+                'out_channels': 1,
+                'use_batchnorm': decoder_config.get('use_batchnorm', True),
+                'output_activation': 'tanh',
+                'dropout': decoder_config.get('dropout', 0.1),
+                'num_stages': decoder_config.get('num_stages', 4)
+            }
+            ph_decoder_kwargs = {
+                **amp_decoder_kwargs,
+                'output_activation': phase_activation,
+            }
+
+        # Amplitude Decoder (from latent spatial representation to 256x256)
+        self.amp_decoder = decoder_class(**amp_decoder_kwargs)
+
+        # Phase Decoder (from latent spatial representation to 256x256)
+        self.ph_decoder = decoder_class(**ph_decoder_kwargs)
 
         if init_enabled:
             if 'decoders' in apply_to:
@@ -181,15 +232,11 @@ class PtychoFM(nn.Module):
                 else:
                     self._init_module_trunc_normal(self.encoder, init_mean, init_std)
 
-        # cache for log-polar grid
-        self._logpolar_grid = None
-        self._logpolar_hw = None
-
-        # Scaling factors for the outputs
-        self.log_scale_amp = nn.Parameter(torch.tensor(math.log(config.get("amp_scale", 0.1)), dtype=torch.float32), requires_grad=False)
-        self.log_scale_ph = nn.Parameter(torch.tensor(math.log(config.get("ph_scale", math.pi)), dtype=torch.float32), requires_grad=False)
-
-        self.amp_offset = config.get("amp_offset", 0.975)
+        # Output normalization parameters are stored in log-space for positive scales.
+        output_norm_config = _output_norm_config(config)
+        self.amp_scale = _log_scale_parameter(output_norm_config, 'amp_scale', 0.2, legacy_key='log_scale_amp')
+        self.ph_scale = _log_scale_parameter(output_norm_config, 'ph_scale', math.pi, legacy_key='log_scale_ph')
+        self.amp_offset = _offset_parameter(output_norm_config, 'amp_offset', 1.0, legacy_key='offset_amp')
         
         self.subtract_probe_intensity = config.get("subtract_probe_intensity", False)
 
@@ -242,13 +289,6 @@ class PtychoFM(nn.Module):
         if self.subtract_probe_intensity:
             x = x - torch.sqrt(probe_intensity.float().unsqueeze(1))
 
-        # Apply log-polar coordinate transform
-        # H, W = x.shape[-2], x.shape[-1]
-        # if self._logpolar_grid is None or self._logpolar_hw != (H, W) or self._logpolar_grid.device != x.device:
-        #     self._logpolar_grid = create_logpolar_grid(H, W, x.device)
-        #     self._logpolar_hw = (H, W)
-        # x_prime = apply_logpolar_transform(x, self._logpolar_grid, mode='bicubic')
-
         # ViT Encoder: (B, 1, 256, 256) -> (B, embed_dim, H, W)
         x = self.encoder(x)
 
@@ -256,9 +296,9 @@ class PtychoFM(nn.Module):
         constrained_amp = self.amp_decoder(x).squeeze(1)
         constrained_ph = self.ph_decoder(x).squeeze(1)
 
-        # Scale the constrained outputs 
-        amp = (constrained_amp * torch.exp(self.log_scale_amp)) + self.amp_offset
-        ph = constrained_ph * torch.exp(self.log_scale_ph)
+        # Scale the constrained outputs
+        amp = (constrained_amp * torch.exp(self.amp_scale)) + self.amp_offset
+        ph = constrained_ph * torch.exp(self.ph_scale)
 
         # Complex object and diffraction
         complex_object = torch.complex(amp * torch.cos(ph), amp * torch.sin(ph))
@@ -268,5 +308,222 @@ class PtychoFM(nn.Module):
         # Normalization
         intensity = (intensity.float() / normalization) * scale
         pred_diff_amp = torch.sqrt(intensity + eps)
+
+        return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1)
+
+
+class PtychoFMInference(PtychoFM):
+    """Inference-only variant of PtychoFM without probe or physics model.
+
+    Takes input diffraction patterns and returns predicted amplitude and phase directly.
+    """
+    def forward(self, x):
+        x = 2 * torch.log10(x + 1e-1)
+        x = self.encoder(x)
+        constrained_amp = self.amp_decoder(x).squeeze(1)
+        constrained_ph = self.ph_decoder(x).squeeze(1)
+        amp = (constrained_amp * torch.exp(self.amp_scale)) + self.amp_offset
+        ph = constrained_ph * torch.exp(self.ph_scale)
+        return amp.unsqueeze(1), ph.unsqueeze(1)
+
+
+class PtychoFMReIm(PtychoFM):
+    """Vision Transformer-based ptychography reconstruction with coupled real/imaginary decoders.
+
+    This model predicts real and imaginary parts of the complex object separately but with
+    shared feature representations, enforcing physical coupling between amplitude and phase
+    through the Kramers-Kronig relationship.
+
+    Inherits encoder setup from PtychoFM but uses CoupledDecoder256 for real/imaginary prediction.
+    """
+    def __init__(self, config=None):
+        # Initialize parent class to set up encoder
+        super().__init__(config)
+
+        # Get decoder config
+        if config is None:
+            config = {}
+        decoder_config = config.get('decoder', {})
+        decoder_type = config.get('decoder_type', 'standard')
+
+        # Use encoder's embed_dim if latent_dim is None/null
+        latent_dim = decoder_config.get('latent_dim')
+        if latent_dim is None:
+            latent_dim = self.encoder.embed_dim
+
+        # Replace separate amp/ph decoders with coupled real/imag decoder
+        del self.amp_decoder
+        del self.ph_decoder
+
+        self.coupled_decoder = CoupledDecoder256(
+            latent_dim=latent_dim,
+            base_channels=decoder_config.get('base_channels', 64),
+            use_batchnorm=decoder_config.get('use_batchnorm', True),
+            dropout=decoder_config.get('dropout', 0.1),
+            num_stages=decoder_config.get('num_stages', 4),
+            use_resnet_blocks=(decoder_type == 'resnet'),
+            blocks_per_stage=decoder_config.get('blocks_per_stage', 2)
+        )
+
+        del self.amp_scale
+        del self.ph_scale
+        del self.amp_offset
+
+        output_norm_config = _output_norm_config(config)
+        self.real_scale = _log_scale_parameter(output_norm_config, 'real_scale', 0.1, legacy_key='log_scale_real')
+        self.imag_scale = _log_scale_parameter(output_norm_config, 'imag_scale', 0.1, legacy_key='log_scale_imag')
+        self.real_offset = _offset_parameter(output_norm_config, 'real_offset', 1.0, legacy_key='offset_real')
+        self.imag_offset = _offset_parameter(output_norm_config, 'imag_offset', 0.0, legacy_key='offset_imag')
+
+    def forward(self, x, probe, normalization, scale):
+        """
+        Forward pass predicting real/imaginary components.
+
+        Args:
+            x: Input diffraction pattern
+            probe: Complex probe (B, modes, OPR, H, W, 2) where last dim is [real, imag]
+            normalization: Normalization factor
+            scale: Scaling factor
+
+        Returns:
+            Tuple of (pred_diff_amp, amp, ph) for compatibility with training loop
+        """
+        # Preprocess input (log transform)
+        x = 2 * torch.log10(x + 1e-1)
+
+        # Convert probe to complex tensor
+        probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
+
+        # Normalization preparation
+        normalization = normalization.view(normalization.shape[0], 1, 1)
+        scale = scale.view(scale.shape[0], 1, 1)
+
+        # ViT Encoder: (B, 1, 256, 256) -> (B, embed_dim, H, W)
+        x = self.encoder(x)
+
+        # Decode to real and imaginary parts in separate channels
+        # Output shape: (B, 2, H, W) where channel 0=real, channel 1=imaginary
+        complex_output = self.coupled_decoder(x)
+        real_constrained = complex_output[:, 0]  # (B, H, W)
+        imag_constrained = complex_output[:, 1]  # (B, H, W)
+
+        # Apply output normalization scale and offset.
+        # tanh output is in [-1, 1], scale to appropriate range
+        real = real_constrained * torch.exp(self.real_scale) + self.real_offset
+        imag = imag_constrained * torch.exp(self.imag_scale) + self.imag_offset
+
+        # Construct complex object directly from real and imaginary parts
+        complex_object = torch.complex(real, imag)
+
+        # Compute amplitude and phase for logging/visualization and loss computation
+        amp = torch.abs(complex_object)
+        ph = torch.angle(complex_object)
+
+        # Forward physics model: compute diffraction pattern
+        Psi = torch.fft.fftshift(torch.fft.fft2(complex_object[:, None, None, :] * probe), dim=(-2, -1))
+        intensity = (Psi.abs()**2).sum(2)[:, 0]  # sum over incoherent modes, select first OPR mode
+
+        # Normalization
+        intensity = (intensity.float() / normalization) * scale
+
+        pred_diff_amp = torch.sqrt(intensity)
+
+        return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1) #, real.unsqueeze(1), imag.unsqueeze(1)
+
+
+class PtychoFMCoupledAmpPh(PtychoFM):
+    """Vision Transformer-based ptychography reconstruction with coupled amplitude/phase decoders.
+
+    This model predicts amplitude and phase of the complex object with shared feature
+    representations, as an alternative to the real/imaginary parameterization in PtychoFMCoupled.
+
+    Inherits encoder setup from PtychoFM but uses CoupledDecoder256 for amplitude/phase prediction.
+    """
+    def __init__(self, config=None):
+        # Initialize parent class to set up encoder
+        super().__init__(config)
+
+        # Get decoder config
+        if config is None:
+            config = {}
+        decoder_config = config.get('decoder', {})
+        decoder_type = config.get('decoder_type', 'standard')
+
+        # Use encoder's embed_dim if latent_dim is None/null
+        latent_dim = decoder_config.get('latent_dim')
+        if latent_dim is None:
+            latent_dim = self.encoder.embed_dim
+
+        # Replace separate amp/ph decoders with coupled amp/phase decoder
+        del self.amp_decoder
+        del self.ph_decoder
+
+        circular_phase = decoder_config.get('circular_phase', False)
+        self.coupled_decoder = CoupledDecoder256(
+            latent_dim=latent_dim,
+            base_channels=decoder_config.get('base_channels', 64),
+            use_batchnorm=decoder_config.get('use_batchnorm', True),
+            dropout=decoder_config.get('dropout', 0.1),
+            num_stages=decoder_config.get('num_stages', 4),
+            use_resnet_blocks=(decoder_type == 'resnet'),
+            blocks_per_stage=decoder_config.get('blocks_per_stage', 2),
+            circular_phase=circular_phase,
+        )
+
+        output_norm_config = _output_norm_config(config)
+        self.amp_scale = _log_scale_parameter(output_norm_config, 'amp_scale', 0.1, legacy_key='log_scale_amp')
+        self.amp_offset = _offset_parameter(output_norm_config, 'amp_offset', 1.0, legacy_key='offset_amp')
+        ph_scale_default = 0.0 if circular_phase else math.log(math.pi)
+        self.ph_scale = _log_scale_parameter(output_norm_config, 'ph_scale', math.exp(ph_scale_default), legacy_key='log_scale_ph')
+
+    def forward(self, x, probe, normalization, scale):
+        """
+        Forward pass predicting amplitude/phase components.
+
+        Args:
+            x: Input diffraction pattern
+            probe: Complex probe (B, modes, OPR, H, W, 2) where last dim is [real, imag]
+            normalization: Normalization factor
+            scale: Scaling factor
+
+        Returns:
+            Tuple of (pred_diff_amp, amp, ph) for compatibility with training loop
+        """
+        # Preprocess input (log transform)
+        x = 2 * torch.log10(x + 1e-1)
+
+        # Convert probe to complex tensor
+        probe = torch.complex(probe[:, :, :, :, :, 0], probe[:, :, :, :, :, 1])
+
+        # Normalization preparation
+        normalization = normalization.view(normalization.shape[0], 1, 1)
+        scale = scale.view(scale.shape[0], 1, 1)
+
+        # ViT Encoder: (B, 1, 256, 256) -> (B, embed_dim, H, W)
+        x = self.encoder(x)
+
+        # Decode to amplitude and phase in separate channels
+        # Output shape: (B, 2, H, W) where channel 0=amplitude, channel 1=phase
+        complex_output = self.coupled_decoder(x)
+        amp_constrained = complex_output[:, 0]  # (B, H, W)
+        ph_constrained = complex_output[:, 1]   # (B, H, W)
+
+        # Apply scaling and offset
+        # Amplitude: tanh in [-1, 1] scaled around 1.0
+        amp = amp_constrained * torch.exp(self.amp_scale) + self.amp_offset
+        # Phase: tanh in [-1, 1] scaled to [-pi, pi]
+        ph = ph_constrained * torch.exp(self.ph_scale)
+
+        # Construct complex object from amplitude and phase
+        complex_object = torch.complex(amp * torch.cos(ph), amp * torch.sin(ph))
+
+        # Forward physics model: compute diffraction pattern
+        Psi = torch.fft.fftshift(torch.fft.fft2(complex_object[:, None, None, :] * probe), dim=(-2, -1))
+        intensity = (Psi.abs()**2).sum(2)[:, 0]  # sum over incoherent modes, select first OPR mode
+
+        # Normalization
+        intensity = (intensity.float() / normalization) * scale
+
+        pred_diff_amp = torch.sqrt(intensity)
 
         return pred_diff_amp.unsqueeze(1), amp.unsqueeze(1), ph.unsqueeze(1)
