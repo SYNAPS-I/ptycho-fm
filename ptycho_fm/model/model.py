@@ -10,7 +10,7 @@ import math
 import torch
 from torch import nn
 
-from ptycho_fm.model.decoders import Decoder256, ResNetDecoder256, CoupledDecoder256
+from ptycho_fm.model.decoders import CoupledDecoder256, Decoder256, ResNetDecoder256
 from ptycho_fm.model.vit import CustomViT
 from ptycho_fm.model.vit_pretrained import VisionTransformer
 
