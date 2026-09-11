@@ -1,6 +1,7 @@
 """Tests for data loading components."""
 import tempfile
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, random_split
 
@@ -20,7 +21,7 @@ def test_ptychography_dataset():
         dp_file, _para_file, num_patterns = create_dummy_hdf5_pair(tmpdir, 'test_object')
 
         # Create dataset
-        dataset = PtychographyDataset(str(dp_file), patch_size=128)
+        dataset = PtychographyDataset(str(dp_file))
 
         print(f"Dataset length: {len(dataset)}")
         print(f"Expected patterns: {num_patterns}")
@@ -41,8 +42,8 @@ def test_ptychography_dataset():
         assert diff_amp.shape == (1, 128, 128), f"Wrong diff_amp shape: {diff_amp.shape}"
         assert amp_patch.shape == (1, 128, 128), f"Wrong amp_patch shape: {amp_patch.shape}"
         assert ph_patch.shape == (1, 128, 128), f"Wrong ph_patch shape: {ph_patch.shape}"
-        # Probe shape is (8, 128, 128, 2) - batch dimension added during collation
-        assert probe.shape == (8, 128, 128, 2), f"Wrong probe shape: {probe.shape}"
+        assert probe.shape == (1, 8, 128, 128), f"Wrong probe shape: {probe.shape}"
+        assert probe.is_complex()
 
         print("✓ PtychographyDataset test passed!\n")
 
@@ -215,44 +216,21 @@ def test_dataloader_consistency_across_epochs():
         print("✓ DataLoader consistency test passed!\n")
 
 
-def test_combined_dataset_with_list_of_files():
-    """Test CombinedDataset with explicit list of files instead of directory."""
+def test_combined_dataset_requires_directory():
+    """Explicit file lists are not supported by the directory-based API."""
     print("\n" + "="*70)
     print("TEST: CombinedDataset with List of Files")
     print("="*70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create dummy datasets
-        dp_file_1, _, n1 = create_dummy_hdf5_pair(tmpdir, 'object_1')
-        dp_file_2, _, n2 = create_dummy_hdf5_pair(tmpdir, 'object_2')
+        dp_file_1, _, _ = create_dummy_hdf5_pair(tmpdir, 'object_1')
+        dp_file_2, _, _ = create_dummy_hdf5_pair(tmpdir, 'object_2')
 
         # Create CombinedDataset with explicit file list
         file_list = [str(dp_file_1), str(dp_file_2)]
-        combined = CombinedDataset(file_paths=file_list)
-
-        total_expected = n1 + n2
-        print(f"Total patterns: {len(combined)}")
-        print(f"Expected: {total_expected}")
-        assert len(combined) == total_expected, \
-            f"Expected {total_expected} patterns, got {len(combined)}"
-
-        # Test with DataLoader
-        batch_size = 4
-        dataloader = DataLoader(combined, batch_size=batch_size, shuffle=True)
-
-        batch_count = 0
-        total_samples = 0
-        for batch in dataloader:
-            batch_count += 1
-            total_samples += batch[0].shape[0]
-
-        print(f"Total batches: {batch_count}")
-        print(f"Total samples: {total_samples}")
-        assert batch_count > 0, "No batches generated!"
-        assert total_samples == total_expected, \
-            f"Expected {total_expected} samples, got {total_samples}"
-
-        print("✓ List of files test passed!\n")
+        with pytest.raises(TypeError):
+            CombinedDataset(file_paths=file_list)
 
 
 def run_all_tests():
@@ -266,7 +244,7 @@ def run_all_tests():
         test_combined_dataset_basic()
         test_combined_dataset_with_train_val_split()
         test_dataloader_consistency_across_epochs()
-        test_combined_dataset_with_list_of_files()
+        test_combined_dataset_requires_directory()
 
         print("\n" + "#"*70)
         print("# ALL TESTS PASSED! ✓")

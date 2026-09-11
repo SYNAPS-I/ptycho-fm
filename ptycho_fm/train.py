@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import pickle
 import socket
@@ -28,7 +29,6 @@ from ptycho_fm.mlflow_logger import MLflowLogger
 from ptycho_fm.model.model import PtychoFM
 from ptycho_fm.prefetcher import CUDAPrefetcher
 from ptycho_fm.training import Trainer
-from ptycho_fm.utils.utils import compute_sha256
 
 
 def main() -> None:
@@ -449,7 +449,6 @@ def main() -> None:
             default_normalization=config['data'].get('default_normalization', 100000.0),
             apply_noise=config['data'].get('apply_noise', True),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
-            target_size=config['data'].get('target_size', 256),
             max_shards=config['data'].get('max_shards'),
             debug=DEBUG_MODE
     )
@@ -464,7 +463,8 @@ def main() -> None:
             apply_noise=config['data'].get('apply_noise', True),
             cache_object=config['data'].get('cache_object', False),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
-            target_size=config['data'].get('target_size', 256),
+            max_OPR_modes=config['data'].get('max_OPR_modes', 1),
+            cache_memory_budget_mb=config['data'].get('cache_memory_budget_mb', 512),
             max_files=config['data'].get('max_files'),
             debug=DEBUG_MODE
         )
@@ -614,7 +614,9 @@ def main() -> None:
             apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
             default_normalization=config['data'].get('default_normalization', 100000.0),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
-            target_size=config['data'].get('target_size', 256),
+            max_OPR_modes=config['data'].get('max_OPR_modes', 1),
+            cache_object=config['data'].get('cache_object', True),
+            cache_memory_budget_mb=config['data'].get('cache_memory_budget_mb', 512),
             object_name=config['data'].get('test_dataset_object_name', None),
         )
         test_loader = DataLoader(
@@ -710,7 +712,8 @@ def main() -> None:
     finetune_checkpoint_sha256 = None
     if FINETUNE_PATH:
         if is_main_process:
-            finetune_checkpoint_sha256 = compute_sha256(FINETUNE_PATH)
+            with open(FINETUNE_PATH, 'rb') as checkpoint_file:
+                finetune_checkpoint_sha256 = hashlib.file_digest(checkpoint_file, 'sha256').hexdigest()
         state = torch.load(FINETUNE_PATH, map_location=DEVICE)
         if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
             model.module.load_state_dict(state)

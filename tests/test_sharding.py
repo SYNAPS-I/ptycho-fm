@@ -1,226 +1,56 @@
-"""
-Test script to verify rank-based sharding with RankShardedSubset.
+"""External train/validation splitting and static/dynamic rank sharding."""
 
-Tests:
-1. No overlap between ranks
-2. Total samples = sum of all ranks
-3. Train/val split is correct
-
-Usage:
-    python tests/test_sharding.py
-"""
-
-from pathlib import Path
-
-import numpy as np
 import torch
-import yaml
-from torch.utils.data import random_split
+from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 from ptycho_fm.data import CombinedDataset, RankShardedSubset
 
-
-def load_config(config_path='config.yaml'):
-    """Load configuration from YAML file."""
-    config_path = Path(__file__).parent.parent / config_path
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+from .test_data_refactor import make_pair
 
 
-def test_sharding():
-    """Test rank-based sharding with 2 ranks using random_split + RankShardedSubset."""
-    print("=" * 70)
-    print("Testing Rank-Based Sharding with RankShardedSubset")
-    print("=" * 70)
+def test_static_rank_sharding(tmp_path):
+    for name in ("a", "b", "c", "d"):
+        make_pair(tmp_path, name)
+    dataset = CombinedDataset(tmp_path, apply_noise=False)
+    train, validation = random_split(dataset, [12, 4], generator=torch.Generator().manual_seed(42))
+    repeated, _ = random_split(dataset, [12, 4], generator=torch.Generator().manual_seed(42))
+    assert train.indices == repeated.indices
+    assert set(train.indices).isdisjoint(validation.indices)
+    assert set(train.indices) | set(validation.indices) == set(range(len(dataset)))
 
-    # Load config
-    config = load_config()
-
-    # Get data source (must be directory)
-    if 'data_path' not in config['data']:
-        raise ValueError("Config must specify 'data_path' (directory)")
-
-    data_dir = config['data']['data_path']
-    print(f"\nData directory: {data_dir}")
-
-    # Test parameters
-    world_size = 2
-    train_split = config['data']['train_split']
-    random_seed = config['data']['random_seed']
-
-    print(f"World size: {world_size}")
-    print(f"Train split: {train_split}")
-    print(f"Random seed: {random_seed}")
-
-    # Create full datasets for each rank (simulates what each rank does)
-    print("\n" + "-" * 70)
-    print("Creating Full Datasets (per rank)")
-    print("-" * 70)
-
-    # Each rank creates its own full dataset
-    full_dataset_rank0 = CombinedDataset(
-        file_paths=data_dir,
-        rank=0,
-        world_size=world_size,
-        shuffle=True,
-        random_seed=random_seed,
-        scale=config['data']['scale'],
-        normalization_dict_path=config['data'].get('normalization_dict_path'),
-        apply_noise=False
-    )
-
-    full_dataset_rank1 = CombinedDataset(
-        file_paths=data_dir,
-        rank=1,
-        world_size=world_size,
-        shuffle=True,
-        random_seed=random_seed,
-        scale=config['data']['scale'],
-        normalization_dict_path=config['data'].get('normalization_dict_path'),
-        apply_noise=False
-    )
-
-    # Get total patterns
-    total_patterns = len(full_dataset_rank0)
-    train_size = int(total_patterns * train_split)
-    val_size = total_patterns - train_size
-
-    print(f"\nTotal patterns: {total_patterns}")
-    print(f"Train size: {train_size}")
-    print(f"Val size: {val_size}")
-
-    # Split using random_split (same for both ranks since same seed)
-    print("\n" + "-" * 70)
-    print("Splitting with random_split")
-    print("-" * 70)
-
-    generator = torch.Generator().manual_seed(random_seed)
-    train_subset_rank0, val_subset_rank0 = random_split(
-        full_dataset_rank0, [train_size, val_size], generator=generator
-    )
-
-    generator = torch.Generator().manual_seed(random_seed)
-    train_subset_rank1, val_subset_rank1 = random_split(
-        full_dataset_rank1, [train_size, val_size], generator=generator
-    )
-
-    # Apply rank sharding
-    print("\n" + "-" * 70)
-    print("Applying Rank Sharding")
-    print("-" * 70)
-
-    train_rank0 = RankShardedSubset(train_subset_rank0, rank=0, world_size=world_size, debug=False, subset_type='train')
-    train_rank1 = RankShardedSubset(train_subset_rank1, rank=1, world_size=world_size, debug=False, subset_type='train')
-
-    val_rank0 = RankShardedSubset(val_subset_rank0, rank=0, world_size=world_size, debug=False, subset_type='val')
-    val_rank1 = RankShardedSubset(val_subset_rank1, rank=1, world_size=world_size, debug=False, subset_type='val')
-
-    expected_train = train_size
-    expected_val = val_size
-
-    print("\n" + "=" * 70)
-    print("Test Results")
-    print("=" * 70)
-
-    # Test 1: No overlap between ranks (train)
-    print("\nTest 1: No overlap between ranks (train)")
-    train_indices_rank0 = set(train_rank0.sharded_indices)
-    train_indices_rank1 = set(train_rank1.sharded_indices)
-    train_overlap = train_indices_rank0.intersection(train_indices_rank1)
-
-    if len(train_overlap) == 0:
-        print("✓ PASS: No overlap between train ranks")
-    else:
-        print(f"✗ FAIL: Found {len(train_overlap)} overlapping indices in train")
-        print(f"  Overlapping indices: {list(train_overlap)[:10]}...")
-
-    # Test 2: Total samples = sum of all ranks (train)
-    print("\nTest 2: Total samples = sum of all ranks (train)")
-    train_total = len(train_rank0) + len(train_rank1)
-    print(f"  Expected train samples: {expected_train}")
-    print(f"  Actual train samples: {train_total}")
-    print(f"  Rank 0: {len(train_rank0)} samples")
-    print(f"  Rank 1: {len(train_rank1)} samples")
-
-    if train_total == expected_train:
-        print("✓ PASS: Train sample count matches expected")
-    else:
-        print(f"✗ FAIL: Train sample count mismatch (expected {expected_train}, got {train_total})")
-
-    # Test 3: No overlap between ranks (val)
-    print("\nTest 3: No overlap between ranks (val)")
-    val_indices_rank0 = set(val_rank0.sharded_indices)
-    val_indices_rank1 = set(val_rank1.sharded_indices)
-    val_overlap = val_indices_rank0.intersection(val_indices_rank1)
-
-    if len(val_overlap) == 0:
-        print("✓ PASS: No overlap between val ranks")
-    else:
-        print(f"✗ FAIL: Found {len(val_overlap)} overlapping indices in val")
-        print(f"  Overlapping indices: {list(val_overlap)[:10]}...")
-
-    # Test 4: Total samples = sum of all ranks (val)
-    print("\nTest 4: Total samples = sum of all ranks (val)")
-    val_total = len(val_rank0) + len(val_rank1)
-    print(f"  Expected val samples: {expected_val}")
-    print(f"  Actual val samples: {val_total}")
-    print(f"  Rank 0: {len(val_rank0)} samples")
-    print(f"  Rank 1: {len(val_rank1)} samples")
-    
-    if val_total == expected_val:
-        print("✓ PASS: Val sample count matches expected")
-    else:
-        print(f"✗ FAIL: Val sample count mismatch (expected {expected_val}, got {val_total})")
-    
-    # Test 5: Train and val don't overlap
-    print("\nTest 5: Train and val don't overlap")
-    all_train = train_indices_rank0.union(train_indices_rank1)
-    all_val = val_indices_rank0.union(val_indices_rank1)
-    train_val_overlap = all_train.intersection(all_val)
-    
-    if len(train_val_overlap) == 0:
-        print("✓ PASS: No overlap between train and val")
-    else:
-        print(f"✗ FAIL: Found {len(train_val_overlap)} overlapping indices between train and val")
-        print(f"  Overlapping indices: {list(train_val_overlap)[:10]}...")
-    
-    # Test 6: All indices are accounted for
-    print("\nTest 6: All indices are accounted for")
-    all_indices = all_train.union(all_val)
-    print(f"  Total patterns: {total_patterns}")
-    print(f"  Accounted for: {len(all_indices)}")
-    
-    if len(all_indices) == total_patterns:
-        print("✓ PASS: All indices accounted for")
-    else:
-        print(f"✗ FAIL: Not all indices accounted for (expected {total_patterns}, got {len(all_indices)})")
-    
-    # Test 7: Verify deterministic shuffling (same seed = same indices)
-    print("\nTest 7: Verify deterministic shuffling")
-    train_rank0_v2 = CombinedDataset(
-        file_paths=data_dir,
-        rank=0,
-        world_size=world_size,
-        train_split=train_split,
-        shuffle=True,
-        random_seed=random_seed,
-        mode='train',
-        scale=config['data']['scale'],
-        normalization_dict_path=config['data'].get('normalization_dict_path'),
-        apply_noise=False
-    )
-    
-    if np.array_equal(train_rank0.current_indices, train_rank0_v2.current_indices):
-        print("✓ PASS: Deterministic shuffling works (same seed produces same indices)")
-    else:
-        print("✗ FAIL: Shuffling is not deterministic")
-    
-    print("\n" + "=" * 70)
-    print("Testing Complete")
-    print("=" * 70)
+    for subset in (train, validation):
+        ranks = [RankShardedSubset(subset, rank=rank, world_size=2) for rank in range(2)]
+        assert set(ranks[0].sharded_indices).isdisjoint(ranks[1].sharded_indices)
+        assert set(ranks[0].sharded_indices) | set(ranks[1].sharded_indices) == set(subset.indices)
+        for rank in ranks:
+            loader = DataLoader(rank, batch_size=2)
+            assert sum(batch[0].shape[0] for batch in loader) == len(rank)
+            for actual, expected in zip(rank[0], dataset[rank.sharded_indices[0]], strict=True):
+                if torch.is_tensor(actual):
+                    torch.testing.assert_close(actual, expected)
+                else:
+                    assert actual == expected
 
 
-if __name__ == "__main__":
-    test_sharding()
-
+def test_dynamic_rank_sharding(tmp_path):
+    for name in ("a", "b", "c", "d"):
+        make_pair(tmp_path, name)
+    dataset = CombinedDataset(tmp_path, apply_noise=False, cache_object=False)
+    train, _ = random_split(dataset, [12, 4], generator=torch.Generator().manual_seed(42))
+    samplers = [
+        DistributedSampler(train, num_replicas=2, rank=rank, seed=42)
+        for rank in range(2)
+    ]
+    epochs = []
+    for epoch in range(2):
+        for sampler in samplers:
+            sampler.set_epoch(epoch)
+        indices = [list(sampler) for sampler in samplers]
+        assert set(indices[0]).isdisjoint(indices[1])
+        assert set(indices[0]) | set(indices[1]) == set(range(len(train)))
+        for sampler in samplers:
+            loader = DataLoader(train, sampler=sampler, batch_size=2)
+            assert sum(batch[0].shape[0] for batch in loader) == 6
+        epochs.append(indices)
+    assert epochs[0] != epochs[1]
+    assert dataset._array_cache.nbytes == 0

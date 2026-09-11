@@ -1,5 +1,9 @@
+"""Paired HDF5 datasets with scoped reads and optional bounded CPU array caching."""
+
+import bisect
+import math
+import os
 import pickle
-from collections import OrderedDict
 from pathlib import Path
 
 import h5py
@@ -11,386 +15,270 @@ from torch import Tensor
 from torch.utils.data import Dataset, Subset
 
 
-class PtychographyDataset(Dataset):
+def _load_normalization_map(path):
+    if path is None:
+        return {}
+    with open(path, "rb") as handle:
+        values = pickle.load(handle)
+    if not isinstance(values, dict):
+        raise TypeError("normalization file must contain a dict")
+    return values
+
+
+class _ArrayCache:
+    """Admission-only CPU cache; the budget counts owning NumPy array payloads.
+
+    Each process starts with an empty cache, including after fork or spawn.
+    Entries that do not fit are used for the current sample without eviction.
     """
-    PyTorch Dataset for ptychography data.
 
-    For HDF5 files: Expects paired files in the same directory:
-    - *_dp.hdf5: Contains diffraction patterns
-    - *_para.hdf5: Contains probe positions, object amplitude/phase, and probe information
+    def __init__(self, budget_mb):
+        budget_mb = float(budget_mb)
+        if not math.isfinite(budget_mb) or budget_mb < 0:
+            raise ValueError("cache_memory_budget_mb must be finite and non-negative")
+        self.budget_bytes = int(budget_mb * 1024**2)
+        self.clear()
 
-    Args:
-        file_path (str): Path to data file or corresponding parameters file(*_dp.hdf5 or *_para.hdf5)
-        scale (float): Factor by which to scale all diffraction intensity to
-        normalization_dict_path (str): Path to .pkl file containing dict of {object_name: normalization_factor}
-        default_normalization (float): Fallback normalization value when object not found (default: 100000.0)
-        apply_noise (bool): Whether to simulate noise by sampling from a Poisson distribution (set to False for experimental data)
-        cache_object (bool): Whether to cache object and probe data in memory
-        max_probe_modes (int): Maximum number of probe modes to pad to (default: 8)
-        max_OPR_modes (int): Maximum number of OPR modes to pad to (default: 1)
+    def clear(self):
+        self.arrays = {}
+        self.nbytes = 0
+        self._pid = os.getpid()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.update(arrays={}, nbytes=0)
+        return state
+
+    def load(self, key, estimated_bytes, read):
+        if self._pid != os.getpid():
+            self.clear()
+        if key in self.arrays:
+            return self.arrays[key]
+        can_admit = estimated_bytes <= self.budget_bytes - self.nbytes
+        array = read()
+        if can_admit and array.nbytes <= self.budget_bytes - self.nbytes:
+            # Own each retained allocation: views must not hide larger backing
+            # buffers or cause shared storage to be counted more than once.
+            if not array.flags.owndata:
+                array = array.copy()
+            self.arrays[key] = array
+            self.nbytes += array.nbytes
+        return array
+
+
+class _SampleReader(Dataset):
+    """Common native-resolution preprocessing for single- and multi-pair readers."""
+
+    def __init__(
+        self,
+        scale=10000.0,
+        apply_noise=True,
+        cache_object=True,
+        max_probe_modes=8,
+        max_OPR_modes=1,
+        cache_memory_budget_mb=512,
+    ):
+        self.scale = scale
+        self.apply_noise = apply_noise
+        self.cache_object = cache_object
+        self.max_probe_modes = max_probe_modes
+        self.max_OPR_modes = max_OPR_modes
+        self.cache_memory_budget_mb = cache_memory_budget_mb
+        self._array_cache = _ArrayCache(cache_memory_budget_mb)
+
+    def close(self):
+        """Release retained arrays. Previously returned samples remain valid."""
+        self._array_cache.clear()
+
+    @staticmethod
+    def _layout(dp, para):
+        if "dp" not in dp:
+            raise KeyError(f"Missing 'dp' in {dp.filename}")
+        for key in ("object", "probe", "probe_position_x_m", "probe_position_y_m"):
+            if key not in para:
+                raise KeyError(f"Missing '{key}' in {para.filename}")
+        return int(dp["dp"].shape[0]), dp["dp"].shape[1:], para["object"].shape[1:]
+
+    @staticmethod
+    def _positions(para, num_patterns, object_shape, index=None):
+        """Convert selected or all positions, casting to float32 before scaling."""
+        py = para["probe_position_y_m"][...]
+        px = para["probe_position_x_m"][...]
+        if py.shape != (num_patterns,) or px.shape != (num_patterns,):
+            raise ValueError(f"Expected {num_patterns} positions, got {py.shape} and {px.shape}")
+        if num_patterns == 0:
+            return torch.empty((0, 2), dtype=torch.float32)
+        oh, ow = object_shape
+        ry, rx = float(py.max() - py.min()), float(px.max() - px.min())
+        in_pixels = 0.1 * oh < ry < 10 * oh and 0.1 * ow < rx < 10 * ow
+        pixel_size = float(para["object"].attrs["pixel_height_m"])
+        origin = (np.array(object_shape, dtype=np.float32) / 2.0).round() + 0.5
+        if index is None:
+            positions = np.column_stack((py, px)).astype(np.float32)
+        else:
+            positions = np.array([py[index], px[index]], dtype=np.float32)
+        if not in_pixels:
+            positions = positions / pixel_size
+        return torch.from_numpy(positions + origin)
+
+    @staticmethod
+    def _pad_probe(probe, target_modes=8, target_OPR_modes=1):
+        """Pad mode axes without truncating modes or resizing spatial dimensions."""
+        if probe.ndim != 4:
+            raise ValueError(f"Expected probe shape (M, N, H, W), got {probe.shape}")
+        opr, modes, height, width = probe.shape
+        shape = (max(opr, target_OPR_modes), max(modes, target_modes), height, width)
+        if shape == probe.shape:
+            return probe
+        padded = np.zeros(shape, dtype=probe.dtype)
+        padded[:opr, :modes] = probe
+        return padded
+
+    def _read_array(self, key, estimated_bytes, read):
+        if not self.cache_object or self._array_cache.budget_bytes == 0:
+            return read()
+        return self._array_cache.load(key, estimated_bytes, read)
+
+    def _read_sample(self, dp_path, para_path, index, normalization):
+        with (
+            h5py.File(dp_path, "r", libver="latest", swmr=True) as dp,
+            h5py.File(para_path, "r", libver="latest", swmr=True) as para,
+        ):
+            num_patterns, pattern_shape, object_shape = self._layout(dp, para)
+            if index < 0 or index >= num_patterns:
+                raise IndexError(index)
+            image = (dp["dp"][index] / normalization) * self.scale
+            if self.apply_noise:
+                image = np.random.default_rng().poisson(image)
+            diffraction_amp = torch.from_numpy(np.sqrt(image.astype(np.float32))).unsqueeze(0)
+            position = self._positions(para, num_patterns, object_shape, index)
+
+            key = Path(para_path).resolve()
+            obj_data = para["object"]
+            obj = self._read_array(
+                (key, "object"),
+                math.prod(object_shape) * obj_data.dtype.itemsize,
+                lambda: obj_data[0],
+            )
+            probe_data = para["probe"]
+            if probe_data.ndim != 4:
+                raise ValueError(f"Expected probe shape (M, N, H, W), got {probe_data.shape}")
+            opr, modes, height, width = probe_data.shape
+            probe_bytes = (
+                max(opr, self.max_OPR_modes) * max(modes, self.max_probe_modes)
+                * height * width * probe_data.dtype.itemsize
+            )
+            probe = self._read_array(
+                (key, "probe", self.max_OPR_modes, self.max_probe_modes),
+                probe_bytes,
+                lambda: self._pad_probe(probe_data[...], self.max_probe_modes, self.max_OPR_modes),
+            )
+
+        patch = extract_patches_fourier_shift(
+            torch.from_numpy(obj), position.unsqueeze(0), pattern_shape
+        )[0]
+        # A sample owns its probe tensor so downstream in-place edits cannot
+        # corrupt an admitted cache entry or another sample.
+        probe_tensor = torch.from_numpy(probe.copy())
+        return (
+            diffraction_amp, torch.abs(patch).unsqueeze(0), torch.angle(patch).unsqueeze(0),
+            probe_tensor, position, normalization, self.scale,
+        )
+
+
+class PtychographyDataset(_SampleReader):
+    """Read one Ptychodus HDF5 pair at native spatial resolution.
+
+    Accepts either the *_dp.hdf5 or *_para.hdf5 path. Samples contain diffraction
+    amplitude, object amplitude/phase patches, the full OPR probe, position,
+    normalization, and scale. Object/probe caching defaults to enabled, with
+    512 MiB of array payload per worker (not total process or GPU memory).
+    Mode counts are padded to max_probe_modes/max_OPR_modes without truncation.
+    Normal sample reads retain neither file handles nor position arrays.
     """
 
     def __init__(
         self,
         file_path: str,
-        scale: float = 10000.,
+        scale: float = 10000.0,
         normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         cache_object: bool = True,
         max_probe_modes: int = 8,
         max_OPR_modes: int = 1,
-        object_name: str | None = None
+        object_name: str | None = None,
+        cache_memory_budget_mb: float = 512,
     ):
+        super().__init__(
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+        )
         self.file_path = Path(file_path)
-        self.scale = scale
         self.normalization_dict_path = normalization_dict_path
         self.default_normalization = default_normalization
-        self.apply_noise = apply_noise
-        self.cache_object = cache_object
-        self.max_probe_modes = max_probe_modes
-        self.max_OPR_modes = max_OPR_modes
-
-        # Initialize cache variables
-        self._cached_object = None
         self._cached_probe_positions = None
-        self._cached_probe = None
-        
-        # Initialize persistent HDF5 file handles
-        self.dp_handle = None
-        self.para_handle = None
-
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        # Determine file type and find paired files for HDF5
-        if self.file_path.suffix.lower() == '.hdf5':
-            self._find_hdf5_pair()
-        else:
-            raise ValueError(f"Unsupported file format: {self.file_path.suffix}. Only Ptychodus format .hdf5 is supported.")
-
-        # Open persistent file handles early
-        self._get_handles()
-
-        # Load data and get dimensions (uses persistent handles)
-        self._load_file_info()
-
-        # Extract object name from file path unless provided
-        # Assumes format: .../object_name/object_name_dp.hdf5
-        if object_name is not None:
-            self.object_name = object_name
-        else:
-            stem = self.dp_file.stem
-            self.object_name = stem.removesuffix('_dp')
-
-        # Load normalization factor
-        self._load_normalization()
-
-    def _load_normalization(self):
-        """
-        Load normalization factor from pickle file or use default.
-
-        If normalization_dict_path is provided, loads the dictionary and looks up
-        the normalization factor using self.object_name as the key.
-        Falls back to a default value if key not found or file not provided.
-        """
-        if self.normalization_dict_path is not None:
-            try:
-                with open(self.normalization_dict_path, 'rb') as f:
-                    normalization_dict = pickle.load(f)
-
-                if not isinstance(normalization_dict, dict):
-                    raise TypeError(f"Normalization file must contain a dictionary, got {type(normalization_dict)}")
-
-                # Look up normalization factor using object name
-                if self.object_name in normalization_dict:
-                    self.normalization = normalization_dict[self.object_name]
-                else:
-                    print(f"Warning: Object '{self.object_name}' not found in normalization dictionary. "
-                          f"Using default: {self.default_normalization}", flush=True)
-                    self.normalization = self.default_normalization
-
-            except FileNotFoundError:
-                print(f"Warning: Normalization file not found at {self.normalization_dict_path}. "
-                      f"Using default: {self.default_normalization}", flush=True)
-                self.normalization = self.default_normalization
-            except (OSError, pickle.UnpicklingError, TypeError, ValueError) as e:
-                print(f"Warning: Error loading normalization file: {e}. "
-                      f"Using default: {self.default_normalization}", flush=True)
-                self.normalization = self.default_normalization
-        else:
-            # No normalization dict provided, use default
-            self.normalization = self.default_normalization
-
-    def _find_hdf5_pair(self):
-        """Find the paired HDF5 files (*_dp.hdf5 and *_para.hdf5)."""
-        file_stem = self.file_path.stem
-        file_dir = self.file_path.parent
-        
-        # Determine object name and file types
-        if file_stem.endswith('_dp'):
-            object_name = file_stem[:-3]  # Remove '_dp' suffix
+        if self.file_path.suffix.lower() != ".hdf5":
+            raise ValueError(f"Unsupported file format: {self.file_path.suffix}")
+        stem = self.file_path.stem
+        if stem.endswith("_dp"):
             self.dp_file = self.file_path
-            self.para_file = file_dir / f"{object_name}_para{self.file_path.suffix}"
-        elif file_stem.endswith('_para'):
-            object_name = file_stem[:-5]  # Remove '_para' suffix
+            self.para_file = self.file_path.with_name(f"{stem[:-3]}_para{self.file_path.suffix}")
+        elif stem.endswith("_para"):
             self.para_file = self.file_path
-            self.dp_file = file_dir / f"{object_name}_dp{self.file_path.suffix}"
+            self.dp_file = self.file_path.with_name(f"{stem[:-5]}_dp{self.file_path.suffix}")
         else:
             raise ValueError(f"HDF5 file must end with '_dp' or '_para': {self.file_path.name}")
-        
-        # Check that both files exist
-        if not self.dp_file.exists():
-            raise FileNotFoundError(f"Diffraction patterns file not found: {self.dp_file}")
-        if not self.para_file.exists():
-            raise FileNotFoundError(f"Parameters file not found: {self.para_file}")
-    
-    def _load_file_info(self):
-        """Load file and extract basic information about the dataset using persistent handles."""
-        # Use persistent handles (already opened in __init__)
-        if 'dp' not in self.dp_handle:
-            raise KeyError(f"Missing diffraction patterns 'dp' in {self.dp_file.name}")
-        self.num_patterns = self.dp_handle['dp'].shape[0]
-        self.pattern_shape = self.dp_handle['dp'].shape[1:]  # Original shape from file
+        for path in (self.dp_file, self.para_file):
+            if not path.is_file():
+                raise FileNotFoundError(f"File not found: {path}")
+        with (
+            h5py.File(self.dp_file, "r", libver="latest", swmr=True) as dp,
+            h5py.File(self.para_file, "r", libver="latest", swmr=True) as para,
+        ):
+            self.num_patterns, self.pattern_shape, self.object_shape = self._layout(dp, para)
+        self.object_name = object_name if object_name is not None else self.dp_file.stem[:-3]
+        values = _load_normalization_map(normalization_dict_path)
+        self.normalization = float(values.get(self.object_name, default_normalization))
 
-        # Load from parameters file
-        required_keys = ['object', 'probe', 'probe_position_x_m', 'probe_position_y_m']
-        missing_keys = [key for key in required_keys if key not in self.para_handle]
-        if missing_keys:
-            raise KeyError(f"Missing required keys in {self.para_file.name}: {missing_keys}")
-
-        self.object_shape = self.para_handle['object'][0].shape
-        
-    def __len__(self) -> int:
+    def __len__(self):
         return self.num_patterns
-        
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Get a single data sample.
-        
-        Returns:
-            tuple: (diffraction_pattern, amplitude_patch, phase_patch, probe, probe_position)
-                - diffraction_amp: Single diffraction amplitude [sqrt(intensity)]
-                - amplitude_patch: Corresponding object amplitude patch
-                - phase_patch: Corresponding object phase patch
-                - probe: Probe function (if available, else zeros)
-                - probe_position: Probe position coordinates
-        """
-        if idx >= self.num_patterns:
-            raise IndexError(f"Index {idx} out of range for dataset with {self.num_patterns} patterns")
-        
-        # Load data from file
-        try:
-            diffraction_amp, amplitude_patch, phase_patch, probe, probe_position = self._load_hdf5_pattern(idx)
-        except Exception:
-            print(f"[Error] Failed to load pattern {idx} from {self.file_path}", flush=True)
-            raise
-        
-        # Convert to tensors
-        diffraction_amp = torch.from_numpy(diffraction_amp) if isinstance(diffraction_amp, np.ndarray) else diffraction_amp
-        amplitude_patch = amplitude_patch if isinstance(amplitude_patch, torch.Tensor) else torch.from_numpy(amplitude_patch)
-        phase_patch = phase_patch if isinstance(phase_patch, torch.Tensor) else torch.from_numpy(phase_patch)
-        probe = torch.from_numpy(probe) if probe is not None else None
-        probe_position = probe_position if isinstance(probe_position, torch.Tensor) else torch.from_numpy(probe_position)
-        
-        # Add channel dimension if needed
-        if diffraction_amp.dim() == 2:
-            diffraction_amp = diffraction_amp.unsqueeze(0)
-        if amplitude_patch.dim() == 2:
-            amplitude_patch = amplitude_patch.unsqueeze(0)
-        if phase_patch.dim() == 2:
-            phase_patch = phase_patch.unsqueeze(0)
-        if probe is not None and probe.dim() == 2:
-            probe = probe.unsqueeze(0).unsqueeze(0)
-        if probe is not None and probe.dim() == 3:
-            probe = probe.unsqueeze(0)
-            
-        return diffraction_amp, amplitude_patch, phase_patch, probe, probe_position, self.normalization, self.scale
-    
-    def _extract_patch(self, full_object: np.ndarray, probe_position: Tensor) -> Tensor:
-        """Extract patch from full object at given probe position."""
-        return extract_patches_fourier_shift(torch.from_numpy(full_object), probe_position.unsqueeze(0), (self.pattern_shape[0], self.pattern_shape[1]))[0]
 
-    def _pad_probe(self, probe: np.ndarray, target_modes: int = 15, target_OPR_modes: int = 1) -> np.ndarray:
-        """
-        Pad probe array to have target number of modes along axis 1 and target OPR modes along axis 0.
+    def __getitem__(self, idx):
+        idx = int(idx)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        return self._read_sample(self.dp_file, self.para_file, idx, self.normalization)
 
-        Args:
-            probe: Probe array with shape (M, N, H, W) where M is current number of OPR modes, N is current number of incoherent modes
-            target_modes: Target number of modes along axis 1 (default: 15)
-            target_OPR_modes: Target number of OPR modes along axis 0 (default: 1)
-
-        Returns:
-            Padded probe array with shape (target_OPR_mods, target_modes, H, W)
-        """
-        current_shape = probe.shape
-        if len(current_shape) != 4:
-            raise ValueError(f"Expected probe shape (M, N, H, W), got {current_shape}")
-
-        current_OPR_modes = current_shape[0]
-        current_modes = current_shape[1]
-
-        # Pad axis 1 (probe modes) first
-        if current_modes < target_modes:
-            modes_to_add = target_modes - current_modes
-            pad_shape = (current_shape[0], modes_to_add, current_shape[2], current_shape[3])
-            padding = np.zeros(pad_shape, dtype=probe.dtype)
-            probe = np.concatenate([probe, padding], axis=1)
-
-        # Pad axis 0 (OPR modes) second
-        if current_OPR_modes < target_OPR_modes:
-            OPR_modes_to_add = target_OPR_modes - current_OPR_modes
-            # After axis 1 padding, shape is (current_OPR_modes, target_modes, H, W)
-            pad_shape = (OPR_modes_to_add, target_modes, current_shape[2], current_shape[3])
-            padding = np.zeros(pad_shape, dtype=probe.dtype)
-            probe = np.concatenate([probe, padding], axis=0)
-
-        return probe
-
-    def _get_handles(self):
-        """
-        Get persistent HDF5 file handles, opening them if not already open.
-        
-        Files stay open for the lifetime of the PtychographyDataset instance,
-        only closed on cache eviction or explicit close() call.
-        Uses SWMR mode for safe concurrent reading.
-        """
-        if self.dp_handle is None:
-            self.dp_handle = h5py.File(self.dp_file, 'r', libver='latest', swmr=True)
-        if self.para_handle is None:
-            self.para_handle = h5py.File(self.para_file, 'r', libver='latest', swmr=True)
-        return self.dp_handle, self.para_handle
-    
-    def close(self):
-        """Close persistent HDF5 file handles."""
-        if self.dp_handle is not None:
-            self.dp_handle.close()
-            self.dp_handle = None
-        if self.para_handle is not None:
-            self.para_handle.close()
-            self.para_handle = None
+    def get_probe_positions(self) -> Tensor:
+        """Read all positions for stitching, without retaining them on the dataset."""
+        with h5py.File(self.para_file, "r", libver="latest", swmr=True) as para:
+            return self._positions(para, self.num_patterns, self.object_shape)
 
     def _cache_positions(self):
-        """Cache probe positions on first access. Always called on first __getitem__."""
-        if self._cached_probe_positions is not None:
-            return
+        """Compatibility helper for callers explicitly retaining stitching positions."""
+        if self._cached_probe_positions is None:
+            self._cached_probe_positions = self.get_probe_positions()
 
-        # Load pixel size (needed for position conversion)
-        self.pixel_size_m = self.para_handle['object'].attrs['pixel_height_m']
+    def close(self):
+        super().close()
+        self._cached_probe_positions = None
 
-        # Load raw positions (labeled _m but may already be in pixels)
-        pos_y = self.para_handle['probe_position_y_m'][...]
-        pos_x = self.para_handle['probe_position_x_m'][...]
-        positions_raw = np.column_stack([pos_y, pos_x])
-
-        # Auto-detect if positions are in meters or already in pixels
-        # If position range is similar to object size, assume pixels
-        # If position range is tiny (sub-millimeter), assume meters
-        pos_range_y = pos_y.max() - pos_y.min()
-        pos_range_x = pos_x.max() - pos_x.min()
-
-        # Heuristic: if ranges are within 2x of object dimensions, positions are likely in pixels
-        # Object dimensions are typically 100s-1000s of pixels
-        obj_h, obj_w = self.object_shape
-        positions_likely_pixels = (
-            0.1 * obj_h < pos_range_y < 10 * obj_h and
-            0.1 * obj_w < pos_range_x < 10 * obj_w
-        )
-
-        if positions_likely_pixels:
-            # Positions are already in pixels, no conversion needed
-            self._cached_probe_positions = torch.from_numpy(positions_raw.astype(np.float32))
-        else:
-            # Positions are in meters, convert to pixels
-            self._cached_probe_positions = torch.from_numpy((positions_raw / self.pixel_size_m).astype(np.float32))
-
-        # Validate that there are the same number of probe positions as diffraction patterns
-        if self._cached_probe_positions.shape[0] != self.num_patterns:
-            raise ValueError(f"Mismatch in number of patterns: {self.num_patterns} diffraction patterns vs {self._cached_probe_positions.shape[0]} probe positions")
-
-        # Initialize position origin coordinates and apply offset
-        self._pos_origin_coords = torch.tensor(self.object_shape, dtype=torch.float32) / 2.0
-        self._pos_origin_coords = self._pos_origin_coords.round() + 0.5
-        self._cached_probe_positions = self._cached_probe_positions + self._pos_origin_coords
-
-    def _cache_object_data(self):
-        """Cache full object and probe data if cache_object=True. Only called when cache_object is enabled."""
-        if self._cached_object is not None:
-            return
-
-        # Cache full object
-        self._cached_object = self.para_handle['object'][0]
-
-        # Cache probe if small enough (padded probe will be ~15MB for (1, max_probe_modes, 256, 256))
-        probe_data = self.para_handle['probe']
-        if probe_data.nbytes < 100 * 1024 * 1024:  # Cache if < 100MB
-            probe = probe_data[...]
-            # Pad probe to (max_OPR_modes, max_probe_modes, H, W) if needed
-            self._cached_probe = self._pad_probe(probe, target_modes=self.max_probe_modes, target_OPR_modes=self.max_OPR_modes) 
-    
-    def _load_hdf5_pattern(self, pattern_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Load specific pattern from paired HDF5 files with efficient caching and persistent handles."""
-        # Always cache positions on first access
-        self._cache_positions()
-
-        # Cache object/probe data only if cache_object is enabled
-        if self.cache_object:
-            self._cache_object_data()
-
-        # Get persistent file handles
-        dp_handle, para_handle = self._get_handles()
-        
-        # Load diffraction pattern using persistent handle
-        diffraction_pattern = dp_handle['dp'][pattern_idx]
-        diffraction_pattern = self.normalize(diffraction_pattern)
-        # Add noise by sampling from a Poisson distribution
-        if self.apply_noise:
-            diffraction_pattern = np.random.default_rng().poisson(diffraction_pattern)
-        diffraction_amp = np.sqrt(diffraction_pattern.astype(np.float32))
-
-        # Get probe position from cache
-        probe_position = self._cached_probe_positions[pattern_idx]
-
-        # Get probe from cache or file
-        if self._cached_probe is not None:
-            probe = self._cached_probe
-        else:
-            probe = para_handle['probe'][...]
-            # Pad probe to (max_OPR_modes, max_probe_modes, H, W) if needed
-            probe = self._pad_probe(probe, target_modes=self.max_probe_modes, target_OPR_modes=self.max_OPR_modes)
-        
-        # Get object data and extract patches
-        if self._cached_object is not None:
-            full_object = self._cached_object
-        else:
-            # If not cached, load on demand (for memory-constrained situations)
-            full_object = para_handle['object'][0]
-
-        # Extract patches at probe position
-        patch = self._extract_patch(full_object, probe_position)
-        amplitude_patch = torch.abs(patch)
-        phase_patch = torch.angle(patch)
-
-        return diffraction_amp, amplitude_patch, phase_patch, probe, probe_position
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_cached_probe_positions"] = None
+        return state
 
     def normalize(self, image: np.ndarray) -> np.ndarray:
         return (image / self.normalization) * self.scale
 
 
-class CombinedDataset(Dataset):
-    """
-    PyTorch Dataset for multiple ptychography datasets.
+class CombinedDataset(_SampleReader):
+    """Globally indexed HDF5 pairs with one bounded CPU array cache per worker.
 
-    Handles multiple pairs of .hdf5 files and provides a unified interface.
-    Returns the full dataset with sequential indices - train/val splitting
-    should be handled externally using PyTorch's random_split() function.
-
-    Args:
-        file_paths: Directory path to scan for all paired *_dp.hdf5 and *_para.hdf5 files
-        rank: Rank of current process for distributed training (default: 0)
-        world_size: Total number of processes for distributed training (default: 1)
-        debug: Enable debug logging for data access (default: False)
-        **dataset_kwargs: Additional arguments passed to PtychographyDataset
+    Files are opened and closed per sample. cache_object=False (or a zero
+    cache_memory_budget_mb) disables array retention; no child datasets are kept.
+    A full cache serves misses without eviction. Train/validation splitting and
+    rank sharding are performed externally.
     """
 
     @staticmethod
@@ -474,220 +362,81 @@ class CombinedDataset(Dataset):
         stem = file_path.stem
         return stem.removesuffix('_dp')
 
-    def __init__(self, file_paths, rank=0, world_size=1, debug=False, max_files=None, **dataset_kwargs):
-        """
-        Initialize CombinedDataset with sequential global indexing.
-
-        Args:
-            file_paths: Directory path to scan for all paired files
-            rank: Rank of current process (default: 0)
-            world_size: Total number of processes (default: 1)
-            debug: If True, enable debug logging for CSV usage and data access (default: False)
-            max_files: Maximum number of files to use (default: None = use all)
-            **dataset_kwargs: Additional arguments passed to PtychographyDataset
-        """
-        # file_paths must be a directory
-        data_dir = Path(file_paths)
-        if not data_dir.is_dir():
-            raise ValueError(f"file_paths must be a directory, got: {file_paths}")
-
-        # Scan directory for all paired files
-        self.file_paths = self.find_paired_files(data_dir)
-
-        # Limit number of files if max_files is specified
-        if max_files is not None and max_files < len(self.file_paths):
-            print(f"[Rank {rank}] Limiting to {max_files} files (out of {len(self.file_paths)} available)", flush=True)
+    def __init__(
+        self, file_paths, rank=0, world_size=1, debug=False, max_files=None,
+        scale=10000.0, normalization_dict_path=None, default_normalization=100000.0,
+        apply_noise=True, cache_object=True, max_probe_modes=8, max_OPR_modes=1,
+        cache_memory_budget_mb=512,
+    ):
+        super().__init__(
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+        )
+        self.data_dir = Path(file_paths)
+        self.file_paths = self.find_paired_files(self.data_dir)
+        if max_files is not None:
+            if max_files < 0:
+                raise ValueError("max_files must be non-negative")
             self.file_paths = self.file_paths[:max_files]
+        self.rank, self.world_size = rank, world_size
+        self.debug, self.debug_call_count = debug, 0
 
-        self.data_dir = data_dir
-        self.file_object_names: dict[Path, str] = {}
-        for file_path in self.file_paths:
-            object_name = self.derive_object_name(file_path, self.data_dir)
-            self.file_object_names[file_path] = object_name
+        values = _load_normalization_map(normalization_dict_path)
+        self._norm_by_path = {
+            path: float(values.get(self.derive_object_name(path, self.data_dir), default_normalization))
+            for path in self.file_paths
+        }
+        csv_counts = {}
+        index_csv = self.data_dir / "index.csv"
+        if index_csv.exists():
+            for _, row in pd.read_csv(index_csv).iterrows():
+                relative = Path(row["dp_path"])
+                if relative.is_absolute():
+                    raise ValueError(f"index.csv dp_path must be relative: {relative}")
+                full_path = (self.data_dir / relative).resolve()
+                if not full_path.is_relative_to(self.data_dir.resolve()):
+                    raise ValueError(f"index.csv dp_path escapes data directory: {relative}")
+                if not full_path.is_file():
+                    raise FileNotFoundError(f"index.csv dp_path not found: {relative}")
+                raw_count = float(row["n_dps"])
+                if not math.isfinite(raw_count) or raw_count < 0 or not raw_count.is_integer():
+                    raise ValueError(f"index.csv n_dps must be a non-negative integer: {row['n_dps']}")
+                count = int(raw_count)
+                if full_path in csv_counts and csv_counts[full_path] != count:
+                    raise ValueError(f"Conflicting index.csv counts for {relative}")
+                csv_counts[full_path] = count
 
-        self.dataset_kwargs = dataset_kwargs
-        self.rank = rank
-        self.world_size = world_size
-        self.debug = debug
-        self.debug_call_count = 0  # Track number of __getitem__ calls for debug logging
+        self.file_offsets = [0]
+        for path in self.file_paths:
+            count = csv_counts.get(path.resolve())
+            if count is None:
+                with h5py.File(path, "r", libver="latest", swmr=True) as dp:
+                    count = int(dp["dp"].shape[0])
+            self.file_offsets.append(self.file_offsets[-1] + count)
+        self.total_patterns = self.file_offsets[-1]
+        print(
+            f"[Rank {rank}] CombinedDataset: {len(self.file_paths)} files, "
+            f"{self.total_patterns} patterns (splitting and sharding handled externally)",
+            flush=True,
+        )
 
-        # Try to load index.csv to avoid opening all HDF5 files
-        self.index_df = None
-        self.pattern_counts: dict[Path, int] = {}
-        
-        if self.data_dir is not None:
-            index_csv_path = Path(self.data_dir) / 'index.csv'
-            if index_csv_path.exists():
-                try:
-                    print(f"[Rank {rank}] Loading index.csv to avoid opening all HDF5 files...", flush=True)
-                    self.index_df = pd.read_csv(index_csv_path)
-                    
-                    # Create a fast lookup: map relative paths to n_dps
-                    csv_lookup = {}
-                    for _, row in self.index_df.iterrows():
-                        csv_path = Path(row['dp_path'])
-                        if csv_path.is_absolute():
-                            raise ValueError(
-                                f"index.csv dp_path must be relative to data_dir, got absolute path: {csv_path}"
-                            )
-                        n_dps = int(row['n_dps'])
-                        full_path = self.data_dir / csv_path
-                        if not full_path.exists():
-                            raise FileNotFoundError(
-                                f"index.csv dp_path not found under data_dir: {csv_path}"
-                            )
-                        rel_path = self.derive_relative_path(full_path, self.data_dir)
-                        if rel_path is None:
-                            raise ValueError(
-                                f"Unable to resolve dp_path relative to data_dir: {csv_path}"
-                            )
-                        csv_lookup[rel_path] = n_dps
-                    
-                    # Match our file_paths to CSV entries
-                    for file_path in self.file_paths:
-                        rel = self.derive_relative_path(file_path, self.data_dir)
-                        if rel in csv_lookup:
-                            self.pattern_counts[file_path] = csv_lookup[rel]
-                    
-                    print(f"[Rank {rank}] Loaded pattern counts for {len(self.pattern_counts)}/{len(self.file_paths)} files from index.csv", flush=True)
-                    if debug:
-                        print(f"[DEBUG Rank {rank}] CSV Usage: index.csv found and loaded successfully", flush=True)
-                        print(f"[DEBUG Rank {rank}] CSV Usage: Matched {len(self.pattern_counts)}/{len(self.file_paths)} files from CSV", flush=True)
-                        # Print sample of pattern counts
-                        sample_files = list(self.pattern_counts.items())[:5]
-                        for file_path, count in sample_files:
-                            print(f"[DEBUG Rank {rank}] CSV Sample: {file_path.name} -> {count} patterns", flush=True)
-                except (OSError, ValueError, KeyError) as e:
-                    print(f"[Rank {rank}] Warning: Could not load index.csv ({e}), falling back to opening files", flush=True)
-                    self.index_df = None
-                    if debug:
-                        print(f"[DEBUG Rank {rank}] CSV Usage: index.csv NOT found or failed to load", flush=True)
+    def __len__(self):
+        return self.total_patterns
 
-        # Build global index map using index.csv when available
-        # Use LRU cache to limit number of open datasets in memory (prevents OOM)
-        self.max_cached_datasets = 64
-        self.dataset_cache = OrderedDict()  # LRU cache: {file_path: dataset}
-        self.file_info = []
-        self.file_offsets = [0]  # Cumulative offsets for bisect search
-        self.file_map = []  # List of file paths corresponding to offsets
-        total_patterns = 0
-
-        total_files = len(self.file_paths)
-        if total_files > 100:
-            if self.index_df is not None:
-                print(f"[Rank {rank}] Initializing {total_files} datasets using index.csv (fast)...", flush=True)
-            else:
-                print(f"[Rank {rank}] Initializing {total_files} datasets (opening files, this may take a while)...", flush=True)
-
-        for idx, file_path in enumerate(self.file_paths):
-            # Show progress every 1000 files
-            if total_files > 100 and (idx + 1) % 1000 == 0:
-                print(f"[Rank {rank}]   Processed {idx + 1}/{total_files} files...", flush=True)
-            
-            # Get num_patterns from index.csv if available, otherwise create dataset to get it
-            if file_path in self.pattern_counts:
-                num_patterns = self.pattern_counts[file_path]
-            else:
-                # Fallback: create dataset to get num_patterns (opens HDF5 files)
-                # Disable caching here too to prevent memory issues
-                fallback_kwargs = dataset_kwargs.copy()
-                dataset = PtychographyDataset(
-                    str(file_path),
-                    object_name=self.file_object_names.get(file_path),
-                    **fallback_kwargs
-                )
-                num_patterns = len(dataset)
-                # Don't keep fallback dataset in cache - we'll recreate lazily
-
-            self.file_info.append({
-                'path': file_path,
-                'num_patterns': num_patterns,
-                'start_idx': total_patterns,
-                'end_idx': total_patterns + num_patterns
-            })
-            self.file_map.append(file_path)
-            total_patterns += num_patterns
-            self.file_offsets.append(total_patterns)
-
-        self.total_patterns = total_patterns
-
-        # Build sequential global indices (no shuffling)
-        # Shuffling is handled by random_split() in main.py with a deterministic seed
-        self.current_indices = np.arange(total_patterns)
-
-        print(f"[Rank {rank}] CombinedDataset: {len(self.file_paths)} files, {total_patterns} total patterns", flush=True)
-        print(f"[Rank {rank}]   Sequential indices (train/val split and rank sharding handled externally)", flush=True)
-
-        if debug:
-            print(f"[DEBUG Rank {rank}] Sequential indices (no shuffle in CombinedDataset)", flush=True)
-            print(f"[DEBUG Rank {rank}] First 10 indices = {self.current_indices[:10].tolist()}", flush=True)
-            print(f"[DEBUG Rank {rank}] Train/val split will be handled by random_split(), rank sharding by RankShardedSubset", flush=True)
-
-    def __len__(self) -> int:
-        """Return number of patterns in current rank's shard."""
-        return len(self.current_indices)
-
-    def __getitem__(self, idx: int):
-        """
-        Get a sample by rank-local index.
-
-        Maps rank-local index to global index, then to file and local file index.
-        Uses LRU cache to limit number of open datasets in memory.
-        """
-        if idx >= len(self.current_indices):
-            raise IndexError(f"Index {idx} out of range for rank shard with {len(self.current_indices)} patterns")
-
-        # Map rank-local index to global index
-        global_idx = self.current_indices[idx]
-        
-        # Map global index to file using bisect (fast O(log n) search)
-        import bisect
-        file_idx = bisect.bisect_right(self.file_offsets, global_idx) - 1
-        
-        # Calculate local index within file
-        local_idx = global_idx - self.file_offsets[file_idx]
-        file_path = self.file_map[file_idx]
-        
-        # Debug logging (only for first few calls per rank)
-        if self.debug and self.debug_call_count < 15:  # Log first 15 calls (covers first few batches)
-            file_info = self.file_info[file_idx]
-            num_patterns_in_file = file_info['num_patterns']
-            # Note: 'idx' parameter is the dataset index (could be split index or global index depending on mode)
-            # 'global_idx' is the actual global index across all files
-            print(f"[DEBUG Rank {self.rank}] CombinedDataset.__getitem__: "
-                  f"DatasetIdx={idx}, GlobalIdx={global_idx}, "
-                  f"File={file_path.name}, Pattern={local_idx}/{num_patterns_in_file}", flush=True)
-            self.debug_call_count += 1
-        
-        # Lazy dataset creation with LRU cache: create dataset only when first accessed
-        # This avoids opening all HDF5 files during initialization
-        # LRU cache prevents memory accumulation by limiting number of open datasets
-        if file_path not in self.dataset_cache:
-            # Create new dataset
-            lazy_kwargs = self.dataset_kwargs.copy()
-            # Disable object caching for lazily created datasets to prevent memory accumulation
-            # Objects will be loaded on-demand from HDF5 files instead
-            dataset = PtychographyDataset(
-                str(file_path),
-                object_name=self.file_object_names.get(file_path),
-                **lazy_kwargs
+    def __getitem__(self, idx):
+        idx = int(idx)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        file_idx = bisect.bisect_right(self.file_offsets, idx) - 1
+        local_idx = idx - self.file_offsets[file_idx]
+        path = self.file_paths[file_idx]
+        if self.debug and self.debug_call_count < 15:
+            print(
+                f"[DEBUG Rank {self.rank}] DatasetIdx={idx}, File={path.name}, Pattern={local_idx}",
+                flush=True,
             )
-            
-            # Add to cache, removing oldest if cache is full (LRU eviction)
-            if len(self.dataset_cache) >= self.max_cached_datasets:
-                # Remove least recently used (first item in OrderedDict)
-                _, oldest_dataset = self.dataset_cache.popitem(last=False)
-                # Close HDF5 files if dataset has them open
-                if hasattr(oldest_dataset, 'close'):
-                    oldest_dataset.close()
-            
-            self.dataset_cache[file_path] = dataset
-        else:
-            # Move to end (most recently used) for LRU ordering
-            dataset = self.dataset_cache.pop(file_path)
-            self.dataset_cache[file_path] = dataset
-        
-        return dataset[local_idx]
+            self.debug_call_count += 1
+        para_path = path.with_name(f"{path.stem[:-3]}_para{path.suffix}")
+        return self._read_sample(path, para_path, local_idx, self._norm_by_path[path])
 
 
 class RankShardedSubset(Dataset):
