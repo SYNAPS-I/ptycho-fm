@@ -11,7 +11,10 @@ from scripts.run_inference_and_stitch import (
     build_dataloader,
     load_checkpoint,
     resolve_model_and_size,
+    run_inference_and_stitch,
 )
+
+from .test_data_refactor import make_pair
 
 
 @pytest.fixture
@@ -62,11 +65,11 @@ def test_inference_checkpoint_round_trip(config, tmp_path):
         torch.testing.assert_close(result, reference)
 
 
-@pytest.mark.parametrize("target_size", [None, 64])
-def test_inference_data_size(config, monkeypatch, target_size):
+@pytest.mark.parametrize("budget", [0, 512])
+def test_inference_data_settings(config, monkeypatch, budget):
     class DatasetStub:
         def __init__(self, path, **kwargs):
-            self.target_size = kwargs["target_size"]
+            self.settings = kwargs
 
         def __len__(self):
             return 1
@@ -74,10 +77,12 @@ def test_inference_data_size(config, monkeypatch, target_size):
     monkeypatch.setattr(
         "scripts.run_inference_and_stitch.PtychographyDataset", DatasetStub
     )
-    config["data"] = {"target_size": target_size}
+    config["data"] = {"max_OPR_modes": 3, "cache_memory_budget_mb": budget}
     dataset, loader = build_dataloader("unused.hdf5", config, 25.0, batch_size=2)
 
-    assert dataset.target_size == (32 if target_size is None else target_size)
+    assert "target_size" not in dataset.settings
+    assert dataset.settings["max_OPR_modes"] == 3
+    assert dataset.settings["cache_memory_budget_mb"] == budget
     assert dataset.normalization == 25.0
     assert loader.dataset is dataset
 
@@ -90,3 +95,27 @@ def test_polaris_model_config_uses_current_schema():
     assert model_config["encoder_type"] == "custom"
     assert model_config["encoder"]["img_size"] == 256
     assert model_config["encoder"]["embed_dim"] == model_config["decoder"]["latent_dim"]
+
+
+def test_native_loader_model_and_stitching(config, tmp_path):
+    path, *_ = make_pair(tmp_path, opr=2, pattern_shape=(32, 32))
+    config["data"] = {"scale": 7.0, "max_OPR_modes": 3, "cache_memory_budget_mb": 1}
+    dataset, loader = build_dataloader(str(path), config, 10.0, batch_size=2)
+    model = PtychoFM(config=config["model"])
+    diff, amp, phase, probe, _, norm, scale = next(iter(loader))
+    assert probe.shape == (2, 3, 8, 32, 32)
+    outputs = model(diff, torch.view_as_real(probe), norm, scale)
+    loss = sum((output - target).square().mean()
+               for output, target in zip(outputs, (diff, amp, phase), strict=True))
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert any(p.grad is not None for p in model.parameters())
+
+    stitched = run_inference_and_stitch(
+        model, loader, dataset.get_probe_positions(), dataset.object_shape,
+        central_crop=8, pad=1, device=torch.device("cpu"),
+    )
+    for image in stitched:
+        assert image.shape == dataset.object_shape
+        assert torch.isfinite(image).all()
+    assert dataset._cached_probe_positions is None

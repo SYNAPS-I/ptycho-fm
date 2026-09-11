@@ -8,15 +8,17 @@ data:
   scale: 10000.0
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
-  # If not specified or file not found, will use default normalization value
+  # Omitted file or missing object key uses the default; invalid/unreadable files raise an error.
   # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   normalization_dict_path: '/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl'
   test_normalization: '/pscratch/sd/s/shas1693/data/ptycho/aileen/test_data/test2probes_norm.pkl'
   default_normalization: 100000.0
 
   cache_object: true
+  cache_memory_budget_mb: 512  # MiB of CPU arrays per worker; applies to unpacked/test loaders, 0 disables
   max_probe_modes: 10  # Maximum number of probe modes to pad to
-  target_size: 256  # Target size for diffraction patterns (pads smaller patterns, upsamples probe)
+  max_OPR_modes: 1  # Minimum OPR mode count for unpacked/test loaders; larger inputs are preserved
+  # Diffraction patterns and probes retain native spatial dimensions, which must match the model.
 
   train_split: 0.80  # Fraction of data for training (20% held out for validation/test)
   random_seed: 8

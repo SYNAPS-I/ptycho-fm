@@ -27,7 +27,6 @@ ptycho-fm/
 │   ├── inference.py               # Inference entry point (ptycho-fm-infer)
 │   ├── training.py                # Trainer class with train/validation loops
 │   ├── data.py                    # PtychographyDataset, CombinedDataset, RankShardedSubset
-│   ├── data_simple.py             # Simplified dataset variant
 │   ├── data_simple_pack.py        # Packed-HDF5 dataset (PtychographyDatasetPacked)
 │   ├── custom_loss.py             # Custom loss functions (WeightedLoss)
 │   ├── prefetcher.py              # CUDAPrefetcher

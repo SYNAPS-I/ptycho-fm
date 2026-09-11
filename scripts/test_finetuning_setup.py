@@ -78,7 +78,9 @@ def test_data_loading(config, num_samples=3):
             normalization_dict_path=config['data'].get('normalization_dict_path'),
             apply_noise=False,
             max_probe_modes=config['data'].get('max_probe_modes', 8),
-            target_size=config['data'].get('target_size', 256)
+            max_OPR_modes=config['data'].get('max_OPR_modes', 1),
+            cache_object=config['data'].get('cache_object', True),
+            cache_memory_budget_mb=config['data'].get('cache_memory_budget_mb', 512),
         )
 
         print(f"  Num patterns: {len(dataset)}")
@@ -245,11 +247,12 @@ def test_real_inference(model, config):
         normalization_dict_path=config['data'].get('normalization_dict_path'),
         apply_noise=False,
         max_probe_modes=config['data'].get('max_probe_modes', 8),
-        target_size=config['data'].get('target_size', 256)
+        max_OPR_modes=config['data'].get('max_OPR_modes', 1),
+        cache_object=config['data'].get('cache_object', True),
+        cache_memory_budget_mb=config['data'].get('cache_memory_budget_mb', 512),
     )
 
-    print(f"  Raw pattern shape: {dataset._raw_pattern_shape}")
-    print(f"  Target pattern shape: {dataset.pattern_shape}")
+    print(f"  Native pattern shape: {dataset.pattern_shape}")
 
     # Get a sample
     diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale = dataset[0]

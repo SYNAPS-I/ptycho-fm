@@ -44,10 +44,6 @@ def load_checkpoint(model, checkpoint_path: str, device: torch.device) -> None:
 
 def build_dataloader(data_path: str, config: dict, normalization_value: float, batch_size: int):
     data_cfg = config.get("data", {})
-    target_size = data_cfg.get("target_size")
-    if target_size is None:
-        target_size = config["model"]["encoder"]["img_size"]
-
     dataset = PtychographyDataset(
         data_path,
         scale=data_cfg.get("scale", 100000.0),
@@ -56,7 +52,8 @@ def build_dataloader(data_path: str, config: dict, normalization_value: float, b
         apply_noise=data_cfg.get("apply_noise", False),
         cache_object=data_cfg.get("cache_object", True),
         max_probe_modes=data_cfg.get("max_probe_modes", 8),
-        target_size=target_size,
+        max_OPR_modes=data_cfg.get("max_OPR_modes", 1),
+        cache_memory_budget_mb=data_cfg.get("cache_memory_budget_mb", 512),
     )
     dataset.normalization = normalization_value
 
@@ -203,11 +200,8 @@ def main():
         args.data, config, normalization_value, batch_size
     )
 
-    if dataset._cached_probe_positions is None:
-        dataset._cache_positions()
-
     object_shape = dataset.object_shape
-    positions = dataset._cached_probe_positions
+    positions = dataset.get_probe_positions()
 
     load_checkpoint(model, args.checkpoint, device)
 

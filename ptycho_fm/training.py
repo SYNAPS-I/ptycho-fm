@@ -322,12 +322,8 @@ class Trainer:
 
                 scan_idx += batch_size
 
-        if dataloader.dataset._cached_probe_positions is None:
-            dataloader.dataset._cache_positions()
-            dataloader.dataset._cache_object_data()
-
         object_size = dataloader.dataset.object_shape
-        positions = dataloader.dataset._cached_probe_positions
+        positions = dataloader.dataset.get_probe_positions()
         pred_amp_object = torch.zeros(object_size, device='cpu')
         pred_ph_object = torch.zeros(object_size, device='cpu')
         buffer = torch.zeros(object_size, device='cpu')

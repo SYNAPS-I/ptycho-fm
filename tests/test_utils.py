@@ -58,15 +58,15 @@ def create_dummy_hdf5_pair(output_dir, object_name, num_patterns=None, pattern_s
         complex_object = amplitude * np.exp(1j * phase)
 
         # Save as single element array (matches expected format)
-        f.create_dataset('object', data=complex_object[np.newaxis, ...])
+        obj = f.create_dataset('object', data=complex_object[np.newaxis, ...])
+        obj.attrs['pixel_height_m'] = 1e-8
+        f.create_dataset('probe_position_y_m', data=positions[:, 0].numpy() * 1e-8)
+        f.create_dataset('probe_position_x_m', data=positions[:, 1].numpy() * 1e-8)
 
         # Create probe (8 modes of pattern_size x pattern_size, complex)
         probe_amplitude = np.random.rand(8, pattern_size, pattern_size).astype(np.float32)
         probe_phase = np.random.rand(8, pattern_size, pattern_size).astype(np.float32) * 2 * np.pi - np.pi
-        probe = np.stack([
-            probe_amplitude * np.cos(probe_phase),
-            probe_amplitude * np.sin(probe_phase)
-        ], axis=-1).astype(np.float32)
+        probe = (probe_amplitude * np.exp(1j * probe_phase)).astype(np.complex64)[None]
 
         f.create_dataset('probe', data=probe)
 

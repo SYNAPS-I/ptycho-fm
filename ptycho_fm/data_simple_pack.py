@@ -10,7 +10,6 @@ import h5py
 import numpy as np
 import torch
 from ptychi.image_proc import extract_patches_fourier_shift
-from scipy.ndimage import zoom
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -23,37 +22,13 @@ def _pad_probe(probe: np.ndarray, max_modes: int) -> np.ndarray:
     return np.concatenate([probe, z], axis=1)
 
 
-def _zero_pad(image: np.ndarray, size: int) -> np.ndarray:
-    h, w = image.shape
-    if h == size and w == size:
-        return image
-    if h > size or w > size:
-        raise ValueError(f"({h},{w}) larger than target {size}")
-    a, b = size - h, size - w
-    pt, pb = a // 2, a - a // 2
-    pl, pr = b // 2, b - b // 2
-    return np.pad(image, ((pt, pb), (pl, pr)), mode="constant")
-
-
-def _upsample_probe(probe: np.ndarray, size: int) -> np.ndarray:
-    _, m, h, w = probe.shape
-    if h == size and w == size:
-        return probe
-    zh, zw = size / h, size / w
-    out_r = np.zeros((1, m, size, size), np.float64)
-    out_i = np.zeros((1, m, size, size), np.float64)
-    for i in range(m):
-        u = probe[0, i]
-        out_r[0, i] = zoom(u.real, (zh, zw), order=1)
-        out_i[0, i] = zoom(u.imag, (zh, zw), order=1)
-    return (out_r + 1j * out_i).astype(probe.dtype)
-
-
 class PtychographyDatasetPacked(Dataset):
     """Globally indexed patterns over sorted ``packed_*.hdf5`` from ``data_pack.py``.
 
     Keeps one HDF5 handle per shard file that has been touched; opens on demand.
     Call :meth:`close` when the dataset is no longer needed to release file descriptors.
+    Returns native spatial dimensions for diffraction patterns, object patches,
+    and probes; only the probe mode axis is padded.
     """
 
     @staticmethod
@@ -76,7 +51,6 @@ class PtychographyDatasetPacked(Dataset):
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
         max_probe_modes: int = 8,
-        target_size: int | None = 256,
     ):
         _ = world_size, debug
         self.pack_dir = Path(pack_dir)
@@ -90,7 +64,6 @@ class PtychographyDatasetPacked(Dataset):
         self.scale = scale
         self.apply_noise = apply_noise
         self.max_probe_modes = max_probe_modes
-        self.target_size = target_size
         self.default_normalization = default_normalization
         self.fake_data = None
 
@@ -195,9 +168,6 @@ class PtychographyDatasetPacked(Dataset):
         if self.apply_noise:
             img = np.random.default_rng().poisson(img).astype(np.float32)
         amp = np.sqrt(np.float32(img))
-        ts = self.target_size
-        if ts is not None and amp.shape[0] != ts:
-            amp = _zero_pad(amp, ts)
 
         osh = tuple(int(x) for x in f["object"].shape[2:])
         py_a = np.asarray(f["probe_position_y_m"][o, :n_dp_o])
@@ -209,15 +179,10 @@ class PtychographyDatasetPacked(Dataset):
         rh, rw = img.shape
         patch = extract_patches_fourier_shift(torch.from_numpy(obj), xy.unsqueeze(0), (rh, rw))[0]
         ap, ph = torch.abs(patch), torch.angle(patch)
-        if ts is not None and ap.shape[0] != ts:
-            ap = torch.from_numpy(_zero_pad(ap.detach().cpu().numpy(), ts))
-            ph = torch.from_numpy(_zero_pad(ph.detach().cpu().numpy(), ts))
 
         probe = np.asarray(f["probe"][o, 0])
         probe = probe[np.newaxis, ...]
         probe = _pad_probe(probe, self.max_probe_modes)
-        if ts is not None:
-            probe = _upsample_probe(probe, ts)
 
         amp = torch.from_numpy(np.asarray(amp))
         probe = torch.from_numpy(probe)
