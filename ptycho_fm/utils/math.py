@@ -1,11 +1,13 @@
 """
-Mathematical utility functions for ptychography reconstruction.
+Mathematical utility functions.
 
 This module contains coordinate transforms and mathematical operations.
 """
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial import cKDTree
 
 
 def create_logpolar_grid(height, width, device='cpu'):
@@ -19,6 +21,19 @@ def create_logpolar_grid(height, width, device='cpu'):
 
     Returns:
         grid: Tensor of shape (1, height, width, 2) with normalized coordinates
+
+    Example:
+        Create a grid on the same device as the images and apply the transform:
+
+        >>> images = torch.rand(2, 1, 256, 256)
+        >>> height, width = images.shape[-2:]
+        >>> grid = create_logpolar_grid(height, width, device=images.device)
+        >>> transformed = apply_logpolar_transform(images, grid, mode='bicubic')
+        >>> transformed.shape
+        torch.Size([2, 1, 256, 256])
+
+        Reuse the grid for subsequent batches with the same spatial dimensions
+        and device.
     """
     # Match scipy's np.mgrid convention with 'ij' indexing
     # np.mgrid[-h//2:h//2, -w//2:w//2] creates grids where:
@@ -71,6 +86,16 @@ def apply_logpolar_transform(images, grid, mode='bilinear'):
 
     Returns:
         Transformed images of shape (B, C, H, W)
+
+    Example:
+        Transform a batch using a single grid, which is expanded across the batch:
+
+        >>> images = torch.rand(2, 1, 256, 256)
+        >>> height, width = images.shape[-2:]
+        >>> grid = create_logpolar_grid(height, width, device=images.device)
+        >>> transformed = apply_logpolar_transform(images, grid, mode='bicubic')
+        >>> transformed.shape
+        torch.Size([2, 1, 256, 256])
     """
     batch_size = images.shape[0]
 
@@ -87,3 +112,100 @@ def apply_logpolar_transform(images, grid, mode='bilinear'):
     )
 
     return transformed
+
+
+# Copyright © 2025 UChicago Argonne, LLC All right reserved
+def create_positions(object_shape, probe_lateral_shape, target_overlap=0.8, fwhm=98):
+    """Create probe positions in pixels. Adapted from Ming Du's ptycho_simulation_factory:
+    https://github.com/mdw771/ptycho_simulation_factory
+
+    This version removes the choice to pre-define number of positions or spacing.
+    Instead, the spacing is calculated by overlap and probe size.
+
+    Parameters
+    ----------
+    object_shape : tuple of int
+        Lateral shape of the object.
+    probe_lateral_shape : tuple of int
+        Lateral shape of the probe. This is used to determine the safety margin,
+        so that the probe does not reach outside the object.
+    target_overlap : float
+        Overlap ratio
+    fwhm : int
+        Full width at half maximum of the probe in pixels (approximate is fine here)
+    """
+    spacing = (1 - target_overlap) * fwhm  # Spacing is now enforced to be the same in y and x
+
+    margin = [probe_lateral_shape[i] // 2 for i in range(len(probe_lateral_shape))]
+    y = np.arange(margin[0], object_shape[0] - margin[0] - 1, spacing)
+    x = np.arange(margin[1], object_shape[1] - margin[1] - 1, spacing)
+
+    y, x = np.meshgrid(y, x)
+    positions = np.stack([y.reshape(-1), x.reshape(-1)], axis=1)
+    positions = positions - positions.mean(0)  # Center is (0, 0)
+    return torch.from_numpy(positions)
+
+
+def estimate_scan_overlap(positions, probe_fwhm, k=1):
+    """Estimate probe overlap from arbitrary two-dimensional scan positions.
+
+    For every scan position, the local step size is the mean distance to its
+    ``k`` nearest spatial neighbors. The corresponding linear overlap is
+    ``1 - local_spacing / probe_fwhm``. Positions and ``probe_fwhm`` must use
+    the same physical units.
+
+    Negative overlap values are retained because they identify positions whose
+    local spacing is larger than the probe FWHM. Exact duplicate positions are
+    treated as having 100 percent overlap.
+
+    Args:
+        positions: Array-like object with shape ``(N, 2)`` containing scan
+            coordinates.
+        probe_fwhm: Positive intensity FWHM of the probe.
+        k: Positive number of nearest neighbors averaged for each position.
+            ``k=1`` gives the conventional nearest-neighbor overlap estimate.
+
+    Returns:
+        Dictionary containing mean and median spacing, mean and median overlap,
+        the 10th and 90th overlap percentiles, the fraction of positions with
+        non-positive overlap, and the per-position spacing and overlap arrays.
+
+    Raises:
+        ValueError: If the inputs have invalid shapes or values, or if there
+            are not enough scan positions for the requested ``k``.
+    """
+    positions = np.asarray(positions, dtype=float)
+
+    if positions.ndim != 2 or positions.shape[1] != 2:
+        raise ValueError("positions must have shape (N, 2)")
+    if positions.shape[0] == 0:
+        raise ValueError("positions must contain at least one scan position")
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("positions must contain only finite values")
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 1:
+        raise ValueError("k must be a positive integer")
+    if positions.shape[0] <= k:
+        raise ValueError("the number of scan positions must be greater than k")
+    if not np.isscalar(probe_fwhm):
+        raise ValueError("probe_fwhm must be a positive finite scalar")
+
+    probe_fwhm = float(probe_fwhm)
+    if not np.isfinite(probe_fwhm) or probe_fwhm <= 0:
+        raise ValueError("probe_fwhm must be a positive finite scalar")
+
+    tree = cKDTree(positions)
+    distances, _ = tree.query(positions, k=k + 1)
+    local_spacing = distances[:, 1:].mean(axis=1)
+    local_overlap = 1.0 - local_spacing / probe_fwhm
+
+    return {
+        "mean_spacing": float(np.mean(local_spacing)),
+        "median_spacing": float(np.median(local_spacing)),
+        "mean_overlap": float(np.mean(local_overlap)),
+        "median_overlap": float(np.median(local_overlap)),
+        "overlap_p10": float(np.percentile(local_overlap, 10)),
+        "overlap_p90": float(np.percentile(local_overlap, 90)),
+        "fraction_with_no_fwhm_overlap": float(np.mean(local_overlap <= 0)),
+        "local_spacing": local_spacing,
+        "local_overlap": local_overlap,
+    }
