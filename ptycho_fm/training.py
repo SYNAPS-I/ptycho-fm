@@ -10,9 +10,8 @@ import torch.nn.functional as F
 import wandb
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
+from ptychi.image_proc import place_patches_fourier_shift
 from torch import nn
-
-from ptycho_fm.utils.ptychi_utils import place_patches_fourier_shift
 
 
 def _move_to_cpu(obj):

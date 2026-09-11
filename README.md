@@ -37,8 +37,7 @@ ptycho-fm/
 │   │   ├── vit_pretrained.py      # Pretrained ViT encoder
 │   │   └── decoders.py            # Decoder256
 │   └── utils/
-│       ├── math.py
-│       ├── ptychi_utils.py        # Fourier-shift patch extraction / placement
+│       ├── math.py                # Coordinate transforms and scan positions
 │       └── utils.py               # compute_sha256, misc
 ├── tests/                         # Tests (not shipped in the wheel)
 ├── scripts/                       # Standalone CLIs / HPC helpers (not shipped in the wheel)
@@ -312,7 +311,8 @@ pytest tests/
 ### Code Organization
 - **ptycho_fm/model/model.py**: ViT-based model (PtychoFM - unified, supports any image size)
 - **ptycho_fm/model/decoders.py**: CNN decoders used by PtychoFM
-- **ptycho_fm/utils/ptychi_utils.py**: Image processing utilities adapted from pty-chi
+- **ptychi.image_proc**: Fourier-shift patch extraction and placement from the ptychi dependency
+- **ptycho_fm/utils/math.py**: Coordinate transforms and scan-position utilities
 - **ptycho_fm/data.py**: Dataset classes for loading Ptychodus format files
 - **ptycho_fm/training.py**: Training and validation logic
 

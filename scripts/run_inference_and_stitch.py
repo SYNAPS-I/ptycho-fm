@@ -6,12 +6,12 @@ import numpy as np
 import tifffile
 import torch
 import yaml
+from ptychi.image_proc import place_patches_fourier_shift
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from ptycho_fm.data import PtychographyDataset
 from ptycho_fm.model.model import PtychoFM
-from ptycho_fm.utils.ptychi_utils import place_patches_fourier_shift
 
 
 def load_config(path: str) -> dict:
