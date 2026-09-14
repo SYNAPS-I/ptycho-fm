@@ -93,4 +93,3 @@ class CUDAPrefetcher:
     def __len__(self):
         """Return length of wrapped loader."""
         return len(self.loader)
-

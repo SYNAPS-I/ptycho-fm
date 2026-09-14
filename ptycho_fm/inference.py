@@ -28,7 +28,7 @@ def main() -> None:
         config['data']['scale'],
         '/home/beams/AILEENLUO/ptycho_simulation_factory/test2probes_norm.pkl',
         #config['data'].get('normalization_dict_path'),
-        apply_noise=True, # Set to False for experimental data!
+        apply_noise=config['data'].get('test_apply_noise', False),
         cache_object=config['data'].get('cache_object', True),
         cache_memory_budget_mb=config['data'].get('cache_memory_budget_mb', 512),
         max_probe_modes=config['data'].get('max_probe_modes', 8),

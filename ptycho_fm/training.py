@@ -6,12 +6,17 @@ from datetime import UTC, datetime
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import wandb
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from ptychi.image_proc import place_patches_fourier_shift
 from torch import nn
+
+from ptycho_fm.metrics import (
+    compute_psnr,
+    compute_ssim,
+    prepare_image_metric_inputs,
+)
 
 
 def _move_to_cpu(obj):
@@ -30,112 +35,6 @@ def _atomic_torch_save(obj, path):
     tmp_path = f"{path}.tmp"
     torch.save(obj, tmp_path)
     os.replace(tmp_path, path)
-
-
-def compute_psnr(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    data_range: float | torch.Tensor | None = None,
-    eps: float = 1e-8,
-) -> float:
-    """
-    Compute Peak Signal-to-Noise Ratio between prediction and target.
-
-    Args:
-        pred: Predicted tensor
-        target: Ground truth tensor
-        data_range: The dynamic range of the data. If None, computed from target.
-
-    Returns:
-        PSNR value in dB
-    """
-    pred = pred.float()
-    target = target.float()
-
-    if data_range is None:
-        data_range = target.max() - target.min()
-    if not torch.is_tensor(data_range):
-        data_range = torch.tensor(float(data_range), device=target.device)
-    data_range = data_range.clamp(min=eps)
-
-    mse = F.mse_loss(pred, target)
-    if mse.item() <= eps:
-        return float("inf")
-
-    psnr = 10 * torch.log10((data_range ** 2) / mse)
-    return psnr.item()
-
-
-def compute_ssim(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    window_size: int = 11,
-    data_range: float | torch.Tensor | None = None,
-    eps: float = 1e-8,
-) -> float:
-    """
-    Compute Structural Similarity Index (SSIM) between prediction and target.
-
-    Args:
-        pred: Predicted tensor of shape (B, C, H, W) or (B, H, W) or (H, W)
-        target: Ground truth tensor of same shape
-        window_size: Size of the Gaussian window
-        data_range: The dynamic range of the data. If None, computed from target.
-
-    Returns:
-        SSIM value (0 to 1, higher is better)
-    """
-    # Ensure 4D tensors (B, C, H, W)
-    if pred.dim() == 2:
-        pred = pred.unsqueeze(0).unsqueeze(0)
-        target = target.unsqueeze(0).unsqueeze(0)
-    elif pred.dim() == 3:
-        pred = pred.unsqueeze(1)
-        target = target.unsqueeze(1)
-
-    pred = pred.float()
-    target = target.float()
-
-    if data_range is None:
-        data_range = target.amax(dim=(-2, -1), keepdim=True) - target.amin(dim=(-2, -1), keepdim=True)
-    if not torch.is_tensor(data_range):
-        data_range = torch.tensor(float(data_range), device=target.device)
-    data_range = data_range.clamp(min=eps)
-
-    # Constants for numerical stability
-    C1 = (0.01 * data_range) ** 2
-    C2 = (0.03 * data_range) ** 2
-
-    # Create Gaussian window
-    def gaussian_window(size, sigma):
-        coords = torch.arange(size, dtype=torch.float32) - size // 2
-        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-        g = g / g.sum()
-        kernel_2d = g.view(1, -1) * g.view(-1, 1)
-        return kernel_2d
-
-    _, channels, _, _ = pred.shape
-    window_2d = gaussian_window(window_size, 1.5).to(pred.device)
-    window = window_2d.view(1, 1, window_size, window_size).repeat(channels, 1, 1, 1)
-
-    # Compute means
-    mu_pred = F.conv2d(pred, window, padding=window_size // 2, groups=channels)
-    mu_target = F.conv2d(target, window, padding=window_size // 2, groups=channels)
-
-    mu_pred_sq = mu_pred ** 2
-    mu_target_sq = mu_target ** 2
-    mu_pred_target = mu_pred * mu_target
-
-    # Compute variances and covariance
-    sigma_pred_sq = F.conv2d(pred ** 2, window, padding=window_size // 2, groups=channels) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target ** 2, window, padding=window_size // 2, groups=channels) - mu_target_sq
-    sigma_pred_target = F.conv2d(pred * target, window, padding=window_size // 2, groups=channels) - mu_pred_target
-
-    # SSIM formula
-    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
-               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
-
-    return ssim_map.mean().item()
 
 
 class Trainer:
@@ -176,6 +75,21 @@ class Trainer:
             loss_tensor /= dist.get_world_size()
             return loss_tensor.item()
         return loss_value
+
+    @staticmethod
+    def compute_loss(
+        criterion, input, target, probe=None, normalization=None, scale=None
+    ):
+        """Call losses that optionally require the probe far-field envelope."""
+        if getattr(criterion, 'uses_probe_envelope', False):
+            return criterion(
+                input,
+                target,
+                probe=probe,
+                normalization=normalization,
+                scale=scale,
+            )
+        return criterion(input, target)
 
     def update_saved_model(self, name):
         """Update saved model (checkpoints and if validation loss is minimized)."""
@@ -508,9 +422,18 @@ class Trainer:
 
             if self.mode == 'supervised':
                 # amp_patch/ph_patch already on device
-                loss = criterion(output_amp, amp_patch) + criterion(output_ph, ph_patch)
+                loss = self.compute_loss(
+                    criterion, output_amp, amp_patch
+                ) + self.compute_loss(criterion, output_ph, ph_patch)
             else:
-                loss = criterion(output_diff, input_diff)
+                loss = self.compute_loss(
+                    criterion,
+                    output_diff,
+                    input_diff,
+                    input_probe,
+                    input_norm,
+                    input_scale,
+                )
 
             torch.cuda.nvtx.range_pop()  # forward
             optimizer.zero_grad(set_to_none=True)
@@ -567,8 +490,8 @@ class Trainer:
             running_loss += batch_loss
 
             # Track amp/phase losses (targets now guaranteed on same device)
-            loss_amp = criterion(output_amp.detach(), amp_patch)
-            loss_ph  = criterion(output_ph.detach(), ph_patch)
+            loss_amp = self.compute_loss(criterion, output_amp.detach(), amp_patch)
+            loss_ph = self.compute_loss(criterion, output_ph.detach(), ph_patch)
             batch_amp_loss = loss_amp.item()
             batch_ph_loss = loss_ph.item()
             running_amp_loss += batch_amp_loss
@@ -629,7 +552,6 @@ class Trainer:
         epoch_time = epoch_end_time - epoch_start_time
 
         if self.is_main_process:
-            #print(f"[{datetime.now(tz=timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed", flush=True)
             print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Training epoch complete: {num_batches} batches processed in {epoch_time:.3f} seconds", flush=True)
 
         avg_train_loss = self.synchronize_loss(avg_train_loss)
@@ -712,43 +634,59 @@ class Trainer:
                 output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
                 if self.mode == 'supervised':
-                    loss = criterion(output_amp, amp_patch) + criterion(output_ph, ph_patch)
+                    loss = self.compute_loss(
+                        criterion, output_amp, amp_patch
+                    ) + self.compute_loss(criterion, output_ph, ph_patch)
                 else:
-                    loss = criterion(output_diff, input_diff)
+                    loss = self.compute_loss(
+                        criterion,
+                        output_diff,
+                        input_diff,
+                        input_probe,
+                        input_norm,
+                        input_scale,
+                    )
 
                 val_loss += loss.detach().item()
 
-                loss_amp = criterion(output_amp.detach(), amp_patch)
-                loss_ph  = criterion(output_ph.detach(), ph_patch)
+                loss_amp = self.compute_loss(
+                    criterion, output_amp.detach(), amp_patch
+                )
+                loss_ph = self.compute_loss(
+                    criterion, output_ph.detach(), ph_patch
+                )
                 val_amp_loss += loss_amp.item()
                 val_ph_loss += loss_ph.item()
                 processed_batches += 1
 
-                # SSIM/PSNR metrics (vectorized; average over samples)
+                # Align each prediction to its target's global mean before scoring.
                 batch_size = output_amp.size(0)
 
                 pred_amp = output_amp.detach()
                 pred_ph = output_ph.detach()
 
-                batch_amp_ssim = compute_ssim(pred_amp, amp_patch)
-                batch_ph_ssim = compute_ssim(pred_ph, ph_patch)
-                val_amp_ssim += batch_amp_ssim * batch_size
-                val_ph_ssim += batch_ph_ssim * batch_size
+                for sample_pred_amp, sample_amp, sample_pred_ph, sample_ph in zip(
+                    pred_amp, amp_patch, pred_ph, ph_patch, strict=True
+                ):
+                    aligned_amp, target_amp, amp_range = prepare_image_metric_inputs(
+                        sample_pred_amp, sample_amp, align_mean=True
+                    )
+                    aligned_ph, target_ph, ph_range = prepare_image_metric_inputs(
+                        sample_pred_ph, sample_ph, align_mean=True
+                    )
 
-                # PSNR: compute per-sample PSNR then sum
-                pred_amp_flat = pred_amp.flatten(1)
-                amp_flat = amp_patch.flatten(1)
-                amp_mse = (pred_amp_flat - amp_flat).pow(2).mean(dim=1)
-                amp_range = (amp_flat.amax(dim=1) - amp_flat.amin(dim=1)).clamp(min=1e-8)
-                amp_psnr = 10 * torch.log10((amp_range ** 2) / (amp_mse + 1e-8))
-                val_amp_psnr += amp_psnr.sum().item()
-
-                pred_ph_flat = pred_ph.flatten(1)
-                ph_flat = ph_patch.flatten(1)
-                ph_mse = (pred_ph_flat - ph_flat).pow(2).mean(dim=1)
-                ph_range = (ph_flat.amax(dim=1) - ph_flat.amin(dim=1)).clamp(min=1e-8)
-                ph_psnr = 10 * torch.log10((ph_range ** 2) / (ph_mse + 1e-8))
-                val_ph_psnr += ph_psnr.sum().item()
+                    val_amp_ssim += compute_ssim(
+                        aligned_amp, target_amp, data_range=amp_range
+                    )
+                    val_ph_ssim += compute_ssim(
+                        aligned_ph, target_ph, data_range=ph_range
+                    )
+                    val_amp_psnr += compute_psnr(
+                        aligned_amp, target_amp, data_range=amp_range
+                    )
+                    val_ph_psnr += compute_psnr(
+                        aligned_ph, target_ph, data_range=ph_range
+                    )
 
                 num_samples += batch_size
 
