@@ -5,7 +5,8 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.fft import fft2 as scipy_fft2, next_fast_len
+from scipy.fft import fft2 as scipy_fft2
+from scipy.fft import next_fast_len
 from scipy.ndimage import gaussian_filter1d, map_coordinates
 from scipy.optimize import OptimizeWarning, curve_fit
 from scipy.special import erf, erfinv
@@ -873,7 +874,7 @@ def analyze_reference_template_broadening(
     if all_fit_indices.size < 8:
         raise ValueError("fitting interval contains too few samples")
 
-    fit_stride = max(1, int(round(samples_per_native_px)))
+    fit_stride = max(1, round(samples_per_native_px))
     fit_indices = all_fit_indices[::fit_stride]
     fit_t = distance_nm[fit_indices]
     fit_reference = reference_profile[fit_indices]
@@ -993,7 +994,7 @@ def analyze_reference_template_broadening(
                 raise ValueError("parameter covariance is not finite")
 
             fitted = template_model(fit_t, *popt)
-            residual, r_squared, residual_noise = _edge_quality_statistics(
+            _residual, r_squared, residual_noise = _edge_quality_statistics(
                 fit_target, fitted
             )
             broadened = broaden_reference(sigma_extra_nm)
@@ -1207,7 +1208,7 @@ def analyze_independent_erf_edges(
             perr = perr_raw * covariance_correction
 
             fitted = erf_model(distance_nm, *popt)
-            residual, r_squared, residual_noise = _edge_quality_statistics(
+            _residual, r_squared, residual_noise = _edge_quality_statistics(
                 profile, fitted
             )
             contrast = 2 * abs(amplitude)
