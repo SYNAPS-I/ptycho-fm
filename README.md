@@ -158,6 +158,8 @@ data:
 
   scale: 10000.0
   normalization_dict_path: '/path/to/norm_factors.pkl'  # Optional
+  apply_noise: true        # Add synthetic noise to training and validation data
+  test_apply_noise: false  # Add synthetic noise to test/inference data independently
   train_split: 0.95
   random_seed: 8
 

@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import math
 import os
 import pickle
 import socket
@@ -22,13 +23,51 @@ except ImportError:
 import wandb
 from torch.utils.data import DataLoader, DistributedSampler, Subset, random_split
 
-from ptycho_fm.custom_loss import WeightedLoss
+from ptycho_fm.custom_loss import (
+    CombinedLoss,
+    ProbeAwareLoss,
+    QDependentLoss,
+    TotalFluxLoss,
+    WeightedLoss,
+)
 from ptycho_fm.data import CombinedDataset, PtychographyDataset, RankShardedSubset
 from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
 from ptycho_fm.mlflow_logger import MLflowLogger
-from ptycho_fm.model.model import PtychoFM
+from ptycho_fm.model.model import PtychoFM, PtychoFMCoupledAmpPh, PtychoFMReIm
 from ptycho_fm.prefetcher import CUDAPrefetcher
 from ptycho_fm.training import Trainer
+
+
+def override_output_norm_from_config(model, model_config):
+    """Restore explicitly configured output normalization after weight loading."""
+    output_norm = model_config.get('output_norm')
+    if not output_norm:
+        return {}
+
+    scale_keys = ('amp_scale', 'ph_scale', 'real_scale', 'imag_scale')
+    offset_keys = ('amp_offset', 'real_offset', 'imag_offset')
+    overridden = {}
+
+    with torch.no_grad():
+        for key in scale_keys:
+            if key not in output_norm or not hasattr(model, key):
+                continue
+            value = float(output_norm[key])
+            if value <= 0:
+                raise ValueError(
+                    f"Output norm scale '{key}' must be positive, got {value}"
+                )
+            getattr(model, key).fill_(math.log(value))
+            overridden[key] = value
+
+        for key in offset_keys:
+            if key not in output_norm or not hasattr(model, key):
+                continue
+            value = float(output_norm[key])
+            getattr(model, key).fill_(value)
+            overridden[key] = value
+
+    return overridden
 
 
 def main() -> None:
@@ -379,7 +418,6 @@ def main() -> None:
     LR = config['training']['learning_rate']
     EPOCHS = config['training']['epochs']
     MODEL_SAVE_PATH = config['paths']['model_save_path']
-    FINETUNE_PATH = config['training'].get('finetune_from_model')
     data_subsetting_schedule = _validate_data_subsetting_schedule(
         config['training'].get('data_subsetting_schedule')
     )
@@ -459,7 +497,7 @@ def main() -> None:
             world_size=world_size,
             scale=config['data']['scale'],
             normalization_dict_path=config['data'].get('normalization_dict_path'),
-            default_normalization=config['data'].get('default_normalization', 100000.0),
+            default_normalization=config['data'].get('default_normalization', 10000.0),
             apply_noise=config['data'].get('apply_noise', True),
             cache_object=config['data'].get('cache_object', False),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
@@ -611,7 +649,7 @@ def main() -> None:
             file_path=config['data']['test_path'],
             scale=config['data']['scale'],
             normalization_dict_path=config['data'].get('test_normalization'),
-            apply_noise=config['data'].get('apply_noise', False),  # Don't add noise to test data
+            apply_noise=config['data'].get('test_apply_noise', False),
             default_normalization=config['data'].get('default_normalization', 100000.0),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
             max_OPR_modes=config['data'].get('max_OPR_modes', 1),
@@ -646,7 +684,13 @@ def main() -> None:
         print(f"Data directory: {data_dir}", flush=True)
     #    print(f"Number of paired files: {len(base_dataset.file_paths)}", flush=True)
         print(f"Total patterns (after subset_fraction): {len(full_dataset)}", flush=True)
-        print(f"Train patterns (this rank): {len(train_dataset)} | Val patterns (this rank): {len(val_dataset)}", flush=True)
+        train_patterns_this_rank = len(train_sampler) if train_sampler is not None else len(train_dataset)
+        val_patterns_this_rank = len(val_sampler) if val_sampler is not None else len(val_dataset)
+        print(
+            f"Train patterns (this rank): {train_patterns_this_rank} | "
+            f"Val patterns (this rank): {val_patterns_this_rank}",
+            flush=True,
+        )
         print(f"Total batches/epoch (train): {len(train_loader)}", flush=True)
         print(f"Total batches/epoch (val): {len(val_loader)}", flush=True)
         print("\nDataLoader Settings:", flush=True)
@@ -655,6 +699,16 @@ def main() -> None:
         print(f"  train shuffle: {train_dataloader_kwargs['shuffle']} (per-epoch local shuffling)", flush=True)
         print(f"  val shuffle: {val_dataloader_kwargs['shuffle']}", flush=True)
         print(f"  drop_last: {train_dataloader_kwargs['drop_last']}", flush=True)
+        print(
+            "  training/validation synthetic noise: "
+            f"{config['data'].get('apply_noise', True)}",
+            flush=True,
+        )
+        print(
+            "  test synthetic noise: "
+            f"{config['data'].get('test_apply_noise', False)}",
+            flush=True,
+        )
         if train_dataloader_kwargs['num_workers'] > 0:
             print(f"  prefetch_factor: {train_dataloader_kwargs.get('prefetch_factor', 'N/A')}", flush=True)
             print(f"  persistent_workers: {train_dataloader_kwargs.get('persistent_workers', 'N/A')}", flush=True)
@@ -665,16 +719,33 @@ def main() -> None:
         print("=" * 50, flush=True)
 
     # ────────────────────────────────────────────────────────────────────────────────
-    # Model setup - All models are 256x256
+    # Model setup
     # ────────────────────────────────────────────────────────────────────────────────
     img_size = 256
 
-    # Use unified PtychoFM model with encoder_type selection
-    model = PtychoFM(config=config['model'])
+    # Select model based on coupled_decoder_mode config
+    coupled_decoder_mode = config['model'].get('coupled_decoder_mode', None)
+
+    if coupled_decoder_mode == 'real_imag':
+        model = PtychoFMReIm(config=config['model'])
+        model_name = "PtychoFMReIm"
+        decoder_info = "coupled (real/imag)"
+    elif coupled_decoder_mode == 'amp_phase':
+        model = PtychoFMCoupledAmpPh(config=config['model'])
+        model_name = "PtychoFMCoupledAmpPh"
+        decoder_info = "coupled (amp/phase)"
+    else:
+        model = PtychoFM(config=config['model'])
+        model_name = "PtychoFM"
+        decoder_info = config['model'].get('decoder_type', 'standard')
 
     if is_main_process:
         encoder_type = config['model'].get('encoder_type', 'custom')
-        print(f"Using PtychoFM with {encoder_type.upper()} encoder", flush=True)
+        print(
+            f"Using {model_name} with {encoder_type.upper()} encoder and "
+            f"{decoder_info} decoder",
+            flush=True,
+        )
         dummy_data = torch.randn((1, 1, img_size, img_size))
         dummy_probe = torch.randn((1, 1, 10, img_size, img_size, 2))
         try:
@@ -698,29 +769,53 @@ def main() -> None:
         # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
         dev_index = DEVICE.index
         model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=True)
-        # if "CUDA_VISIBLE_DEVICES" in os.environ:
-        #     # SLURM sets CUDA_VISIBLE_DEVICES - let DDP auto-detect to avoid PCI bus ID issues
-        #     model = DDP(model, find_unused_parameters=False)
-        # else:
-        #     # For torchrun or other launchers, explicitly specify device
-        #     dev_index = torch.cuda.current_device()
-        #     model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=False)
 
     _ddp_barrier()
 
-    # Load pretrained weights for finetuning (fresh optimizer state)
+    # Fine-tuning loads model weights here, before creating a fresh optimizer.
+    FINETUNE_PATH = config['training'].get('finetune_from_model')
+    resume_from_checkpoint = config['training'].get('resume_from_checkpoint', False)
+    if FINETUNE_PATH is not None and resume_from_checkpoint:
+        raise ValueError(
+            "Set only one of training.finetune_from_model or "
+            "training.resume_from_checkpoint"
+        )
+
     finetune_checkpoint_sha256 = None
-    if FINETUNE_PATH:
+    if FINETUNE_PATH is not None:
         if is_main_process:
+            print(f"\nFinetuning from model weights: {FINETUNE_PATH}", flush=True)
+            print(
+                "Using fresh optimizer, metrics, epoch counter, and tracking run.",
+                flush=True,
+            )
             with open(FINETUNE_PATH, 'rb') as checkpoint_file:
                 finetune_checkpoint_sha256 = hashlib.file_digest(checkpoint_file, 'sha256').hexdigest()
-        state = torch.load(FINETUNE_PATH, map_location=DEVICE)
+        state = torch.load(FINETUNE_PATH, map_location=DEVICE, weights_only=True)
         if isinstance(model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
-            model.module.load_state_dict(state)
+            finetune_model = model.module
         else:
-            model.load_state_dict(state)
+            finetune_model = model
+        finetune_model.load_state_dict(state)
+
+        overridden_output_norm = override_output_norm_from_config(
+            finetune_model, config['model']
+        )
         if is_main_process:
-            print(f"Loaded finetune weights from {FINETUNE_PATH}; optimizer will start fresh.", flush=True)        
+            print(
+                f"Loaded finetune weights from {FINETUNE_PATH}; "
+                "optimizer will start fresh.",
+                flush=True,
+            )
+            if overridden_output_norm:
+                values = ", ".join(
+                    f"{key}={value}" for key, value in overridden_output_norm.items()
+                )
+                print(
+                    "Overrode checkpoint output normalization from active config: "
+                    f"{values}",
+                    flush=True,
+                )
 
     # ────────────────────────────────────────────────────────────────────────────────
     # Loss, optimizer, metrics, trainer
@@ -733,9 +828,36 @@ def main() -> None:
         criterion = nn.L1Loss()
     elif config['training']['loss_function'] == 'poisson_nll':
         criterion = nn.PoissonNLLLoss(log_input=False, full=False)
+    elif config['training']['loss_function'] == 'total_flux':
+        criterion = TotalFluxLoss()
     elif config['training']['loss_function'] == 'weighted':
         weighted_loss_config = config['training']['weighted_loss']
         criterion = WeightedLoss(loss_type=weighted_loss_config['loss_type'], threshold=weighted_loss_config['threshold'], alpha=weighted_loss_config['alpha'])
+    elif config['training']['loss_function'] == 'probe_aware':
+        probe_aware_loss_config = config['training']['probe_aware_loss']
+        criterion = ProbeAwareLoss(
+            loss_type=probe_aware_loss_config.get('loss_type', 'mse'),
+            threshold=probe_aware_loss_config.get('threshold', 0.0),
+            alpha=probe_aware_loss_config.get('alpha', 1.0),
+            envelope_floor=probe_aware_loss_config.get('envelope_floor', 0.05),
+            eps=probe_aware_loss_config.get('eps', 1e-6),
+        )
+    elif config['training']['loss_function'] == 'q_dependent':
+        q_dependent_loss_config = config['training']['q_dependent_loss']
+        criterion = QDependentLoss(
+            loss_type=q_dependent_loss_config.get('loss_type', 'mse'),
+            alpha=q_dependent_loss_config.get('alpha', 1.0),
+            q_beta=q_dependent_loss_config.get('q_beta', 1.0),
+            q_floor=q_dependent_loss_config.get('q_floor', 0.05),
+            threshold=q_dependent_loss_config.get('threshold', 0.0),
+            log_error=q_dependent_loss_config.get('log_error', True),
+            normalize_q=q_dependent_loss_config.get('normalize_q', True),
+            eps=q_dependent_loss_config.get('eps', 1e-6),
+        )
+    elif config['training']['loss_function'] == 'combined':
+        criterion = CombinedLoss(
+            config['training']['combined_loss'], config['training']
+        )
     else:
         raise ValueError(f"Unknown loss function: {config['training']['loss_function']}")
 
@@ -743,16 +865,43 @@ def main() -> None:
     encoder_lr = config['training'].get('encoder_lr', LR)
     amp_decoder_lr = config['training'].get('amp_decoder_lr', LR)
     ph_decoder_lr = config['training'].get('ph_decoder_lr', LR)
+    coupled_decoder_lr = config['training'].get('coupled_decoder_lr', LR)
 
     # Get the actual model (unwrap DDP if needed)
     actual_model = model.module if isinstance(model, DDP) else model
 
-    # Create parameter groups with individual learning rates
-    param_groups = [
-        {'params': actual_model.encoder.parameters(), 'lr': encoder_lr, 'name': 'encoder'},
-        {'params': actual_model.amp_decoder.parameters(), 'lr': amp_decoder_lr, 'name': 'amp_decoder'},
-        {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'}
-    ]
+    if coupled_decoder_mode in ('real_imag', 'amp_phase'):
+        if coupled_decoder_mode == 'real_imag':
+            output_norm_params = [
+                actual_model.real_scale,
+                actual_model.imag_scale,
+                actual_model.real_offset,
+                actual_model.imag_offset,
+            ]
+        else:
+            output_norm_params = [
+                actual_model.amp_scale,
+                actual_model.ph_scale,
+                actual_model.amp_offset,
+            ]
+
+        param_groups = [
+            {'params': actual_model.encoder.parameters(), 'lr': encoder_lr, 'name': 'encoder'},
+            {'params': actual_model.coupled_decoder.parameters(), 'lr': coupled_decoder_lr, 'name': 'coupled_decoder'},
+            {'params': output_norm_params, 'lr': coupled_decoder_lr, 'name': 'output_norm_params'},
+        ]
+    else:
+        output_norm_params = [
+            actual_model.amp_scale,
+            actual_model.amp_offset,
+            actual_model.ph_scale,
+        ]
+        param_groups = [
+            {'params': actual_model.encoder.parameters(), 'lr': encoder_lr, 'name': 'encoder'},
+            {'params': actual_model.amp_decoder.parameters(), 'lr': amp_decoder_lr, 'name': 'amp_decoder'},
+            {'params': actual_model.ph_decoder.parameters(), 'lr': ph_decoder_lr, 'name': 'ph_decoder'},
+            {'params': output_norm_params, 'lr': amp_decoder_lr, 'name': 'output_norm_params'},
+        ]
 
     optimizer = optim.Adam(param_groups, fused=True)
 
@@ -774,8 +923,15 @@ def main() -> None:
     if is_main_process:
         print("\nOptimizer learning rates:", flush=True)
         print(f"  Encoder: {encoder_lr}", flush=True)
-        print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
-        print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
+        if coupled_decoder_mode in ('real_imag', 'amp_phase'):
+            print(
+                f"  Coupled Decoder ({coupled_decoder_mode}): "
+                f"{coupled_decoder_lr}",
+                flush=True,
+            )
+        else:
+            print(f"  Amplitude Decoder: {amp_decoder_lr}", flush=True)
+            print(f"  Phase Decoder: {ph_decoder_lr}", flush=True)
 
     metrics = {'training_loss': [], 'train_amp_loss': [], 'train_ph_loss': [], 'validation_loss': [],
                'val_amp_loss': [], 'val_ph_loss': [], 'best_val_loss': np.inf}
@@ -783,10 +939,6 @@ def main() -> None:
     # Track starting epoch for checkpoint resumption
     start_epoch = 0
     wandb_run_id = None
-
-    # If finetuning weights are provided, skip optimizer state resume to keep optimizer fresh
-    if FINETUNE_PATH and is_main_process:
-        print("finetune_from_model is set; ignoring resume_from_checkpoint to keep optimizer state fresh.", flush=True)
 
     mlflow_logger = MLflowLogger(config, is_main_process)
 
@@ -811,10 +963,12 @@ def main() -> None:
             "encoder_lr": encoder_lr,
             "amp_decoder_lr": amp_decoder_lr,
             "ph_decoder_lr": ph_decoder_lr,
+            "coupled_decoder_lr": coupled_decoder_lr,
             "batch_size": BATCH_SIZE,
             "epochs": EPOCHS,
             "loss_function": config['training']['loss_function'],
             "encoder_type": config['model'].get('encoder_type', 'custom'),
+            "coupled_decoder_mode": coupled_decoder_mode,
             "world_size": world_size,
             "model": config['model'],
             "data": config['data'],
@@ -829,7 +983,7 @@ def main() -> None:
     # ────────────────────────────────────────────────────────────────────────────────
     # Resume from checkpoint if requested
     # ────────────────────────────────────────────────────────────────────────────────
-    if config['training'].get('resume_from_checkpoint', False):
+    if resume_from_checkpoint:
         if is_main_process:
             print('\nResuming from checkpoint...', flush=True)
 
@@ -889,11 +1043,13 @@ def main() -> None:
                     "encoder_lr": encoder_lr,
                     "amp_decoder_lr": amp_decoder_lr,
                     "ph_decoder_lr": ph_decoder_lr,
+                    "coupled_decoder_lr": coupled_decoder_lr,
                     "batch_size": BATCH_SIZE,
                     "dataset": config['wandb']['dataset_name'],
                     "epochs": EPOCHS,
                     "notes": config['wandb']['notes'],
                     "encoder_type": config['model'].get('encoder_type', 'custom'),
+                    "coupled_decoder_mode": coupled_decoder_mode,
                     "model_config": config['model'],
                     "data_config": config['data'],
                     "trainer_config": config['trainer'],

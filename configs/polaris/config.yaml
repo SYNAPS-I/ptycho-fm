@@ -43,7 +43,10 @@ data:
   drop_last: true
   persistent_workers: true
 
+  # Synthetic Poisson noise augmentation for the training and validation split.
   apply_noise: false
+  # Keep false for measured data; enable explicitly for simulated test data.
+  test_apply_noise: false
   default_normalization: 30000.0
 
 # Training Configuration

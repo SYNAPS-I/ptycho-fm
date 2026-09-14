@@ -185,7 +185,7 @@ def test_metrics():
     print("TEST 5: SSIM/PSNR Metrics")
     print("=" * 60)
 
-    from ptycho_fm.training import compute_psnr, compute_ssim
+    from ptycho_fm.metrics import compute_psnr, compute_ssim
 
     # Create test tensors
     img_size = 256
@@ -231,7 +231,7 @@ def test_real_inference(model, config):
     print("=" * 60)
 
     from ptycho_fm.data import PtychographyDataset
-    from ptycho_fm.training import compute_psnr, compute_ssim
+    from ptycho_fm.metrics import compute_psnr, compute_ssim
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)

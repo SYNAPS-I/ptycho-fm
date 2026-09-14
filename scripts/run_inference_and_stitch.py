@@ -49,7 +49,7 @@ def build_dataloader(data_path: str, config: dict, normalization_value: float, b
         scale=data_cfg.get("scale", 100000.0),
         normalization_dict_path=None,
         default_normalization=1.0,
-        apply_noise=data_cfg.get("apply_noise", False),
+        apply_noise=data_cfg.get("test_apply_noise", False),
         cache_object=data_cfg.get("cache_object", True),
         max_probe_modes=data_cfg.get("max_probe_modes", 8),
         max_OPR_modes=data_cfg.get("max_OPR_modes", 1),
