@@ -1,0 +1,63 @@
+# Select exactly one dispatch mode: range or watch.
+mode: range
+
+# Range mode options. Replace these with the corresponding commented watch
+# options below when mode is watch.
+data_root: /path/to/data
+data_format: auto
+scan_start: 1
+scan_end: 10
+scan_glob: "scan_{scan}_*.h5"
+recursive: false
+bin_dir_template: "{scan}/raw"
+bin_pattern: "image_*.bin"
+bin_frame_shape: null
+probe_template: probe.npy
+positions_template: positions.csv
+output_template: "{rel_dir}"
+
+# Watch mode options:
+# watch_dir: /path/to/incoming/data
+# file_glob: "*.h5"
+# scan_regex: 'scan_(\d+)_.*\.h5$'
+# recursive: false
+# probe_path: /path/to/probe.npy
+# positions_path: /path/to/positions.csv
+# output_template: "."
+# process_existing: false
+
+# Reconstruction options shared by both modes.
+crop: [0, 255, 0, 255]
+csv_probe_side: 256
+pixel_size: 6.65e-9
+output_dir: ./recon_outputs
+object_template: "{stem}"
+engine: lsqml
+opr: false
+num_opr_modes: 3
+continue_recon: false
+flip_x_positions: false
+filter_indices: null
+frame_stride: 1
+frame_sum: 1
+
+# Weakly scattering sample preprocessing. All values below are required when
+# preprocess is true.
+preprocess: false
+xray_energy_kev: null
+zp_diameter: null
+zp_outer_zone_width: null
+sample_detector_distance: null
+defocus_distance: null
+detector_pixel_size: null
+bin: null
+max_position_jitter_m: null
+
+# Dispatch options.
+expected_frames: null
+gpus: null
+exclude_gpus: []
+omp_num_threads: 1
+poll_interval: 10.0
+skipped_scans_path: null
+dry_run: false
