@@ -33,9 +33,17 @@ parser.add_argument(
     default="normalization.pkl",
     help="Output path (including filename) for the normalization pickle",
 )
+parser.add_argument(
+    "--chunk-size",
+    type=int,
+    default=100,
+    help="Number of diffraction patterns to read at once from each HDF5 file",
+)
 args = parser.parse_args()
 data_path = args.data_path
 output_path = Path(args.output_path)
+if args.chunk_size < 1:
+    parser.error("--chunk-size must be at least 1")
 
 
 def _init_dist():
@@ -84,6 +92,30 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
     if stem.endswith("_para"):
         return stem[:-5]
     return stem
+
+
+def get_max_intensity(dp_file: Path, chunk_size: int = 100) -> float:
+    """Return the maximum diffraction intensity without loading the full file."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+
+    with h5py.File(dp_file, "r") as f:
+        if "dp" not in f:
+            raise KeyError(f"No 'dp' dataset in {dp_file}")
+        dp = f["dp"]
+        if dp.ndim < 1 or dp.shape[0] == 0:
+            raise ValueError(f"Empty 'dp' dataset in {dp_file}")
+
+        max_intensity = None
+        for start in range(0, dp.shape[0], chunk_size):
+            chunk_max = np.max(dp[start : start + chunk_size])
+            max_intensity = (
+                chunk_max
+                if max_intensity is None
+                else np.maximum(max_intensity, chunk_max)
+            )
+
+    return float(max_intensity)
 
 def find_paired_files(directory):
     """
@@ -136,13 +168,29 @@ if tqdm is not None:
 for file_path in file_iter:
     object_name = derive_object_name(file_path, Path(data_path))
     para_file = Path(file_path).with_name(f"{Path(file_path).stem[:-3]}_para.hdf5")
-    with h5py.File(para_file, 'r') as f:
-        probe = f['probe'][:]
-    probe_shapes.append(probe.shape)
-    with h5py.File(file_path, 'r') as f:
-        data = f['dp'][:]
-    max_intensity = np.max(data)
-    norm_dict[object_name] = max_intensity
+    with h5py.File(para_file, "r") as f:
+        probe_shapes.append(f["probe"].shape)
+        if "normalization" in f:
+            stored_normalization = f["normalization"][()]
+        else:
+            stored_normalization = None
+
+    if stored_normalization is not None:
+        norm_dict[object_name] = float(stored_normalization)
+        print(
+            f"[EXISTS] {para_file}: normalization={stored_normalization}",
+            flush=True,
+        )
+    else:
+        max_intensity = get_max_intensity(file_path, args.chunk_size)
+        with h5py.File(para_file, "a") as f:
+            stored_normalization = np.float32(max_intensity)
+            f.create_dataset("normalization", data=stored_normalization)
+        norm_dict[object_name] = max_intensity
+        print(
+            f"[ADDED] {para_file}: normalization={stored_normalization}",
+            flush=True,
+        )
 
 if n_ranks > 1 and dist is not None and dist.is_available() and dist.is_initialized():
     gathered_dicts = [None for _ in range(n_ranks)]
