@@ -35,6 +35,10 @@ object_template: "{stem}"
 engine: lsqml
 opr: false
 num_opr_modes: 3
+total_variation: false
+total_variation_weight: 1.0e-2
+total_variation_start: 20
+total_variation_stride: 5
 continue_recon: false
 flip_x_positions: false
 filter_indices: null

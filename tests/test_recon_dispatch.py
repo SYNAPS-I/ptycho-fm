@@ -17,6 +17,10 @@ def reconstruction_options(**overrides):
         "engine": "lsqml",
         "opr": False,
         "num_opr_modes": 3,
+        "total_variation": False,
+        "total_variation_weight": 1e-2,
+        "total_variation_start": 20,
+        "total_variation_stride": 5,
         "continue_recon": False,
         "flip_x_positions": False,
         "filter_indices": None,
@@ -59,6 +63,10 @@ def test_build_reconstruction_command_includes_shared_options():
         engine="rpie",
         opr=True,
         num_opr_modes=4,
+        total_variation=True,
+        total_variation_weight=2e-2,
+        total_variation_start=10,
+        total_variation_stride=2,
         frame_stride=2,
         frame_sum=3,
         bin_factor=2,
@@ -70,6 +78,10 @@ def test_build_reconstruction_command_includes_shared_options():
     assert command[1] == dispatch.PTYCHI_RECON
     assert command[command.index("--engine") + 1] == "rpie"
     assert command[command.index("--num-opr-modes") + 1] == "4"
+    assert "--total-variation" in command
+    assert command[command.index("--total-variation-weight") + 1] == "0.02"
+    assert command[command.index("--total-variation-start") + 1] == "10"
+    assert command[command.index("--total-variation-stride") + 1] == "2"
     assert command[command.index("--frame-stride") + 1] == "2"
     assert command[command.index("--frame-sum") + 1] == "3"
     assert command[command.index("--bin") + 1] == "2"
@@ -213,6 +225,33 @@ def test_combined_parser_accepts_range_and_watch_arguments(tmp_path):
     assert watch_args.mode == "watch"
 
 
+def test_total_variation_rejects_engine_without_ptychi_support():
+    with pytest.raises(SystemExit):
+        dispatch.parse_args(
+            [
+                "range",
+                "--data-root",
+                "/data",
+                "--scan-start",
+                "1",
+                "--scan-end",
+                "1",
+                "--probe-template",
+                "probe.npy",
+                "--positions-template",
+                "positions.csv",
+                "--crop",
+                "0",
+                "3",
+                "0",
+                "3",
+                "--engine",
+                "raar",
+                "--total-variation",
+            ]
+        )
+
+
 def test_yaml_config_can_supply_mode_and_all_required_range_arguments(tmp_path):
     config_path = tmp_path / "recon_config.yaml"
     config_path.write_text(
@@ -225,6 +264,10 @@ probe_template: probe.npy
 positions_template: positions.csv
 crop: [0, 255, 0, 255]
 engine: epie
+total_variation: true
+total_variation_weight: 0.03
+total_variation_start: 15
+total_variation_stride: 3
 recursive: true
 gpus: [0, 2]
 """.strip(),
@@ -240,6 +283,10 @@ gpus: [0, 2]
     assert args.crop == [0, 255, 0, 255]
     assert args.gpus == [0, 2]
     assert args.engine == "rpie"
+    assert args.total_variation
+    assert args.total_variation_weight == 0.03
+    assert args.total_variation_start == 15
+    assert args.total_variation_stride == 3
     assert not args.recursive
     assert args.config == str(config_path)
 

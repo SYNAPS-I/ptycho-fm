@@ -10,6 +10,8 @@ import numpy as np
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+TV_SUPPORTED_ENGINES = {"lsqml", "epie", "rpie", "dm"}
+
 
 def resolve_template_path(template: str, base_dir: str, scan_num: int) -> str:
     path = template.format(scan=scan_num, scan_padded=f"{scan_num:04d}")
@@ -475,8 +477,19 @@ def run_ptychi_reconstruction(
     reconstruction_positions=None,
     opr: bool = False,
     num_opr_modes: int = 3,
+    total_variation: bool = False,
+    total_variation_weight: float = 1e-2,
+    total_variation_start: int = 20,
+    total_variation_stride: int = 5,
 ):
     """Run ptychi reconstruction with pre-loaded data."""
+    if total_variation and engine not in TV_SUPPORTED_ENGINES:
+        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
+        raise ValueError(
+            f"Total variation regularization is only supported with {supported}; "
+            f"got {engine}"
+        )
+
     # Import torch and ptychi AFTER data is loaded
     import torch
     from ptychi import api
@@ -558,6 +571,10 @@ def run_ptychi_reconstruction(
             reconstruction_positions=None,
             opr: bool = False,
             num_opr_modes: int = 3,
+            total_variation: bool = False,
+            total_variation_weight: float = 1e-2,
+            total_variation_start: int = 20,
+            total_variation_stride: int = 5,
         ):
             data, probe, positions_px = self.prepare_data(
                 data, probe_path, positions_path, pixel_size_m, num_probe_modes, flip_x_positions, frame_stride, frame_sum, remove_indices, reconstruction_positions
@@ -667,13 +684,6 @@ def run_ptychi_reconstruction(
             if engine == "lsqml":
                 options.object_options.step_size = 1
                 options.object_options.build_preconditioner_with_all_modes = False
-
-                # tv = options.object_options.total_variation
-                # tv.enabled = True
-                # tv.weight=1e-2
-                # tv.optimization_plan.start = 20
-                # tv.optimization_plan.stride = 5 
-
             elif engine == "epie":
                 options.object_options.step_size = 0.1
                 options.object_options.alpha = 1
@@ -691,6 +701,18 @@ def run_ptychi_reconstruction(
                 ambiguity_removal = options.object_options.remove_object_probe_ambiguity
                 ambiguity_removal.enabled = True
                 ambiguity_removal.optimization_plan.stride = 10
+
+            tv = options.object_options.total_variation
+            tv.enabled = total_variation
+            tv.weight = total_variation_weight
+            tv.optimization_plan.start = total_variation_start
+            tv.optimization_plan.stride = total_variation_stride
+            if total_variation:
+                print(
+                    "Enabled total variation regularization "
+                    f"(weight={total_variation_weight:g}, "
+                    f"start={total_variation_start}, stride={total_variation_stride})"
+                )
 
             # --- Probe ---
             options.probe_options.optimizer = api.Optimizers.SGD
@@ -717,7 +739,7 @@ def run_ptychi_reconstruction(
             if projection_engine:
                 # Refine the slightly jittered positions only while the
                 # supplied probe is fixed. Position refinement stops when
-                # probe refinement begins at epoch 3, keeping the two blind
+                # probe refinement begins, keeping the two blind
                 # updates from competing with one another.
                 options.probe_position_options.optimizable = True
                 options.probe_position_options.optimization_plan.stop = 3
@@ -822,6 +844,10 @@ def run_ptychi_reconstruction(
         reconstruction_positions,
         opr,
         num_opr_modes,
+        total_variation,
+        total_variation_weight,
+        total_variation_start,
+        total_variation_stride,
     )
 
 
@@ -926,6 +952,33 @@ if __name__ == "__main__":
         help="Number of additional OPR probe modes to add when --opr is true (default: 3)",
     )
     parser.add_argument(
+        "--total-variation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable object total variation regularization for lsqml, epie, rpie, or dm "
+            "(default: disabled)"
+        ),
+    )
+    parser.add_argument(
+        "--total-variation-weight",
+        type=float,
+        default=1e-2,
+        help="Total variation regularization weight (default: 1e-2)",
+    )
+    parser.add_argument(
+        "--total-variation-start",
+        type=int,
+        default=20,
+        help="First epoch at which to apply total variation (default: 20)",
+    )
+    parser.add_argument(
+        "--total-variation-stride",
+        type=int,
+        default=5,
+        help="Apply total variation every N epochs after it starts (default: 5)",
+    )
+    parser.add_argument(
         "--continue-recon",
         action="store_true",
         default=False,
@@ -1017,6 +1070,20 @@ if __name__ == "__main__":
         parser.error("--opr true is only supported with lsqml, epie, and rpie")
     if args.opr and args.num_opr_modes < 1:
         parser.error("--num-opr-modes must be >= 1 when --opr is true")
+    if args.total_variation and args.engine not in TV_SUPPORTED_ENGINES:
+        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
+        parser.error(
+            f"--total-variation is only supported with {supported}"
+        )
+    if args.total_variation and (
+        not np.isfinite(args.total_variation_weight)
+        or args.total_variation_weight <= 0
+    ):
+        parser.error("--total-variation-weight must be finite and > 0")
+    if args.total_variation_start < 0:
+        parser.error("--total-variation-start must be >= 0")
+    if args.total_variation_stride < 1:
+        parser.error("--total-variation-stride must be >= 1")
     if args.bin is not None and args.bin < 1:
         parser.error("--bin must be >= 1")
     if args.preprocess:
@@ -1150,6 +1217,10 @@ if __name__ == "__main__":
         reconstruction_positions,
         args.opr,
         args.num_opr_modes,
+        args.total_variation,
+        args.total_variation_weight,
+        args.total_variation_start,
+        args.total_variation_stride,
     )
     print(
         f"Data shape: {data.shape} | Object shape: {recon_object.shape} | Probe shape: {recon_probe.shape}"
