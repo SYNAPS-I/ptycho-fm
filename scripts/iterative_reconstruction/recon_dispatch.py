@@ -18,6 +18,7 @@ import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PTYCHI_RECON = os.path.join(SCRIPT_DIR, "ptychi_recon.py")
+TV_SUPPORTED_ENGINES = {"lsqml", "epie", "rpie", "dm"}
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ class ReconstructionOptions:
     engine: str
     opr: bool
     num_opr_modes: int
+    total_variation: bool
+    total_variation_weight: float
+    total_variation_start: int
+    total_variation_stride: int
     continue_recon: bool
     flip_x_positions: bool
     filter_indices: str | None
@@ -74,6 +79,10 @@ class ReconstructionOptions:
             engine=args.engine,
             opr=args.opr,
             num_opr_modes=args.num_opr_modes,
+            total_variation=args.total_variation,
+            total_variation_weight=args.total_variation_weight,
+            total_variation_start=args.total_variation_start,
+            total_variation_stride=args.total_variation_stride,
             continue_recon=args.continue_recon,
             flip_x_positions=args.flip_x_positions,
             filter_indices=args.filter_indices,
@@ -547,6 +556,18 @@ def build_reconstruction_command(
         command.extend(
             ["--opr", "true", "--num-opr-modes", str(options.num_opr_modes)]
         )
+    if options.total_variation:
+        command.extend(
+            [
+                "--total-variation",
+                "--total-variation-weight",
+                str(options.total_variation_weight),
+                "--total-variation-start",
+                str(options.total_variation_start),
+                "--total-variation-stride",
+                str(options.total_variation_stride),
+            ]
+        )
     if options.bin_frame_shape is not None:
         command.extend(
             [
@@ -757,6 +778,32 @@ def add_common_arguments(
         type=int,
         default=3,
         help="Number of additional OPR probe modes to add when --opr is true",
+    )
+    parser.add_argument(
+        "--total-variation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable object total variation regularization for lsqml, epie, rpie, or dm"
+        ),
+    )
+    parser.add_argument(
+        "--total-variation-weight",
+        type=float,
+        default=1e-2,
+        help="Total variation regularization weight",
+    )
+    parser.add_argument(
+        "--total-variation-start",
+        type=int,
+        default=20,
+        help="First epoch at which to apply total variation",
+    )
+    parser.add_argument(
+        "--total-variation-stride",
+        type=int,
+        default=5,
+        help="Apply total variation every N epochs after it starts",
     )
     parser.add_argument(
         "--continue-recon", action=argparse.BooleanOptionalAction, default=False
@@ -1150,6 +1197,18 @@ def validate_and_normalize_args(
         parser.error("--opr true is only supported with lsqml, epie, and rpie")
     if args.opr and args.num_opr_modes < 1:
         parser.error("--num-opr-modes must be >= 1 when --opr is true")
+    if args.total_variation and args.engine not in TV_SUPPORTED_ENGINES:
+        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
+        parser.error(f"--total-variation is only supported with {supported}")
+    if args.total_variation and (
+        not np.isfinite(args.total_variation_weight)
+        or args.total_variation_weight <= 0
+    ):
+        parser.error("--total-variation-weight must be finite and > 0")
+    if args.total_variation_start < 0:
+        parser.error("--total-variation-start must be >= 0")
+    if args.total_variation_stride < 1:
+        parser.error("--total-variation-stride must be >= 1")
     if args.bin is not None and args.bin < 1:
         parser.error("--bin must be >= 1")
     if args.preprocess:
