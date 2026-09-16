@@ -4,7 +4,6 @@ import argparse
 import glob
 import os
 import re
-import shlex
 import subprocess
 import sys
 import time
@@ -16,9 +15,17 @@ import hdf5plugin  # noqa: F401
 import numpy as np
 import yaml
 
+from ptycho_fm.utils.dispatch import (
+    get_available_gpus,
+    gpu_environment,
+    terminate_processes,
+)
+from ptycho_fm.utils.dispatch import (
+    save_launch_script as save_worker_launch_script,
+)
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PTYCHI_RECON = os.path.join(SCRIPT_DIR, "ptychi_recon.py")
-TV_SUPPORTED_ENGINES = {"lsqml", "epie", "rpie", "dm"}
 
 
 @dataclass(frozen=True)
@@ -143,84 +150,15 @@ def parse_boolean(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected true or false")
 
 
-def run_command(args: Sequence[str]) -> str | None:
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    return result.stdout
-
-
-def query_gpus() -> list[tuple[int, str]]:
-    output = run_command(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,uuid",
-            "--format=csv,noheader,nounits",
-        ]
-    )
-    if output is None:
-        return []
-
-    gpus = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        index, uuid = [part.strip() for part in line.split(",", 1)]
-        gpus.append((int(index), uuid))
-    return gpus
-
-
-def query_busy_gpus(uuid_to_index: dict[str, int]) -> set[int]:
-    output = run_command(
-        [
-            "nvidia-smi",
-            "--query-compute-apps=gpu_uuid,pid",
-            "--format=csv,noheader,nounits",
-        ]
-    )
-    if output is None:
-        return set()
-
-    busy = set()
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        uuid = line.split(",", 1)[0].strip()
-        if uuid in uuid_to_index:
-            busy.add(uuid_to_index[uuid])
-    return busy
-
-
-def get_available_gpus(
-    allowed_gpus: set[int] | None,
-    excluded_gpus: set[int],
-    locally_reserved_gpus: set[int],
-) -> list[int]:
-    gpus = query_gpus()
-    if not gpus:
-        raise RuntimeError("Could not query GPUs with nvidia-smi")
-
-    uuid_to_index = {uuid: index for index, uuid in gpus}
-    busy_gpus = query_busy_gpus(uuid_to_index)
-
-    available = []
-    for gpu_id, _uuid in gpus:
-        if allowed_gpus is not None and gpu_id not in allowed_gpus:
-            continue
-        if gpu_id in excluded_gpus:
-            continue
-        if gpu_id in busy_gpus:
-            continue
-        if gpu_id in locally_reserved_gpus:
-            continue
-        available.append(gpu_id)
-    return available
-
-
-def scan_glob(data_root: str, scan_num: int, pattern: str, recursive: bool) -> list[str]:
+def scan_glob(
+    data_root: str, scan_num: int, pattern: str, recursive: bool
+) -> list[str]:
     scan_token = pattern.format(scan=scan_num, scan_padded=f"{scan_num:04d}")
-    search_path = os.path.join(data_root, "**", scan_token) if recursive else os.path.join(data_root, scan_token)
+    search_path = (
+        os.path.join(data_root, "**", scan_token)
+        if recursive
+        else os.path.join(data_root, scan_token)
+    )
     return sorted(glob.glob(search_path, recursive=recursive))
 
 
@@ -257,8 +195,16 @@ def find_scan_files(
     scan_files = []
     skipped = []
     for scan_num in range(scan_start, scan_end + 1):
-        h5_matches = scan_glob(data_root, scan_num, pattern, recursive) if data_format in ("auto", "h5") else []
-        bin_matches = bin_scan_matches(data_root, scan_num, bin_dir_template, bin_pattern) if data_format in ("auto", "bin") else []
+        h5_matches = (
+            scan_glob(data_root, scan_num, pattern, recursive)
+            if data_format in ("auto", "h5")
+            else []
+        )
+        bin_matches = (
+            bin_scan_matches(data_root, scan_num, bin_dir_template, bin_pattern)
+            if data_format in ("auto", "bin")
+            else []
+        )
 
         if h5_matches:
             matches = h5_matches
@@ -326,7 +272,9 @@ def detect_num_probe_modes(probe_path: str, csv_probe_side: int) -> int:
     if probe_path.endswith(".hdf5"):
         with h5py.File(probe_path, "r") as f:
             if "probe" not in f:
-                raise KeyError(f"Probe file {probe_path} does not contain dataset 'probe'")
+                raise KeyError(
+                    f"Probe file {probe_path} does not contain dataset 'probe'"
+                )
             return probe_modes_from_shape(f["probe"].shape, probe_path)
 
     raise ValueError(f"Unsupported probe file format for ptychi_recon.py: {probe_path}")
@@ -347,7 +295,9 @@ def read_frame_count(data_path: str) -> int:
         return int(f["/entry/data/data"].shape[0])
 
 
-def make_range_jobs(args: argparse.Namespace) -> tuple[list[ReconJob], list[SkippedScan]]:
+def make_range_jobs(
+    args: argparse.Namespace,
+) -> tuple[list[ReconJob], list[SkippedScan]]:
     scan_files, skipped = find_scan_files(
         args.data_root,
         args.scan_start,
@@ -362,35 +312,54 @@ def make_range_jobs(args: argparse.Namespace) -> tuple[list[ReconJob], list[Skip
     jobs = []
     for scan_num, scan_format, data_path in scan_files:
         if args.expected_frames is not None:
-            frame_count = read_frame_count(data_path) if scan_format == "h5" else len(glob.glob(os.path.join(data_path, args.bin_pattern)))
+            frame_count = (
+                read_frame_count(data_path)
+                if scan_format == "h5"
+                else len(glob.glob(os.path.join(data_path, args.bin_pattern)))
+            )
             if frame_count != args.expected_frames:
                 print(
                     f"Skipping scan {scan_num}: data shape[0]={frame_count}, "
                     f"expected {args.expected_frames}"
                 )
-                skipped.append(SkippedScan(scan_num, f"frame_count_{frame_count}_expected_{args.expected_frames}"))
+                skipped.append(
+                    SkippedScan(
+                        scan_num,
+                        f"frame_count_{frame_count}_expected_{args.expected_frames}",
+                    )
+                )
                 continue
 
         context = build_context(args.data_root, scan_num, data_path)
         if scan_format == "bin":
             context["data_dir"] = data_path
         probe_path = resolve_template(args.probe_template, context["data_dir"], context)
-        positions_path = resolve_template(args.positions_template, context["data_dir"], context)
+        positions_path = resolve_template(
+            args.positions_template, context["data_dir"], context
+        )
         output_dir = resolve_template(args.output_template, args.output_dir, context)
         object_name = args.object_template.format(**context)
 
         if not os.path.isfile(probe_path):
-            raise FileNotFoundError(f"Probe file not found for scan {scan_num}: {probe_path}")
+            raise FileNotFoundError(
+                f"Probe file not found for scan {scan_num}: {probe_path}"
+            )
         if not os.path.isfile(positions_path):
-            raise FileNotFoundError(f"Positions file not found for scan {scan_num}: {positions_path}")
+            raise FileNotFoundError(
+                f"Positions file not found for scan {scan_num}: {positions_path}"
+            )
 
         jobs.append(
             ReconJob(
                 scan=scan_num,
                 data_path=data_path,
-                data_dir=os.path.dirname(data_path) if scan_format == "h5" else data_path,
+                data_dir=os.path.dirname(data_path)
+                if scan_format == "h5"
+                else data_path,
                 data_format=scan_format,
-                scan_glob=os.path.basename(data_path) if scan_format == "h5" else args.scan_glob,
+                scan_glob=os.path.basename(data_path)
+                if scan_format == "h5"
+                else args.scan_glob,
                 bin_dir_template="." if scan_format == "bin" else args.bin_dir_template,
                 probe_path=probe_path,
                 positions_path=positions_path,
@@ -509,8 +478,7 @@ def save_skipped_scans(skipped: list[SkippedScan], output_path: str) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("scan,reason\n")
         f.writelines(
-            f"{skipped_scan.scan},{skipped_scan.reason}\n"
-            for skipped_scan in skipped
+            f"{skipped_scan.scan},{skipped_scan.reason}\n" for skipped_scan in skipped
         )
     print(f"Saved skipped scan list to {output_path}")
 
@@ -553,9 +521,7 @@ def build_reconstruction_command(
         options.engine,
     ]
     if options.opr:
-        command.extend(
-            ["--opr", "true", "--num-opr-modes", str(options.num_opr_modes)]
-        )
+        command.extend(["--opr", "true", "--num-opr-modes", str(options.num_opr_modes)])
     if options.total_variation:
         command.extend(
             [
@@ -611,17 +577,7 @@ def save_launch_script(
 ) -> str:
     object_name = os.path.basename(job.object_name) or f"scan_{job.scan}"
     script_path = os.path.join(job.output_dir, f"{object_name}_launch.sh")
-    script = (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n\n"
-        f"export OMP_NUM_THREADS={shlex.quote(str(scheduler.omp_num_threads))}\n"
-        f"export CUDA_VISIBLE_DEVICES={shlex.quote(str(gpu_id))}\n"
-        f"cd -- {shlex.quote(os.getcwd())}\n"
-        f"exec {shlex.join(command)}\n"
-    )
-    with open(script_path, "w", encoding="utf-8") as file:
-        file.write(script)
-    os.chmod(script_path, 0o755)
+    save_worker_launch_script(script_path, command, gpu_id, scheduler.omp_num_threads)
     print(f"Saved reconstruction launch command to {script_path}")
     return script_path
 
@@ -633,9 +589,7 @@ def launch_reconstruction(
     gpu_id: int,
 ) -> subprocess.Popen:
     os.makedirs(job.output_dir, exist_ok=True)
-    env = os.environ.copy()
-    env["OMP_NUM_THREADS"] = str(scheduler.omp_num_threads)
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env = gpu_environment(gpu_id, scheduler.omp_num_threads)
     command = build_reconstruction_command(job, reconstruction)
     save_launch_script(job, command, scheduler, gpu_id)
 
@@ -709,10 +663,13 @@ class Scheduler:
             self.dispatch_pending()
 
     def drain(self) -> int:
-        while self.pending or self.active:
-            self.step()
-            if self.pending or self.active:
-                time.sleep(self.options.poll_interval)
+        try:
+            while self.pending or self.active:
+                self.step()
+                if self.pending or self.active:
+                    time.sleep(self.options.poll_interval)
+        finally:
+            terminate_processes([process for process, _, _ in self.active])
         return self.failures
 
 
@@ -783,9 +740,7 @@ def add_common_arguments(
         "--total-variation",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help=(
-            "Enable object total variation regularization for lsqml, epie, rpie, or dm"
-        ),
+        help="Enable object total variation regularization",
     )
     parser.add_argument(
         "--total-variation-weight",
@@ -935,7 +890,9 @@ def add_range_arguments(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="Input data format. auto checks for HDF5 first, then binary directories.",
     )
-    parser.add_argument("--scan-start", type=int, required=True, help="First scan number")
+    parser.add_argument(
+        "--scan-start", type=int, required=True, help="First scan number"
+    )
     parser.add_argument(
         "--scan-end", type=int, required=True, help="Last scan number, inclusive"
     )
@@ -1038,8 +995,7 @@ def add_watch_arguments(parser: argparse.ArgumentParser) -> None:
         poll_interval=5.0,
         expected_frames_help="Skip files with a different frame count",
         skipped_scans_help=(
-            "CSV file for skipped scans/files; defaults to "
-            "output-dir/skipped_scans.csv"
+            "CSV file for skipped scans/files; defaults to output-dir/skipped_scans.csv"
         ),
     )
 
@@ -1197,12 +1153,8 @@ def validate_and_normalize_args(
         parser.error("--opr true is only supported with lsqml, epie, and rpie")
     if args.opr and args.num_opr_modes < 1:
         parser.error("--num-opr-modes must be >= 1 when --opr is true")
-    if args.total_variation and args.engine not in TV_SUPPORTED_ENGINES:
-        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
-        parser.error(f"--total-variation is only supported with {supported}")
     if args.total_variation and (
-        not np.isfinite(args.total_variation_weight)
-        or args.total_variation_weight <= 0
+        not np.isfinite(args.total_variation_weight) or args.total_variation_weight <= 0
     ):
         parser.error("--total-variation-weight must be finite and > 0")
     if args.total_variation_start < 0:
@@ -1268,9 +1220,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     config_path, cli_arguments = extract_config_path(raw_arguments, root_parser)
     config = (
-        load_yaml_config(config_path, root_parser)
-        if config_path is not None
-        else {}
+        load_yaml_config(config_path, root_parser) if config_path is not None else {}
     )
 
     explicit_mode = None
@@ -1366,7 +1316,9 @@ def run_watch(args: argparse.Namespace) -> int:
             and final_file is not None
             and final_file in state.known_files
         ):
-            already_pending = any(job.data_path == final_file for job in scheduler.pending)
+            already_pending = any(
+                job.data_path == final_file for job in scheduler.pending
+            )
             already_active = any(
                 job.data_path == final_file
                 for _process, job, _gpu_id in scheduler.active
