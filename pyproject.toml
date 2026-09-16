@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "cmcrameri>=1.9",
     "h5py>=3.15.0",
+    "hdf5plugin>=6.0.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "onnx>=1.17.0",
@@ -21,6 +22,9 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.22.2",
 ]
+
+[tool.uv.sources]
+ptychi = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git", branch = "main" }
 
 [project.scripts]
 ptycho-fm-train = "ptycho_fm.train:main"

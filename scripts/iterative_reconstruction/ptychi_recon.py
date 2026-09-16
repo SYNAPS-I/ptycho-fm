@@ -10,8 +10,6 @@ import numpy as np
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-TV_SUPPORTED_ENGINES = {"lsqml", "epie", "rpie", "dm"}
-
 
 def resolve_template_path(template: str, base_dir: str, scan_num: int) -> str:
     path = template.format(scan=scan_num, scan_padded=f"{scan_num:04d}")
@@ -483,13 +481,6 @@ def run_ptychi_reconstruction(
     total_variation_stride: int = 5,
 ):
     """Run ptychi reconstruction with pre-loaded data."""
-    if total_variation and engine not in TV_SUPPORTED_ENGINES:
-        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
-        raise ValueError(
-            f"Total variation regularization is only supported with {supported}; "
-            f"got {engine}"
-        )
-
     # Import torch and ptychi AFTER data is loaded
     import torch
     from ptychi import api
@@ -955,10 +946,7 @@ if __name__ == "__main__":
         "--total-variation",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help=(
-            "Enable object total variation regularization for lsqml, epie, rpie, or dm "
-            "(default: disabled)"
-        ),
+        help="Enable object total variation regularization (default: disabled)",
     )
     parser.add_argument(
         "--total-variation-weight",
@@ -1070,11 +1058,6 @@ if __name__ == "__main__":
         parser.error("--opr true is only supported with lsqml, epie, and rpie")
     if args.opr and args.num_opr_modes < 1:
         parser.error("--num-opr-modes must be >= 1 when --opr is true")
-    if args.total_variation and args.engine not in TV_SUPPORTED_ENGINES:
-        supported = ", ".join(sorted(TV_SUPPORTED_ENGINES))
-        parser.error(
-            f"--total-variation is only supported with {supported}"
-        )
     if args.total_variation and (
         not np.isfinite(args.total_variation_weight)
         or args.total_variation_weight <= 0

@@ -1,5 +1,6 @@
 import importlib
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -87,9 +88,7 @@ def test_build_reconstruction_command_includes_shared_options():
     assert command[command.index("--bin") + 1] == "2"
 
 
-def test_launch_reconstruction_saves_an_executable_shell_script(
-    tmp_path, monkeypatch
-):
+def test_launch_reconstruction_saves_an_executable_shell_script(tmp_path, monkeypatch):
     job = recon_job(7)
     job = dispatch.ReconJob(
         **{
@@ -125,8 +124,8 @@ def test_launch_reconstruction_saves_an_executable_shell_script(
     assert os.access(script_path, os.X_OK)
     assert "export OMP_NUM_THREADS=6" in script
     assert "export CUDA_VISIBLE_DEVICES=3" in script
-    assert f"cd -- {dispatch.shlex.quote(os.getcwd())}" in script
-    assert f"exec {dispatch.shlex.join(launched['command'])}" in script
+    assert f"cd -- {shlex.quote(os.getcwd())}" in script
+    assert f"exec {shlex.join(launched['command'])}" in script
     assert launched["env"]["OMP_NUM_THREADS"] == "6"
     assert launched["env"]["CUDA_VISIBLE_DEVICES"] == "3"
 
@@ -175,12 +174,10 @@ def test_watch_mode_queues_previous_file_when_a_new_file_arrives(tmp_path):
         previous_file=str(first),
     )
 
-    assert dispatch.observe_new_files(state, {str(first), str(second)}) == [
-        str(first)
+    assert dispatch.observe_new_files(state, {str(first), str(second)}) == [str(first)]
+    assert dispatch.observe_new_files(state, {str(first), str(second), str(third)}) == [
+        str(second)
     ]
-    assert dispatch.observe_new_files(
-        state, {str(first), str(second), str(third)}
-    ) == [str(second)]
     assert state.previous_file == str(third)
     assert state.queue_previous_on_shutdown
 
@@ -225,31 +222,33 @@ def test_combined_parser_accepts_range_and_watch_arguments(tmp_path):
     assert watch_args.mode == "watch"
 
 
-def test_total_variation_rejects_engine_without_ptychi_support():
-    with pytest.raises(SystemExit):
-        dispatch.parse_args(
-            [
-                "range",
-                "--data-root",
-                "/data",
-                "--scan-start",
-                "1",
-                "--scan-end",
-                "1",
-                "--probe-template",
-                "probe.npy",
-                "--positions-template",
-                "positions.csv",
-                "--crop",
-                "0",
-                "3",
-                "0",
-                "3",
-                "--engine",
-                "raar",
-                "--total-variation",
-            ]
-        )
+def test_total_variation_accepts_raar_engine():
+    args = dispatch.parse_args(
+        [
+            "range",
+            "--data-root",
+            "/data",
+            "--scan-start",
+            "1",
+            "--scan-end",
+            "1",
+            "--probe-template",
+            "probe.npy",
+            "--positions-template",
+            "positions.csv",
+            "--crop",
+            "0",
+            "3",
+            "0",
+            "3",
+            "--engine",
+            "raar",
+            "--total-variation",
+        ]
+    )
+
+    assert args.engine == "raar"
+    assert args.total_variation
 
 
 def test_yaml_config_can_supply_mode_and_all_required_range_arguments(tmp_path):

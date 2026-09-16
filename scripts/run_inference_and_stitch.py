@@ -1,225 +1,253 @@
 import argparse
-import os
+from pathlib import Path
 
-import h5py
-import numpy as np
-import tifffile
 import torch
-import yaml
 from ptychi.image_proc import place_patches_fourier_shift
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ptycho_fm.data import PtychographyDataset
-from ptycho_fm.model.model import PtychoFM
+from ptycho_fm.data import CombinedDataset
+from ptycho_fm.utils.inference import (
+    build_ptychography_dataloader,
+    crop_patch_borders,
+    iter_object_patch_predictions,
+    load_checkpoint,
+    load_config,
+    load_normalization_map,
+    object_name_from_data_path,
+    resolve_inference_model,
+    resolve_normalization,
+    save_stitched_outputs,
+)
 
-
-def load_config(path: str) -> dict:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def resolve_model_and_size(config: dict):
-    model_cfg = config["model"]
-    img_size = model_cfg["encoder"]["img_size"]
-    model = PtychoFM(config=model_cfg)
-    return model, img_size
-
-
-def compute_dp_max(dp_dataset, chunk_size: int = 256) -> float:
-    total = dp_dataset.shape[0]
-    max_val = 0.0
-    for start in range(0, total, chunk_size):
-        end = min(start + chunk_size, total)
-        chunk = dp_dataset[start:end]
-        chunk_max = float(np.max(chunk))
-        max_val = max(max_val, chunk_max)
-    return max_val
-
-
-def load_checkpoint(model, checkpoint_path: str, device: torch.device) -> None:
-    state = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-
-
-def build_dataloader(data_path: str, config: dict, normalization_value: float, batch_size: int):
-    data_cfg = config.get("data", {})
-    dataset = PtychographyDataset(
-        data_path,
-        scale=data_cfg.get("scale", 100000.0),
-        normalization_dict_path=None,
-        default_normalization=1.0,
-        apply_noise=data_cfg.get("test_apply_noise", False),
-        cache_object=data_cfg.get("cache_object", True),
-        max_probe_modes=data_cfg.get("max_probe_modes", 8),
-        max_OPR_modes=data_cfg.get("max_OPR_modes", 1),
-        cache_memory_budget_mb=data_cfg.get("cache_memory_budget_mb", 512),
-    )
-    dataset.normalization = normalization_value
-
-    dataloader_kwargs = {
-        "batch_size": batch_size,
-        "num_workers": 0,
-        "pin_memory": False,
-    }
-    return dataset, DataLoader(dataset, shuffle=False, **dataloader_kwargs)
+build_dataloader = build_ptychography_dataloader
+resolve_model_and_size = resolve_inference_model
 
 
 def run_inference_and_stitch(
-    model,
-    dataloader,
+    model: torch.nn.Module,
+    dataloader: DataLoader,
     positions: torch.Tensor,
     object_shape,
     central_crop: int,
     pad: int,
     device: torch.device,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     pred_amp_object = torch.zeros(object_shape, device="cpu")
     pred_ph_object = torch.zeros(object_shape, device="cpu")
     buffer = torch.zeros(object_shape, device="cpu")
 
-    model.to(device)
-    model.eval()
-
     scan_idx = 0
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Inference", unit="batch"):
-            diff_amp, _amp_patch, _ph_patch, probe, _probe_pos, norm, scale = batch
-            batch_size = diff_amp.size(0)
+    batches = tqdm(dataloader, desc="Inference", unit="batch")
+    for output_amp, output_ph in iter_object_patch_predictions(model, batches, device):
+        batch_size = output_amp.size(0)
+        amp_patches = crop_patch_borders(output_amp, central_crop)
+        ph_patches = crop_patch_borders(output_ph, central_crop)
+        batch_positions = positions[scan_idx : scan_idx + batch_size]
 
-            input_diff = diff_amp.to(device)
-            input_probe = torch.view_as_real(probe.clone().detach()).to(device)
-            input_norm = norm.to(device)
-            input_scale = scale.to(device)
+        pred_amp_object = place_patches_fourier_shift(
+            pred_amp_object,
+            batch_positions,
+            amp_patches,
+            op="add",
+            adjoint_mode=False,
+            pad=pad,
+        )
+        pred_ph_object = place_patches_fourier_shift(
+            pred_ph_object,
+            batch_positions,
+            ph_patches,
+            op="add",
+            adjoint_mode=False,
+            pad=pad,
+        )
+        buffer = place_patches_fourier_shift(
+            buffer,
+            batch_positions,
+            torch.ones_like(ph_patches),
+            op="add",
+            adjoint_mode=False,
+            pad=pad,
+        )
+        scan_idx += batch_size
 
-            _output_diff, output_amp, output_ph = model(
-                input_diff, input_probe, input_norm, input_scale
-            )
-
-            output_amp = output_amp.squeeze(1).detach().cpu()
-            output_ph = output_ph.squeeze(1).detach().cpu()
-
-            amp_patches = output_amp[:, central_crop:-central_crop, central_crop:-central_crop]
-            ph_patches = output_ph[:, central_crop:-central_crop, central_crop:-central_crop]
-
-            batch_positions = positions[scan_idx : scan_idx + batch_size]
-
-            pred_amp_object = place_patches_fourier_shift(
-                pred_amp_object,
-                batch_positions,
-                amp_patches,
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
-            )
-            pred_ph_object = place_patches_fourier_shift(
-                pred_ph_object,
-                batch_positions,
-                ph_patches,
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
-            )
-            buffer = place_patches_fourier_shift(
-                buffer,
-                batch_positions,
-                torch.ones_like(ph_patches),
-                op="add",
-                adjoint_mode=False,
-                pad=pad,
-            )
-
-            scan_idx += batch_size
-
+    if scan_idx != len(positions):
+        raise ValueError(
+            f"Stitched {scan_idx} predictions but received {len(positions)} positions"
+        )
     pred_amp_object = pred_amp_object / torch.clip(buffer, min=1)
     pred_ph_object = pred_ph_object / torch.clip(buffer, min=1)
     return pred_amp_object, pred_ph_object
 
 
-def main():
+def discover_data_files(input_path: str | Path, num_files: int | None) -> list[Path]:
+    input_path = Path(input_path)
+    if input_path.is_file():
+        files = [input_path]
+    elif input_path.is_dir():
+        files = list(CombinedDataset.find_paired_files(input_path))
+    else:
+        raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+    for path in files:
+        object_name_from_data_path(path)
+    if num_files is not None:
+        if num_files < 1:
+            raise ValueError(f"--num-files must be >= 1, got {num_files}")
+        files = files[:num_files]
+    return files
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run inference and stitch predicted patches into a whole-object image."
+        description=(
+            "Run inference on one *_dp.hdf5 file or a directory of paired files, "
+            "then save stitched amplitude and phase objects."
+        )
     )
-    parser.add_argument("--config", required=True, help="Path to config YAML.")
-    parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")
-    parser.add_argument("--data", required=True, help="Path to *_dp.hdf5 data file.")
-    parser.add_argument("--output", required=True, help="Path to output TIFF.")
+    parser.add_argument("input_path", help="Input *_dp.hdf5 file or data directory")
+    parser.add_argument("--config", required=True, help="Path to config YAML")
+    parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
     parser.add_argument(
-        "--output-kind",
-        default="phase",
-        choices=["phase", "amplitude"],
-        help="Which stitched output to write.",
+        "--output-dir", required=True, help="Directory for output .npy files"
+    )
+    normalization_group = parser.add_mutually_exclusive_group()
+    normalization_group.add_argument(
+        "--normalization-file",
+        help="Pickle mapping from object names to normalization values",
+    )
+    normalization_group.add_argument(
+        "--normalization-value",
+        type=float,
+        help="Single-file normalization value",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
-        help="Batch size for inference (default: training batch size or 256).",
+        help="Inference batch size (default: training batch size or 256)",
+    )
+    parser.add_argument(
+        "--num-files",
+        type=int,
+        default=None,
+        help="Process only the first N files from a directory",
     )
     parser.add_argument(
         "--central-crop",
         type=int,
         default=None,
-        help="Pixels to crop from each border before stitching (default: img_size // 4).",
+        help="Pixels removed from each predicted patch border before stitching",
+    )
+    parser.add_argument(
+        "--object-crop",
+        type=int,
+        default=100,
+        help="Pixels removed from each stitched object border before saving (default: 100)",
     )
     parser.add_argument(
         "--pad",
         type=int,
         default=32,
-        help="Padding for Fourier-shift placement (default: 32).",
+        help="Padding for Fourier-shift placement (default: 32)",
+    )
+    parser.add_argument(
+        "--apply-noise",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override data.test_apply_noise from the config",
     )
     parser.add_argument(
         "--device",
         default=None,
-        help="Device override, e.g. 'cuda' or 'cpu'.",
+        help="Device override, for example 'cuda' or 'cpu'",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
     model, img_size = resolve_model_and_size(config)
-
     device = torch.device(
-        args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
     )
+    load_checkpoint(model, args.checkpoint, device)
 
     batch_size = args.batch_size
     if batch_size is None:
         batch_size = config.get("training", {}).get("batch_size", 256)
+    if batch_size < 1:
+        parser.error("--batch-size must be >= 1")
 
-    if args.central_crop is None:
-        central_crop = config.get("training", {}).get("test_plot_central_crop", img_size // 4)
-    else:
-        central_crop = args.central_crop
+    central_crop = args.central_crop
+    if central_crop is None:
+        central_crop = config.get("training", {}).get(
+            "test_plot_central_crop", img_size // 4
+        )
+    if central_crop < 0:
+        parser.error("--central-crop must be >= 0")
+    if args.object_crop < 0:
+        parser.error("--object-crop must be >= 0")
+    if args.pad < 0:
+        parser.error("--pad must be >= 0")
 
-    with h5py.File(args.data, "r") as f:
-        if "dp" not in f:
-            raise KeyError(f"Missing 'dp' dataset in {args.data}")
-        normalization_value = compute_dp_max(f["dp"])
-
-    dataset, dataloader = build_dataloader(
-        args.data, config, normalization_value, batch_size
+    data_files = discover_data_files(args.input_path, args.num_files)
+    if args.normalization_value is not None and not Path(args.input_path).is_file():
+        parser.error("--normalization-value is only valid for single-file inference")
+    normalization_map = (
+        load_normalization_map(args.normalization_file)
+        if args.normalization_file is not None
+        else None
     )
 
-    object_shape = dataset.object_shape
-    positions = dataset.get_probe_positions()
+    output_names = [object_name_from_data_path(path) for path in data_files]
+    if len(output_names) != len(set(output_names)):
+        parser.error(
+            "input files contain duplicate object names, which would overwrite outputs"
+        )
 
-    load_checkpoint(model, args.checkpoint, device)
-
-    pred_amp_object, pred_ph_object = run_inference_and_stitch(
-        model,
-        dataloader,
-        positions,
-        object_shape,
-        central_crop,
-        args.pad,
-        device,
-    )
-
-    stitched = pred_ph_object if args.output_kind == "phase" else pred_amp_object
-    output_dir = os.path.dirname(args.output)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    tifffile.imwrite(args.output, stitched.numpy().astype(np.float32))
+    for index, (data_path, object_name) in enumerate(
+        zip(data_files, output_names, strict=True), start=1
+    ):
+        normalization_value = resolve_normalization(
+            data_path,
+            normalization_map=normalization_map,
+            normalization_value=args.normalization_value,
+        )
+        print(
+            f"[{index}/{len(data_files)}] Processing {object_name} "
+            f"with normalization {normalization_value:g}"
+        )
+        dataset, dataloader = build_dataloader(
+            data_path,
+            config,
+            normalization_value,
+            batch_size,
+            apply_noise=args.apply_noise,
+        )
+        try:
+            pred_amp_object, pred_ph_object = run_inference_and_stitch(
+                model,
+                dataloader,
+                dataset.get_probe_positions(),
+                dataset.object_shape,
+                central_crop,
+                args.pad,
+                device,
+            )
+            amp_path, ph_path = save_stitched_outputs(
+                args.output_dir,
+                object_name,
+                pred_amp_object,
+                pred_ph_object,
+                args.object_crop,
+            )
+            print(f"Saved {amp_path}")
+            print(f"Saved {ph_path}")
+        finally:
+            dataset.close()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
