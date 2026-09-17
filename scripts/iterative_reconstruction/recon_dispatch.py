@@ -15,6 +15,8 @@ import hdf5plugin  # noqa: F401
 import numpy as np
 import yaml
 
+from ptycho_fm.utils.cli import parse_boolean
+
 from ptycho_fm.utils.dispatch import (
     get_available_gpus,
     gpu_environment,
@@ -138,16 +140,6 @@ class WatchState:
 
 
 ActiveJob = tuple[subprocess.Popen, ReconJob, int]
-
-
-def parse_boolean(value: str) -> bool:
-    """Parse explicit true/false CLI values while also supporting a bare flag."""
-    normalized = value.lower()
-    if normalized == "true":
-        return True
-    if normalized == "false":
-        return False
-    raise argparse.ArgumentTypeError("expected true or false")
 
 
 def scan_glob(

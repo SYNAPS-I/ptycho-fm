@@ -404,7 +404,7 @@ class ResNetDecoder256(nn.Module):
             in_ch = out_ch
 
         # Final output layer
-        self.output = nn.Conv2d(base_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        self.output = nn.Linear(base_channels, out_channels)
 
         # Optional output activation
         if output_activation == 'sigmoid':
@@ -415,7 +415,7 @@ class ResNetDecoder256(nn.Module):
             self.output_activation = CustomActivation()
         elif output_activation == 'atan2':
             # Two output channels (sin, cos components); atan2 collapses to 1-channel phase in [-pi, pi]
-            self.output = nn.Conv2d(base_channels, 2, kernel_size=1, stride=1, padding=0)
+            self.output = nn.Linear(base_channels, 2)
             self.output_activation = Atan2Activation()
         elif output_activation is None:
             self.output_activation = nn.Identity()
@@ -425,6 +425,6 @@ class ResNetDecoder256(nn.Module):
     def forward(self, x):
         for stage in self.stages:
             x = stage(x)
-        x = self.output(x)
+        x = self.output(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         x = self.output_activation(x)
         return x

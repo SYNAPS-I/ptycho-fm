@@ -209,3 +209,23 @@ def estimate_scan_overlap(positions, probe_fwhm, k=1):
         "local_spacing": local_spacing,
         "local_overlap": local_overlap,
     }
+
+
+def calculate_reconstruction_pixel_size(energy=9.659, distance=1, npix=256, det_pixel_size=75e-6):
+    """Calculates the reconstruction pixel size from the experiment geometry.
+    
+    Args:
+        energy : float
+            Photon energy in keV
+        distance : float
+            Detector distance from the sample in meters
+        npix : int
+            Number of pixels in the detector frame (assumes square frame and 
+            thus square pixels)
+        det_pixel_size : float
+            Detector pixel size in meters
+
+    Returns: 
+        Reconstruction pixel size
+    """
+    return ((12.398 / energy) * 1e-10 * distance) / (npix * det_pixel_size)
