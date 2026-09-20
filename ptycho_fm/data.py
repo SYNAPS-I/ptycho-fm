@@ -77,9 +77,15 @@ class _SampleReader(Dataset):
         max_probe_modes=8,
         max_OPR_modes=1,
         cache_memory_budget_mb=512,
+        deterministic_noise=False,
+        noise_seed=0,
     ):
         self.scale = scale
         self.apply_noise = apply_noise
+        self.deterministic_noise = deterministic_noise
+        self.noise_seed = int(noise_seed)
+        if self.noise_seed < 0:
+            raise ValueError("noise_seed must be non-negative")
         self.cache_object = cache_object
         self.max_probe_modes = max_probe_modes
         self.max_OPR_modes = max_OPR_modes
@@ -139,7 +145,7 @@ class _SampleReader(Dataset):
             return read()
         return self._array_cache.load(key, estimated_bytes, read)
 
-    def _read_sample(self, dp_path, para_path, index, normalization):
+    def _read_sample(self, dp_path, para_path, index, normalization, sample_id=None):
         with (
             h5py.File(dp_path, "r", libver="latest", swmr=True) as dp,
             h5py.File(para_path, "r", libver="latest", swmr=True) as para,
@@ -149,7 +155,10 @@ class _SampleReader(Dataset):
                 raise IndexError(index)
             image = (dp["dp"][index] / normalization) * self.scale
             if self.apply_noise:
-                image = np.random.default_rng().poisson(image)
+                identity = index if sample_id is None else sample_id
+                seed = self.noise_seed + identity if self.deterministic_noise else None
+                rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
+                image = rng.poisson(image)
             diffraction_amp = torch.from_numpy(np.sqrt(image.astype(np.float32))).unsqueeze(0)
             position = self._positions(para, num_patterns, object_shape, index)
 
@@ -209,9 +218,12 @@ class PtychographyDataset(_SampleReader):
         max_OPR_modes: int = 1,
         object_name: str | None = None,
         cache_memory_budget_mb: float = 512,
+        deterministic_noise: bool = False,
+        noise_seed: int = 0,
     ):
         super().__init__(
-            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb,
+            deterministic_noise=deterministic_noise, noise_seed=noise_seed,
         )
         self.file_path = Path(file_path)
         self.normalization_dict_path = normalization_dict_path
@@ -367,9 +379,12 @@ class CombinedDataset(_SampleReader):
         scale=10000.0, normalization_dict_path=None, default_normalization=100000.0,
         apply_noise=True, cache_object=True, max_probe_modes=8, max_OPR_modes=1,
         cache_memory_budget_mb=512,
+        deterministic_noise=False,
+        noise_seed=0,
     ):
         super().__init__(
-            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb,
+            deterministic_noise=deterministic_noise, noise_seed=noise_seed,
         )
         self.data_dir = Path(file_paths)
         self.file_paths = self.find_paired_files(self.data_dir)
@@ -436,7 +451,7 @@ class CombinedDataset(_SampleReader):
             )
             self.debug_call_count += 1
         para_path = path.with_name(f"{path.stem[:-3]}_para{path.suffix}")
-        return self._read_sample(path, para_path, local_idx, self._norm_by_path[path])
+        return self._read_sample(path, para_path, local_idx, self._norm_by_path[path], sample_id=idx)
 
 
 class RankShardedSubset(Dataset):

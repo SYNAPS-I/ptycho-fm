@@ -5,23 +5,16 @@ import os
 import pickle
 import socket
 from datetime import UTC, datetime
-from typing import Literal
 
 import numpy as np
 import torch
 import torch.distributed as dist
+import wandb
 import yaml
 from torch import nn, optim
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Subset, random_split
 from torchinfo import summary
-
-try:
-    from mpi4py import MPI
-except ImportError:
-    MPI = None
-
-import wandb
-from torch.utils.data import DataLoader, DistributedSampler, Subset, random_split
 
 from ptycho_fm.custom_loss import (
     CombinedLoss,
@@ -30,12 +23,19 @@ from ptycho_fm.custom_loss import (
     TotalFluxLoss,
     WeightedLoss,
 )
-from ptycho_fm.data import CombinedDataset, PtychographyDataset, RankShardedSubset
+from ptycho_fm.data import CombinedDataset, PtychographyDataset
 from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
 from ptycho_fm.mlflow_logger import MLflowLogger
 from ptycho_fm.model.model import PtychoFM, PtychoFMCoupledAmpPh, PtychoFMReIm
-from ptycho_fm.prefetcher import CUDAPrefetcher
 from ptycho_fm.training import Trainer
+from ptycho_fm.utils.config import load_config as load_yaml_config
+from ptycho_fm.utils.data import build_train_loader as _build_train_loader
+from ptycho_fm.utils.data import build_val_loader as _build_val_loader
+from ptycho_fm.utils.data import dataset_fingerprint, validate_loader_lengths
+from ptycho_fm.utils.distributed import cleanup_distributed, init_distributed
+from ptycho_fm.utils.flops import ACCOUNTING_VERSION, PtychoFMFlopsCalculator
+from ptycho_fm.utils.progress import TrainingProgress, append_logs
+from ptycho_fm.utils.schedulers import build_scheduler
 
 
 def override_output_norm_from_config(model, model_config):
@@ -79,8 +79,7 @@ def main() -> None:
     def load_config(config_path='config.yaml'):
         """Load configuration from YAML file."""
         config_path = resolve_config_path(config_path)
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
+        config = load_yaml_config(config_path)
         if config.get('trainer', {}).get('run_num') is None:
             # Ensure run folder name is "run_yyyymmdd_hhmmss"
             config.setdefault('trainer', {})['run_num'] = datetime.now(tz=UTC).astimezone().strftime("_%Y%m%d_%H%M%S")
@@ -138,275 +137,8 @@ def main() -> None:
                 break
         return schedule['fractions'][idx]
 
-    def _subset_training_subset(train_subset_base, fraction):
-        total = len(train_subset_base)
-        subset_size = int(total * fraction)
-        if subset_size < 1:
-            raise ValueError(
-                f"training.data_subsetting_schedule fraction {fraction} results in 0 samples. "
-                "Increase the fraction or use a larger dataset."
-            )
-        if hasattr(train_subset_base, 'indices'):
-            base_indices = train_subset_base.indices
-            if isinstance(base_indices, torch.Tensor):
-                base_indices = base_indices.tolist()
-            return Subset(train_subset_base.dataset, base_indices[:subset_size])
-        return Subset(train_subset_base, list(range(subset_size)))
-
-    def _build_train_loader(
-        fraction: float,
-        train_subset_base: Subset,
-        sharding_strategy: str,
-        rank: int,
-        world_size: int,
-        debug_mode: bool,
-        train_dataloader_kwargs_base: dict,
-        random_seed: int,
-        device: torch.device,
-        use_cuda_prefetcher: bool,
-        drop_last: bool,
-    ):
-        train_subset_epoch = _subset_training_subset(train_subset_base, fraction)
-
-        if sharding_strategy == 'static':
-            train_dataset = RankShardedSubset(
-                train_subset_epoch,
-                rank,
-                world_size,
-                debug=debug_mode,
-                subset_type='train'
-            )
-            train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
-            train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-            train_sampler = None
-        elif sharding_strategy == 'dynamic':
-            train_dataset = train_subset_epoch
-            train_sampler = DistributedSampler(
-                train_dataset,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=True,
-                seed=random_seed,
-                drop_last=drop_last,
-            )
-            train_dataloader_kwargs = train_dataloader_kwargs_base.copy()
-            train_dataloader_kwargs['sampler'] = train_sampler
-            train_dataloader_kwargs['shuffle'] = False
-            train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
-        else:
-            raise ValueError(
-                f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'"
-            )
-
-        if torch.cuda.is_available() and use_cuda_prefetcher:
-            train_prefetcher = CUDAPrefetcher(train_loader, device)
-        else:
-            train_prefetcher = train_loader
-
-        return (
-            train_dataset,
-            train_loader,
-            train_sampler,
-            train_prefetcher,
-            train_subset_epoch,
-            train_dataloader_kwargs,
-        )
-
-    def _build_val_loader(
-        val_subset: Subset,
-        sharding_strategy: str,
-        rank: int,
-        world_size: int,
-        debug_mode: bool,
-        val_dataloader_kwargs_base: dict,
-        random_seed: int,
-        device: torch.device,
-        use_cuda_prefetcher: bool,
-        drop_last: bool,
-    ):
-        if sharding_strategy == 'static':
-            val_dataset = RankShardedSubset(
-                val_subset,
-                rank,
-                world_size,
-                debug=debug_mode,
-                subset_type='val'
-            )
-            val_sampler = None
-            val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
-            val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-        elif sharding_strategy == 'dynamic':
-            val_dataset = val_subset
-            val_sampler = DistributedSampler(
-                val_dataset,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=False,
-                seed=random_seed,
-                drop_last=drop_last,
-            )
-            val_dataloader_kwargs = val_dataloader_kwargs_base.copy()
-            val_dataloader_kwargs['sampler'] = val_sampler
-            val_dataloader_kwargs['shuffle'] = False
-            val_loader = DataLoader(val_dataset, **val_dataloader_kwargs)
-        else:
-            raise ValueError(
-                f"Invalid sharding_strategy: {sharding_strategy}. Must be 'static' or 'dynamic'"
-            )
-
-        if torch.cuda.is_available() and use_cuda_prefetcher:
-            val_prefetcher = CUDAPrefetcher(val_loader, device)
-        else:
-            val_prefetcher = val_loader
-
-        return val_dataset, val_loader, val_sampler, val_prefetcher, val_dataloader_kwargs
-
-    # ────────────────────────────────────────────────────────────────────────────────
-    # Minimal, robust distributed setup for SLURM or torchrun
-    # ────────────────────────────────────────────────────────────────────────────────
-    def ensure_env_from_polaris():
-        """Populate torchrun-style env vars from SLURM or MPI if missing."""
-        if MPI is None:
-            raise ImportError("MPI is not installed. Please install MPI to use this function.")
-        size = MPI.COMM_WORLD.Get_size()
-        rank = MPI.COMM_WORLD.Get_rank()
-        os.environ["RANK"] = str(rank)
-        os.environ["WORLD_SIZE"] = str(size)
-        local_rank = os.environ['PMI_LOCAL_RANK'] if 'PMI_LOCAL_RANK' in os.environ else rank % 4
-        os.environ["LOCAL_RANK"] = str(local_rank)
-
-        if rank == 0:
-            master_addr = socket.gethostname()
-        else:
-            master_addr = None
-
-        master_addr = MPI.COMM_WORLD.bcast(master_addr, root=0)
-        os.environ["MASTER_ADDR"] = master_addr
-        os.environ["MASTER_PORT"] = str(2345)
-        
-
-    def ensure_env_from_slurm():
-        """Populate torchrun-style env vars from SLURM if missing."""
-        if "RANK" not in os.environ and "SLURM_PROCID" in os.environ:
-            os.environ["RANK"] = os.environ["SLURM_PROCID"]
-        if "WORLD_SIZE" not in os.environ and "SLURM_NTASKS" in os.environ:
-            os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
-        if "LOCAL_RANK" not in os.environ and "SLURM_LOCALID" in os.environ:
-            os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
-            
-
-    def init_distributed(platform: str = Literal['polaris', 'slurm']):
-        if platform == 'polaris':
-            return init_distributed_polaris()
-        elif platform == 'slurm':
-            return init_distributed_slurm()
-        else:
-            raise ValueError(f"Invalid platform: {platform}. Must be 'polaris' or 'slurm'")
 
 
-    def init_distributed_polaris():
-        """
-        Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
-        respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
-        """
-        ensure_env_from_polaris()
-
-        world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("PMI_LOCAL_RANK", "0")))
-        rank_env = int(os.environ.get("RANK", "0"))
-
-        dist.init_process_group('nccl', init_method='env://', )
-        
-        if torch.cuda.is_available():
-            nvis = torch.cuda.device_count()
-            # For single-process (world_size=1), always use GPU 0
-            # For distributed training, map local_rank to available GPUs
-            if world_size == 1:
-                mapped_local = 0
-            else:
-                mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
-            torch.cuda.set_device(mapped_local)
-            device = torch.device(f"cuda:{mapped_local}")
-            os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
-        else:
-            mapped_local = 0
-            device = torch.device("cpu")
-
-        return rank_env, world_size, mapped_local, device
-
-
-    def init_distributed_slurm():
-        """
-        Initialize torch.distributed if WORLD_SIZE>1 and bind CUDA to a local device
-        respecting CUDA_VISIBLE_DEVICES. Returns (rank, world_size, local_rank, device).
-        """
-        ensure_env_from_slurm()
-
-        world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        local_rank_env = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
-        rank_env = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
-
-        # Set MASTER_ADDR and MASTER_PORT if not already set
-        if "MASTER_ADDR" not in os.environ:
-            if "SLURM_JOB_NODELIST" in os.environ:
-                import socket
-                import subprocess
-                nodelist = os.environ["SLURM_JOB_NODELIST"]
-                try:
-                    result = subprocess.run(
-                        ["scontrol", "show", "hostnames", nodelist],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                        check=False,
-                    )
-                    if result.returncode == 0 and result.stdout.strip():
-                        first_node = result.stdout.strip().split('\n')[0]
-                        os.environ["MASTER_ADDR"] = first_node
-                    else:
-                        os.environ["MASTER_ADDR"] = socket.gethostname()
-                except (OSError, subprocess.SubprocessError):
-                    os.environ["MASTER_ADDR"] = socket.gethostname()
-            else:
-                import socket
-                os.environ["MASTER_ADDR"] = socket.gethostname()
-        
-        if "MASTER_PORT" not in os.environ:
-            os.environ["MASTER_PORT"] = "29500"
-
-        if world_size > 1 and not (dist.is_available() and dist.is_initialized()):
-            dist.init_process_group(backend="nccl", init_method="env://")
-
-        # Map LOCAL_RANK to a valid CUDA device index after any device masking.
-        # This properly handles CUDA_VISIBLE_DEVICES set by SLURM
-        if torch.cuda.is_available():
-            nvis = torch.cuda.device_count()
-            # For single-process (world_size=1), always use GPU 0
-            # For distributed training, map local_rank to available GPUs
-            if world_size == 1:
-                mapped_local = 0
-            else:
-                mapped_local = 0 if nvis == 1 else (local_rank_env % nvis)
-            torch.cuda.set_device(mapped_local)
-            torch.backends.cudnn.benchmark = True
-            device = torch.device(f"cuda:{mapped_local}")
-            os.environ["LOCAL_RANK"] = str(mapped_local)  # keep downstream code consistent
-        else:
-            mapped_local = 0
-            device = torch.device("cpu")
-
-        return rank_env, world_size, mapped_local, device
-
-
-    def cleanup_distributed():
-        if dist.is_available() and dist.is_initialized():
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                dist.barrier()
-            except Exception as exc:  # noqa: BLE001 -- shutdown path: swallow anything so destroy_process_group still runs
-                print(f"[cleanup_distributed] barrier failed: {exc!r}", flush=True)
-            dist.destroy_process_group()
 
     # Load configuration
     config_path = resolve_config_path(args.config)
@@ -446,7 +178,7 @@ def main() -> None:
             return
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        dist.barrier(device_ids=[DEVICE.index])
+        dist.barrier(device_ids=[DEVICE.index] if DEVICE.type == 'cuda' else None)
 
     _ddp_barrier()
 
@@ -486,6 +218,8 @@ def main() -> None:
             normalization_dict_path=config['data'].get('normalization_dict_path'),
             default_normalization=config['data'].get('default_normalization', 100000.0),
             apply_noise=config['data'].get('apply_noise', True),
+            deterministic_noise=config['data'].get('deterministic_noise', False),
+            noise_seed=config['data'].get('noise_seed', 0),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
             max_shards=config['data'].get('max_shards'),
             debug=DEBUG_MODE
@@ -499,6 +233,8 @@ def main() -> None:
             normalization_dict_path=config['data'].get('normalization_dict_path'),
             default_normalization=config['data'].get('default_normalization', 10000.0),
             apply_noise=config['data'].get('apply_noise', True),
+            deterministic_noise=config['data'].get('deterministic_noise', False),
+            noise_seed=config['data'].get('noise_seed', 0),
             cache_object=config['data'].get('cache_object', False),
             max_probe_modes=config['data'].get('max_probe_modes', 8),
             max_OPR_modes=config['data'].get('max_OPR_modes', 1),
@@ -571,14 +307,16 @@ def main() -> None:
         'pin_memory': pin_memory,
         'shuffle': True,
         'drop_last': drop_last,
+        'generator': torch.Generator().manual_seed(config['data']['random_seed'] + rank),
     }
 
     val_dataloader_kwargs_base = {
-        'batch_size': BATCH_SIZE,
+        'batch_size': config['training'].get('valid_batch_size', BATCH_SIZE),
         'num_workers': config['data'].get('num_workers', 0),
         'pin_memory': pin_memory,
         'shuffle': False,
         'drop_last': drop_last,
+        'generator': torch.Generator().manual_seed(config['data']['random_seed'] + rank),
     }
 
     # Add prefetch settings if using workers
@@ -721,7 +459,7 @@ def main() -> None:
     # ────────────────────────────────────────────────────────────────────────────────
     # Model setup
     # ────────────────────────────────────────────────────────────────────────────────
-    img_size = 256
+    img_size = config['model'].get('encoder', {}).get('img_size', 256)
 
     # Select model based on coupled_decoder_mode config
     coupled_decoder_mode = config['model'].get('coupled_decoder_mode', None)
@@ -768,7 +506,7 @@ def main() -> None:
         # Use torch.cuda.current_device() like multinode.py does
         # When CUDA_VISIBLE_DEVICES is set by SLURM, don't pass device_ids to avoid NCCL PCI bus ID lookup
         dev_index = DEVICE.index
-        model = DDP(model, device_ids=[dev_index], output_device=dev_index, find_unused_parameters=False, gradient_as_bucket_view=True)
+        model = DDP(model, device_ids=[dev_index] if DEVICE.type == 'cuda' else None, output_device=dev_index if DEVICE.type == 'cuda' else None, find_unused_parameters=False, gradient_as_bucket_view=True)
 
     _ddp_barrier()
 
@@ -903,22 +641,32 @@ def main() -> None:
             {'params': output_norm_params, 'lr': amp_decoder_lr, 'name': 'output_norm_params'},
         ]
 
-    optimizer = optim.Adam(param_groups, fused=True)
+    optimizer = optim.Adam(param_groups, fused=(DEVICE.type == 'cuda'))
 
-    # Optional learning rate scheduler
-    scheduler = None
     lr_sched_cfg = config['training'].get('lr_scheduler', {})
-    if lr_sched_cfg.get('enabled', False):
-        sched_name = lr_sched_cfg.get('scheduler_class')
-        if not sched_name:
-            raise ValueError("training.lr_scheduler.scheduler_class must be provided when lr_scheduler.enabled is True.")
-        sched_cls = getattr(torch.optim.lr_scheduler, sched_name, None)
-        if sched_cls is None:
-            raise ValueError(f"Unknown lr scheduler class: {sched_name}")
-        sched_kwargs = lr_sched_cfg.get('kwargs', {})
-        if not isinstance(sched_kwargs, dict):
-            raise ValueError("training.lr_scheduler.kwargs must be a dictionary.")
-        scheduler = sched_cls(optimizer=optimizer, **sched_kwargs)
+    scheduler, scheduler_unit = build_scheduler(optimizer, lr_sched_cfg)
+    cooldown = lr_sched_cfg.get('enabled', False) and lr_sched_cfg.get('scheduler_class') == 'cooldown'
+    branch_from = lr_sched_cfg.get('kwargs', {}).get('branch_from') if cooldown and not resume_from_checkpoint else None
+    if cooldown and not resume_from_checkpoint and not branch_from:
+        raise ValueError('A new cooldown run requires lr_scheduler.kwargs.branch_from')
+    if branch_from and FINETUNE_PATH:
+        raise ValueError('Cooldown branching and weights-only fine-tuning are mutually exclusive')
+    flop_calculator = None
+    if config['training'].get('track_flops', False) or config['training'].get('log_at_flops'):
+        flop_calculator = PtychoFMFlopsCalculator(config['model'], batch_size=BATCH_SIZE)
+    progress = TrainingProgress(config['training'], calculator=flop_calculator)
+    if cooldown:
+        progress.enabled = True
+    resume_context = {
+        'world_size': world_size, 'batch_size': BATCH_SIZE, 'model': config['model'],
+        'data': config['data'], 'train_size': train_size, 'val_size': val_size,
+        'subsetting': config['training'].get('data_subsetting_schedule'),
+        'dataset_fingerprint': dataset_fingerprint(base_dataset, config['data'].get('normalization_dict_path')),
+        'objective': {key: config['training'].get(key) for key in
+                      ('mode', 'loss_function', 'weighted_loss', 'combined_loss',
+                       'probe_aware_loss', 'q_dependent_loss', 'skip_batch_if_grad_norm_greater_than')},
+        'scheduler': lr_sched_cfg,
+    }
 
     if is_main_process:
         print("\nOptimizer learning rates:", flush=True)
@@ -954,6 +702,8 @@ def main() -> None:
         debug_mode=DEBUG_MODE,
         skip_batch_if_grad_norm_greater_than=skip_batch_if_grad_norm_greater_than,
         mlflow_logger=mlflow_logger,
+        progress=progress,
+        resume_context=resume_context,
         mlflow_log_every_n_batches=config.get('mlflow', {}).get('log_every_n_batches', 50),
     )
 
@@ -1015,6 +765,37 @@ def main() -> None:
                     print('No wandb run ID found - will create new wandb run', flush=True)
         else:
             raise FileNotFoundError(f"Checkpoint not found at {model_checkpoint}")
+
+    if branch_from:
+        branch_path = os.path.abspath(os.path.expanduser(branch_from))
+        branch_name = os.path.basename(branch_path)
+        if not branch_name.startswith('state_iters_'):
+            raise ValueError('Cooldown requires a specific state_iters_N.pth checkpoint')
+        run_path = os.path.abspath(os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num'])))
+        if run_path == os.path.dirname(branch_path):
+            raise ValueError('Cooldown must use a new run directory')
+        branch_model = os.path.join(os.path.dirname(branch_path), branch_name.replace('state_iters_', 'model_iters_', 1))
+        actual_model.load_state_dict(torch.load(branch_model, map_location=DEVICE, weights_only=True))
+        branch_state = torch.load(branch_path, map_location='cpu', weights_only=True)
+        parent_context = branch_state.get('resume_context', {})
+        for key, value in resume_context.items():
+            if key != 'scheduler' and parent_context.get(key) != value:
+                raise ValueError(f'Cooldown parent {key} differs; explicit conversion is required')
+        trainer.resume_context = parent_context
+        start_epoch, metrics, optimizer, _, _ = trainer.load_state_checkpoint(
+            optimizer, scheduler=scheduler, checkpoint_file=branch_path, skip_scheduler=True)
+        trainer.resume_context = resume_context
+        for group in optimizer.param_groups:
+            group['initial_lr'] = group['lr']
+        scheduler, scheduler_unit = build_scheduler(optimizer, lr_sched_cfg)
+        progress.max_updates = progress.optimizer_steps + lr_sched_cfg['kwargs']['cooldown_steps']
+        wandb_run_id = None
+
+    if progress.samples_in_epoch:
+        if sharding_strategy != 'dynamic':
+            raise ValueError('Mid-epoch resume requires dynamic sharding')
+        if config['data'].get('apply_noise', True) and not config['data'].get('deterministic_noise', False):
+            raise ValueError('Exact mid-epoch resume with Poisson noise requires deterministic_noise=True in the original run')
 
     # ────────────────────────────────────────────────────────────────────────────────
     # Initialize wandb only on main process
@@ -1083,14 +864,70 @@ def main() -> None:
     if is_main_process:
         print('\nStarting Training...\n', flush=True)
 
+    def validate_iteration(epoch, crossed, at_boundary):
+        if progress.last_validation_iter == progress.iters:
+            return
+        train_metrics = {key: trainer.synchronize_loss(value)
+                         for key, value in progress.interval_metrics().items()}
+        if not train_metrics:
+            return
+        model.eval()
+        val_metrics = trainer.validate(
+            val_prefetcher, criterion, optimizer, metrics,
+            epoch=progress.iters, profile=config['training'].get('profile', False),
+            plot=(at_boundary and epoch % config['training']['validation_plot_freq'] == 0),
+            scheduler=scheduler if scheduler_unit == 'epoch' and at_boundary else None,
+            emit_scalars=False,
+        )
+        for source, dest in [('train_loss', 'training_loss'), ('train_amp_loss', 'train_amp_loss'), ('train_ph_loss', 'train_ph_loss')]:
+            metrics[dest].append(train_metrics[source])
+        payload = {
+            **train_metrics, **val_metrics, 'iter': progress.iters,
+            'optimizer_steps': progress.optimizer_steps,
+            'samples_seen': progress.samples_seen,
+            'tflops_consumed': progress.tflops_consumed if flop_calculator else None,
+            'lr': optimizer.param_groups[0]['lr'],
+            'interval_start_iter': progress.last_log_iter,
+            'interval_batches': progress.interval_batches,
+            'world_size': world_size, 'batch_size_per_rank': BATCH_SIZE,
+            'targets_crossed': len(crossed),
+            'last_target_flops': max(crossed) if crossed else None,
+        }
+        if flop_calculator:
+            payload['tokens_seen'] = progress.samples_seen * flop_calculator.grid_after_vit() ** 2
+            payload['params_m'] = flop_calculator.param_count()
+        if is_main_process:
+            run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+            append_logs(os.path.join(run_path, 'logs.txt'), {
+                **payload, 'accounting_version': ACCOUNTING_VERSION if flop_calculator else '',
+                'target_flops': ';'.join(str(v) for v in crossed),
+            })
+            if config['wandb']['enabled']:
+                wandb.log({key: value for key, value in payload.items() if value is not None}, step=progress.iters)
+            mlflow_logger.log_metrics(payload, step=progress.iters)
+        if (at_boundary and epoch % config['training']['test_plot_freq'] == 0
+                and is_main_process and test_loader is not None
+                and not config['training'].get('profile', False)):
+            trainer.generate_test_plot(
+                test_loader, progress.iters, f'test_iters{progress.iters}.png',
+                central_crop=config['training'].get('test_plot_central_crop', 64),
+                ph_crop=config['training'].get('test_plot_ph_crop', 180),
+            )
+        progress.mark_logged()
+        trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler)
+        model.train()
+
     # ────────────────────────────────────────────────────────────────────────────────
     # Train / Validate
     # ────────────────────────────────────────────────────────────────────────────────
+    epoch = max(start_epoch - 1, 0)
     try:
         for epoch in range(start_epoch, EPOCHS):
+            if progress.stopped:
+                break
             # Optionally apply per-epoch training subsetting schedule
-            if data_subsetting_schedule is not None:
-                fraction = _fraction_for_epoch(data_subsetting_schedule, epoch)
+            if data_subsetting_schedule is not None or progress.enabled:
+                fraction = _fraction_for_epoch(data_subsetting_schedule, epoch) if data_subsetting_schedule else 1.0
                 (
                     train_dataset,
                     train_loader,
@@ -1110,6 +947,8 @@ def main() -> None:
                     device=DEVICE,
                     use_cuda_prefetcher=use_cuda_prefetcher,
                     drop_last=drop_last,
+                    resume_epoch=epoch,
+                    resume_num_samples=progress.samples_in_epoch if epoch == start_epoch else 0,
                 )
 
                 if is_main_process:
@@ -1120,6 +959,8 @@ def main() -> None:
                         flush=True,
                     )
 
+            validate_loader_lengths(train_loader, val_loader, DEVICE, distributed=world_size > 1)
+
             # Set epoch for DistributedSampler (dynamic sharding only)
             if sharding_strategy == 'dynamic':
                 if train_sampler is not None:
@@ -1128,8 +969,11 @@ def main() -> None:
                     val_sampler.set_epoch(epoch)
 
             # Save config to run path at epoch 0
-            if epoch == 0 and is_main_process:
-                trainer.save_config(config_path)
+            if epoch == start_epoch and is_main_process:
+                run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
+                os.makedirs(run_path, exist_ok=True)
+                with open(os.path.join(run_path, 'config.yaml'), 'w') as stream:
+                    yaml.safe_dump(config, stream, sort_keys=False)
                 print('Saved config to run path', flush=True)
 
             _ddp_barrier()
@@ -1164,7 +1008,13 @@ def main() -> None:
             # Training loop
             model.train()
             profile = config['training'].get('profile', False)
-            trainer.train(train_prefetcher, criterion, optimizer, metrics, profile=profile, epoch=epoch)
+            trainer.train(train_prefetcher, criterion, optimizer, metrics, profile=profile, epoch=epoch,
+                          scheduler=scheduler, scheduler_unit=scheduler_unit,
+                          on_iteration=validate_iteration if progress.enabled else None)
+            if progress.enabled:
+                if progress.stopped:
+                    break
+                continue
 
 
             # Validation loop
@@ -1186,7 +1036,7 @@ def main() -> None:
             if is_main_process:
                 print(f"\n[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Running validation...", flush=True)
             trainer.validate(val_prefetcher, criterion, optimizer, metrics, 
-                plot=plot, epoch=epoch, scheduler=scheduler, profile=profile)
+                plot=plot, epoch=epoch, scheduler=scheduler if scheduler_unit == "epoch" else None, profile=profile)
 
             # Generate test plot only on main process
             if epoch % config['training']['test_plot_freq'] == 0 and is_main_process and (not profile) and test_loader is not None:
@@ -1216,6 +1066,7 @@ def main() -> None:
             if is_main_process:
                 print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] ========== Completed Epoch {epoch + 1}/{EPOCHS} ==========", flush=True)
                 print(f"[{datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%d %H:%M:%S')}] Epoch: {epoch + 1} | Train Loss: {metrics['training_loss'][-1]:.4f} | Val. Loss: {metrics['validation_loss'][-1]:.4f} | Train Batches: {len(train_loader)} | Val Batches: {len(val_loader)}", flush=True)
+        trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=scheduler)
     finally:
         cleanup_distributed()
 
@@ -1223,7 +1074,6 @@ def main() -> None:
     # Save final checkpoint only on main process
     # ────────────────────────────────────────────────────────────────────────────────
     if is_main_process:
-        trainer.save_model_and_states_checkpoint(epoch, metrics, optimizer, wandb_run_id, scheduler=scheduler)
         run_path = os.path.join(MODEL_SAVE_PATH, 'run' + str(config['trainer']['run_num']))
         with open(os.path.join(run_path, 'metrics.pickle'), 'wb') as file:
             pickle.dump(metrics, file)

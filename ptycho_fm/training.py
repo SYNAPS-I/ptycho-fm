@@ -1,9 +1,11 @@
 import os
+import random
 import shutil
 import time
 from datetime import UTC, datetime
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.distributed as dist
 import wandb
@@ -17,6 +19,7 @@ from ptycho_fm.metrics import (
     compute_ssim,
     prepare_image_metric_inputs,
 )
+from ptycho_fm.utils.progress import TrainingProgress
 
 
 def _move_to_cpu(obj):
@@ -52,9 +55,13 @@ class Trainer:
         skip_batch_if_grad_norm_greater_than=None,
         mlflow_logger=None,
         mlflow_log_every_n_batches=50,
+        progress=None,
+        resume_context=None,
     ):
         super().__init__()
         self.model = model
+        self.progress = progress or TrainingProgress()
+        self.resume_context = resume_context or {}
         self.mode = mode
         self.run_num = run_num
         self.device = device
@@ -66,6 +73,14 @@ class Trainer:
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
         self.mlflow_logger = mlflow_logger
         self.mlflow_log_every_n_batches = max(int(mlflow_log_every_n_batches), 1)
+
+    def _range_push(self, name):
+        if self.device.type == 'cuda':
+            torch.cuda.nvtx.range_push(name)
+
+    def _range_pop(self):
+        if self.device.type == 'cuda':
+            torch.cuda.nvtx.range_pop()
 
     def synchronize_loss(self, loss_value):
         """Synchronize loss across all processes in DDP."""
@@ -114,53 +129,95 @@ class Trainer:
         if os.path.exists(config_path):
             shutil.copy(config_path, os.path.join(run_path, 'config.yaml'))
 
+    def _rank_runtime(self):
+        numpy_state = np.random.get_state()
+        return {
+            'progress': self.progress.state_dict(),
+            'torch_rng': torch.get_rng_state(),
+            'cuda_rng': torch.cuda.get_rng_state(self.device) if self.device.type == 'cuda' else None,
+            'python_rng': random.getstate(),
+            'numpy_rng': (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+        }
+
+    def _optimizer_signature(self, optimizer):
+        model = self.model.module if hasattr(self.model, 'module') else self.model
+        names = {id(param): name for name, param in model.named_parameters()}
+        return [[(names[id(param)], tuple(param.shape)) for param in group['params']]
+                for group in optimizer.param_groups]
+
     def generate_state_dict(self, epoch_num, metrics, optimizer, wandb_run_id=None, scheduler=None):
-        """Returns a dictionary of the state_dicts of all states but not the model."""
-        state = {
-            'current_epoch': epoch_num + 1,
+        """All ranks participate so resume restores each rank's RNG and interval."""
+        local = self._rank_runtime()
+        runtime = [local]
+        if self.use_ddp and dist.is_initialized():
+            runtime = [None] * dist.get_world_size()
+            dist.all_gather_object(runtime, local)
+        return {
+            'format_version': 2,
+            'current_epoch': self.progress.epoch,
             'loss_tracker': metrics,
             'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_signature': self._optimizer_signature(optimizer),
             'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-            'wandb_run_id': wandb_run_id
+            'wandb_run_id': wandb_run_id,
+            'rank_runtime': runtime,
+            'resume_context': self.resume_context,
         }
-        return state
 
-    def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer=None, wandb_run_id=None, scheduler=None):
-        """Save a checkpoint state that can be loaded to continue training."""
+    def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer=None,
+                                         wandb_run_id=None, scheduler=None):
+        state = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
         if not self.is_main_process:
             return
-
-        state_dict = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
         state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
         os.makedirs(state_path, exist_ok=True)
-
         self.update_saved_model('checkpoint_model')
-        # Also save epoch-specific model
-        self.update_saved_model(f'model_epoch_{epoch_num + 1:03d}')
+        if self.progress.enabled:
+            self.update_saved_model(f'model_iters_{self.progress.iters}')
+            _atomic_torch_save(_move_to_cpu(state), os.path.join(state_path, f'state_iters_{self.progress.iters}.pth'))
+        else:
+            self.update_saved_model(f'model_epoch_{epoch_num + 1:03d}')
+        _atomic_torch_save(_move_to_cpu(state), os.path.join(state_path, 'checkpoint.state'))
 
-        cpu_state_dict = _move_to_cpu(state_dict)
-        _atomic_torch_save(cpu_state_dict, os.path.join(state_path, 'checkpoint.state'))
-
-    def load_state_checkpoint(self, optimizer, scheduler=None):
-        """Load everything but the model."""
-        checkpoint_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
-        checkpoint_fname = os.path.join(checkpoint_path, 'checkpoint.state')
-        if not os.path.exists(checkpoint_fname):
-            raise FileNotFoundError(f"Checkpoint not found in {checkpoint_fname}")
-        state_dict = torch.load(checkpoint_fname, map_location='cpu')
-        current_epoch = state_dict['current_epoch']
-        metrics = state_dict['loss_tracker']
-        optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-        # optimizer_state_dict_device_fix
-        for state in optimizer.state.values():
-            for key, value in state.items():
+    def load_state_checkpoint(self, optimizer, scheduler=None, checkpoint_file=None,
+                              skip_scheduler=False):
+        checkpoint_fname = checkpoint_file or os.path.join(
+            self.model_save_path, 'run' + str(self.run_num), 'checkpoint.state')
+        state = torch.load(checkpoint_fname, map_location='cpu', weights_only=True)
+        signature = state.get('optimizer_signature')
+        if signature is not None and signature != self._optimizer_signature(optimizer):
+            raise ValueError('Optimizer parameters changed; explicitly convert the checkpoint or use weights-only fine-tuning')
+        if state.get('format_version') != 2:
+            if self.progress.enabled or 'iters' in state:
+                raise ValueError('Legacy iteration/compute state requires explicit conversion before resume; weights-only loading is fine-tuning')
+            self.progress.epoch = state['current_epoch']
+        else:
+            if state['resume_context'] != self.resume_context:
+                raise ValueError('Resume dataset/model/batch/world-size settings differ from the checkpoint')
+            rank = dist.get_rank() if self.use_ddp and dist.is_initialized() else 0
+            runtime = state['rank_runtime'][rank]
+            self.progress.load_state_dict(runtime['progress'])
+            torch.set_rng_state(runtime['torch_rng'])
+            if runtime['cuda_rng'] is not None and self.device.type == 'cuda':
+                torch.cuda.set_rng_state(runtime['cuda_rng'], self.device)
+            random.setstate(runtime['python_rng'])
+            numpy_state = runtime['numpy_rng']
+            np.random.set_state((numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32), *numpy_state[2:]))
+        try:
+            optimizer.load_state_dict(state['optimizer_state_dict'])
+        except ValueError as exc:
+            raise ValueError('Optimizer groups require explicit conversion; use weights-only fine-tuning for a fresh optimizer') from exc
+        for param, param_state in optimizer.state.items():
+            for key, value in param_state.items():
                 if torch.is_tensor(value):
-                    state[key] = value.to(self.device, non_blocking=True)
-
-        if state_dict['scheduler_state_dict'] is not None:
-            scheduler.load_state_dict(state_dict['scheduler_state_dict'])
-        wandb_run_id = state_dict.get('wandb_run_id', None)
-        return current_epoch, metrics, optimizer, wandb_run_id, scheduler
+                    if value.numel() > 1 and value.shape != param.shape:
+                        raise ValueError('Optimizer tensor shapes require explicit checkpoint conversion')
+                    param_state[key] = value.to(self.device)
+        if not skip_scheduler and state.get('scheduler_state_dict') is not None:
+            if scheduler is None:
+                raise ValueError('Checkpoint contains a scheduler; resume requires the same scheduler configuration')
+            scheduler.load_state_dict(state['scheduler_state_dict'])
+        return self.progress.epoch, state['loss_tracker'], optimizer, state.get('wandb_run_id'), scheduler
 
     def generate_plot(self, in_dp, out_dp, gt_amp, pred_amp, gt_ph, pred_ph, filename):
         f, ax = plt.subplots(nrows=2, ncols=3)
@@ -339,7 +396,8 @@ class Trainer:
         if self.mlflow_logger is not None:
             self.mlflow_logger.log_artifact(os.path.join(run_path, filename), artifact_path="test_plots")
 
-    def train(self, dataloader, criterion, optimizer, metrics, profile=False, epoch=None):
+    def train(self, dataloader, criterion, optimizer, metrics, profile=False, epoch=None,
+              scheduler=None, scheduler_unit="epoch", on_iteration=None):
         """
         Training loop.
 
@@ -347,6 +405,9 @@ class Trainer:
             dataloader: PyTorch DataLoader yielding batches of
                        (diff_amp, amp_patch, ph_patch, probe, probe_pos, norm, scale[, meta])
         """
+        self.progress.epoch = epoch or 0
+        if self.progress.stopped:
+            return
         running_loss = 0.0
         running_amp_loss = 0.0
         running_ph_loss = 0.0
@@ -376,8 +437,8 @@ class Trainer:
                         torch.cuda.profiler.stop()
                     break
 
-            torch.cuda.nvtx.range_push(f"step {batch_idx}")
-            torch.cuda.nvtx.range_push(f"data copy in {batch_idx}")
+            self._range_push(f"step {batch_idx}")
+            self._range_push(f"data copy in {batch_idx}")
 
             # Time IO (data loading) - this captures the time to get batch from DataLoader
             # The DataLoader fetch happens at the 'for' line above, so we time from end of previous batch
@@ -414,9 +475,9 @@ class Trainer:
             input_norm = norm
             input_scale = scale
 
-            torch.cuda.nvtx.range_pop()  # copy in
+            self._range_pop()  # copy in
 
-            torch.cuda.nvtx.range_push("forward")
+            self._range_push("forward")
 
             output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
 
@@ -435,7 +496,7 @@ class Trainer:
                     input_scale,
                 )
 
-            torch.cuda.nvtx.range_pop()  # forward
+            self._range_pop()  # forward
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
 
@@ -461,8 +522,9 @@ class Trainer:
                     global_max_norm = float(norm_tensor.item())
 
                 if self.debug_mode and self.is_main_process and self.wandb_enabled:
-                    wandb.log({"grad_norm": global_max_norm})
+                    wandb.log({"grad_norm": global_max_norm}, step=self.progress.iters if self.progress.enabled else None)
 
+            updated = False
             skip_threshold = self.skip_batch_if_grad_norm_greater_than
             if skip_threshold is not None and global_max_norm is not None and global_max_norm > skip_threshold:
                 if self.is_main_process:
@@ -473,9 +535,12 @@ class Trainer:
                         flush=True
                     )
             else:
-                torch.cuda.nvtx.range_push("optimizer")
+                self._range_push("optimizer")
                 optimizer.step()
-                torch.cuda.nvtx.range_pop()  # optimizer
+                updated = True
+                if scheduler is not None and scheduler_unit == "update":
+                    scheduler.step()
+                self._range_pop()  # optimizer
                 processed_batches += 1
 
             train_end_time = time.time()
@@ -506,7 +571,7 @@ class Trainer:
                 and self.is_main_process
                 and (batch_idx % self.mlflow_log_every_n_batches == 0)
             ):
-                global_step = (epoch or 0) * total_batches + batch_idx
+                global_step = self.progress.iters
                 batch_metrics = {
                     "train_batch_loss": batch_loss,
                     "train_batch_amp_loss": batch_amp_loss,
@@ -532,9 +597,31 @@ class Trainer:
                 next_milestone_idx += 1
 
 
-            torch.cuda.nvtx.range_pop()  # step
+            self._range_pop()  # step
 
-        torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+            batch_size = int(diff_amp.size(0))
+            tflops = (self.progress.calculator.training_tflops(batch_size)
+                      if self.progress.calculator else 0.0)
+            totals = torch.tensor([batch_size, tflops], dtype=torch.float64, device=self.device)
+            if self.use_ddp and dist.is_initialized():
+                dist.all_reduce(totals)
+            due, crossed = self.progress.record(
+                batch_size=batch_size, global_samples=int(totals[0].item()),
+                tflops=float(totals[1].item()), updated=updated,
+                losses=(batch_loss, batch_amp_loss, batch_ph_loss),
+            )
+            at_boundary = batch_idx + 1 == total_batches
+            if at_boundary:
+                self.progress.finish_epoch()
+            if on_iteration is not None and (due or at_boundary):
+                on_iteration(epoch, crossed, at_boundary)
+            if self.progress.stopped:
+                break
+
+        if self.progress.enabled:
+            return
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
         print(f"Processed {processed_batches} batches", flush=True)
         num_batches = processed_batches
         if num_batches == 0:
@@ -578,7 +665,7 @@ class Trainer:
         metrics['train_amp_loss'].append(avg_amp_loss)
         metrics['train_ph_loss'].append(avg_ph_loss)
 
-    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None, profile=False):
+    def validate(self, dataloader, criterion, optimizer, metrics, plot=False, epoch=0, scheduler=None, profile=False, emit_scalars=True):
         """
         Validation loop with SSIM and PSNR metrics.
         """
@@ -734,7 +821,7 @@ class Trainer:
         avg_ph_ssim = self.synchronize_loss(avg_ph_ssim)
         avg_ph_psnr = self.synchronize_loss(avg_ph_psnr)
 
-        if self.is_main_process and self.wandb_enabled:
+        if emit_scalars and self.is_main_process and self.wandb_enabled:
             wandb.log({"val_loss": avg_val_loss}, step=epoch)
             wandb.log({"val_amp_loss": avg_val_amp_loss}, step=epoch)
             wandb.log({"val_ph_loss": avg_val_ph_loss}, step=epoch)
@@ -743,7 +830,7 @@ class Trainer:
             wandb.log({"val_ph_ssim": avg_ph_ssim}, step=epoch)
             wandb.log({"val_ph_psnr": avg_ph_psnr}, step=epoch)
 
-        if self.mlflow_logger is not None and self.is_main_process:
+        if emit_scalars and self.mlflow_logger is not None and self.is_main_process:
             self.mlflow_logger.log_metrics(
                 {
                     "val_loss": avg_val_loss,
@@ -807,7 +894,7 @@ class Trainer:
             if 'lr' not in metrics:
                 metrics['lr'] = []
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
-            if self.is_main_process and self.wandb_enabled:
+            if emit_scalars and self.is_main_process and self.wandb_enabled:
                 wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=epoch)
             if self.is_main_process and self.mlflow_logger is not None:
                 self.mlflow_logger.log_metrics(
@@ -829,3 +916,10 @@ class Trainer:
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             dist.barrier()
+
+        return {
+            'val_loss': avg_val_loss, 'val_amp_loss': avg_val_amp_loss,
+            'val_ph_loss': avg_val_ph_loss, 'val_amp_ssim': avg_amp_ssim,
+            'val_amp_psnr': avg_amp_psnr, 'val_ph_ssim': avg_ph_ssim,
+            'val_ph_psnr': avg_ph_psnr,
+        }

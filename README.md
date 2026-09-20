@@ -279,6 +279,10 @@ Checkpoints include:
 
 Resume training by setting `resume_from_checkpoint: true` in config.
 
+## Iteration and isoFLOP training
+
+See [iteration training and isoFLOP analysis](docs/iter_flops.md) for configuration inheritance, compute accounting, exact mid-epoch resume, cooldown, sweep/plot commands, and historical Figure 4 conventions. Epoch training remains the default.
+
 ## Experiment Tracking
 
 Weights & Biases integration tracks:

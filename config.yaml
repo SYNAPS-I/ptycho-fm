@@ -9,6 +9,8 @@ data:
   scale: 10000.0
   # Synthetic Poisson noise augmentation for the training and validation split.
   apply_noise: true
+  deterministic_noise: false
+  noise_seed: 0
   # Independent test/inference augmentation. Keep false for measured data, which
   # already contains experimental noise; enable explicitly for simulated test data.
   test_apply_noise: false
@@ -51,6 +53,13 @@ data:
 training:
   mode: 'unsupervised' # Options: supervised, anything else defaults to unsupervised (no error raised)
   batch_size: 64
+  # Iteration/FLOP validation is opt-in; zero/empty retains epoch training.
+  log_every: 0
+  log_at_flops: []
+  max_iters: null
+  track_flops: false
+  stop_at_last_flop_target: false
+  # valid_batch_size defaults to batch_size when omitted.
   learning_rate: 1.0e-5  # Default learning rate (used if individual rates not specified)
   # Optional: learning rate scheduler
   lr_scheduler:

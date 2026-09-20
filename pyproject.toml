@@ -31,6 +31,9 @@ ptycho-fm-train = "ptycho_fm.train:main"
 ptycho-fm-infer = "ptycho_fm.inference:main"
 
 [dependency-groups]
+analysis = [
+    "seaborn>=0.13.2",
+]
 dev = [
     "ipykernel>=7.0.1",
     "jupyter>=1.1.1",

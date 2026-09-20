@@ -1,0 +1,9 @@
+# Copy and edit this file. All runtime data/output paths are relative to cwd.
+extends: e512_d12.yaml
+data:
+  data_path: /path/to/packed_data
+  normalization_dict_path: /path/to/normalization.pkl
+paths:
+  model_save_path: /path/to/models
+wandb:
+  enabled: false

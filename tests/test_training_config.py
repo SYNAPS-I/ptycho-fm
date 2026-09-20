@@ -10,6 +10,7 @@ import torch
 import yaml
 
 from ptycho_fm import train
+from ptycho_fm.utils import config as config_utils
 
 
 @pytest.mark.parametrize(
@@ -94,6 +95,6 @@ def test_training_reads_config_from_working_directory(tmp_path, monkeypatch, con
         # Stop before distributed initialization or training.
         raise ConfigRead
 
-    monkeypatch.setattr(train.yaml, "safe_load", read_config)
+    monkeypatch.setattr(config_utils.yaml, "safe_load", read_config)
     with pytest.raises(ConfigRead):
         train.main()
