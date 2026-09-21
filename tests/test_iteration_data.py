@@ -39,13 +39,52 @@ def test_noise_is_repeatable_and_uses_global_index(tmp_path):
     assert not torch.equal(first, dataset[4][0])
     image = dataset[4][0][0].numpy() ** 2
     _, _, clean, *_ = make_pair(tmp_path / 'reference')
-    expected = np.random.default_rng(17 + 4).poisson(clean[0] * 10)
+    expected = np.random.default_rng(17 + 4).poisson(clean[0]) * 10
     np.testing.assert_allclose(image, expected, atol=1e-5)
     # Single-file indexing reproduces the corresponding CombinedDataset offset.
     single = PtychographyDataset(tmp_path / 'b_dp.hdf5', scale=10,
                                 default_normalization=1, deterministic_noise=True,
                                 noise_seed=21)
     torch.testing.assert_close(single[0][0], dataset[4][0], rtol=0, atol=0)
+
+
+def test_packed_noise_is_applied_before_normalization(tmp_path, monkeypatch):
+    import h5py
+
+    from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
+
+    raw = np.arange(1, 17, dtype=np.float32).reshape(4, 4)
+    with h5py.File(tmp_path / "packed_00000.hdf5", "w") as packed:
+        packed["n_dp"] = np.array([1])
+        packed["dp"] = raw[None, None]
+        packed["object"] = np.ones((1, 1, 8, 8), dtype=np.complex64)
+        packed["probe"] = np.ones((1, 1, 1, 4, 4), dtype=np.complex64)
+        packed["probe_position_y_m"] = np.zeros((1, 1), dtype=np.float32)
+        packed["probe_position_x_m"] = np.zeros((1, 1), dtype=np.float32)
+        packed["pixel_height_m"] = np.ones(1, dtype=np.float32)
+        packed["normalization"] = np.array([4.0])
+
+    class Noise:
+        inputs = []
+
+        def poisson(self, image):
+            self.inputs.append(image.copy())
+            return np.full_like(image, 8.0)
+
+    noise = Noise()
+    monkeypatch.setattr(np.random, "default_rng", lambda _seed=None: noise)
+    dataset = PtychographyDatasetPacked(
+        tmp_path,
+        apply_noise=True,
+        deterministic_noise=True,
+        noise_seed=9,
+        scale=2.0,
+        max_probe_modes=1,
+    )
+
+    diffraction_amp = dataset[0][0]
+    np.testing.assert_array_equal(noise.inputs[0], raw)
+    torch.testing.assert_close(diffraction_amp, torch.full((1, 4, 4), 2.0))
 
 
 def test_dataset_identity_detects_changed_file_order_and_content_metadata(tmp_path):

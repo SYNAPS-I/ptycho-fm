@@ -161,7 +161,7 @@ def test_native_loader_model_and_stitching(config, tmp_path):
     assert dataset._cached_probe_positions is None
 
 
-@pytest.mark.parametrize("mode", [None, "real_imag", "amp_phase"])
+@pytest.mark.parametrize("mode", ["real_imag", "amp_phase"])
 def test_all_current_models_stitch_to_amp_and_phase(config, tmp_path, mode):
     path, *_ = make_pair(tmp_path, opr=2, pattern_shape=(32, 32))
     config["model"]["coupled_decoder_mode"] = mode

@@ -170,10 +170,10 @@ class PtychographyDatasetPacked(Dataset):
         norm = self._norm_for_slot(f, o, obj_key)
 
         img = np.asarray(f["dp"][o, pi], dtype=np.float32)
-        img = (img / norm) * self.scale
         if self.apply_noise:
             seed = self.noise_seed + idx if self.deterministic_noise else None
             img = np.random.default_rng(seed).poisson(img).astype(np.float32)
+        img = (img / norm) * self.scale
         amp = np.sqrt(np.float32(img))
 
         osh = tuple(int(x) for x in f["object"].shape[2:])

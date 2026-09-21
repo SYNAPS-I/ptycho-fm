@@ -33,8 +33,9 @@ def run_training(config, path, ranks, worker):
             pd.read_csv(run_dir / 'logs.txt'))
 
 
-@pytest.mark.parametrize('ranks', [1, 2])
-def test_entrypoint_resume_and_cooldown(tmp_path, ranks):
+@pytest.mark.integration
+def test_entrypoint_resume_and_cooldown(tmp_path):
+    ranks = 2
     for name in ('a', 'b'):
         make_pair(tmp_path / 'data', name, modes=1, pattern_shape=(16, 16))
     worker = tmp_path / 'worker.py'

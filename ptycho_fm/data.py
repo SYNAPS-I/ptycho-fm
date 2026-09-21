@@ -153,12 +153,13 @@ class _SampleReader(Dataset):
             num_patterns, pattern_shape, object_shape = self._layout(dp, para)
             if index < 0 or index >= num_patterns:
                 raise IndexError(index)
-            image = (dp["dp"][index] / normalization) * self.scale
+            image = dp["dp"][index]
             if self.apply_noise:
                 identity = index if sample_id is None else sample_id
                 seed = self.noise_seed + identity if self.deterministic_noise else None
                 rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
                 image = rng.poisson(image)
+            image = (image / normalization) * self.scale
             diffraction_amp = torch.from_numpy(np.sqrt(image.astype(np.float32))).unsqueeze(0)
             position = self._positions(para, num_patterns, object_shape, index)
 

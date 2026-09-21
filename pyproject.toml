@@ -49,4 +49,7 @@ packages = ["ptycho_fm"]
 [tool.pytest.ini_options]
 # test_pack_hdf5_consistency is a standalone verification script that reads
 # sys.argv[1] and hardcodes NERSC paths; it is not a pytest-collectable test.
-addopts = "--ignore=tests/test_pack_hdf5_consistency.py"
+addopts = "--ignore=tests/test_pack_hdf5_consistency.py -m 'not integration'"
+markers = [
+    "integration: slower multi-process coverage excluded from the default test run",
+]

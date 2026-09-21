@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from ptycho_fm.model.decoders import Decoder256
-from scripts.migrate_checkpoint import convert_decoder_output_to_linear
+from scripts.migrate_checkpoint import convert_decoder_output_to_linear, get_state_dict
 
 
 def test_converted_weights_load_strictly_and_preserve_decoder_output():
@@ -55,7 +55,20 @@ def test_conversion_rejects_unsupported_kernel(shape):
         convert_decoder_output_to_linear({"amp_decoder.output.weight": torch.randn(*shape)})
 
 
-@pytest.mark.parametrize("wrapper", [None, "state_dict", "model_state_dict", "model", "net", "weights"])
+def test_get_state_dict_recognizes_common_wrappers():
+    state = {"layer.weight": torch.ones(1)}
+    extracted, wrapper = get_state_dict(state)
+    assert extracted is state
+    assert wrapper is None
+
+    for name in ("state_dict", "model_state_dict", "model", "net", "weights"):
+        checkpoint = {name: state, "epoch": 12}
+        extracted, wrapper = get_state_dict(checkpoint)
+        assert extracted is state
+        assert wrapper == name
+
+
+@pytest.mark.parametrize("wrapper", [None, "state_dict"])
 def test_cli_migrates_checkpoint_and_preserves_metadata(tmp_path, wrapper):
     state = {
         "log_scale_amp": torch.tensor(-2.0),

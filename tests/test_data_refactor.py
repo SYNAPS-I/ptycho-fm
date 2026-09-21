@@ -278,21 +278,27 @@ def test_explicit_stitching_positions_and_pickle(tmp_path):
 
 
 def test_noise_is_sampled_on_every_read(tmp_path, monkeypatch):
-    path, *_ = make_pair(tmp_path)
-    dataset = PtychographyDataset(path, apply_noise=True)
+    path, _, clean, *_ = make_pair(tmp_path)
+    dataset = PtychographyDataset(
+        path, apply_noise=True, default_normalization=4.0, scale=2.0
+    )
 
     class Noise:
         count = 0
+        inputs = []
 
         def poisson(self, image):
             self.count += 1
-            return np.full_like(image, self.count)
+            self.inputs.append(image.copy())
+            return np.full_like(image, 4 * self.count)
 
     noise = Noise()
     monkeypatch.setattr(np.random, "default_rng", lambda: noise)
-    assert torch.all(dataset[0][0] == 1)
     torch.testing.assert_close(dataset[0][0], torch.full((1, 8, 12), 2**0.5))
+    torch.testing.assert_close(dataset[0][0], torch.full((1, 8, 12), 2.0))
     assert noise.count == 2
+    np.testing.assert_array_equal(noise.inputs[0], clean[0])
+    np.testing.assert_array_equal(noise.inputs[1], clean[0])
 
 
 class CacheReportingDataset(CombinedDataset):
@@ -304,7 +310,10 @@ class CacheReportingDataset(CombinedDataset):
         return sample, os.getpid(), self._array_cache.nbytes, ",".join(names)
 
 
-@pytest.mark.parametrize("start_method", ["fork", "spawn"])
+@pytest.mark.parametrize("start_method", [
+    "fork",
+    pytest.param("spawn", marks=pytest.mark.integration),
+])
 def test_persistent_workers_start_empty_and_repeat_epochs(tmp_path, start_method):
     if start_method not in multiprocessing.get_all_start_methods():
         pytest.skip(f"{start_method} unavailable")
