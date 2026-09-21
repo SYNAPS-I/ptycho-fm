@@ -192,7 +192,7 @@ class PtychographyDatasetPacked(Dataset):
         probe = _pad_probe(probe, self.max_probe_modes)
 
         amp = torch.from_numpy(np.asarray(amp))
-        probe = torch.from_numpy(probe)
+        probe = torch.from_numpy(np.asarray(probe, dtype=np.complex64))
 
         if amp.dim() == 2:
             amp = amp.unsqueeze(0)
@@ -205,4 +205,7 @@ class PtychographyDatasetPacked(Dataset):
         elif probe.dim() == 3:
             probe = probe.unsqueeze(0)
 
-        return amp, ap, ph, probe, xy, norm, self.scale
+        # All real DataLoader fields are float32; the probe stays complex64.
+        return (amp.float(), ap.float(), ph.float(), probe, xy.float(),
+                torch.tensor(norm, dtype=torch.float32),
+                torch.tensor(self.scale, dtype=torch.float32))

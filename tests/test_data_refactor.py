@@ -94,7 +94,7 @@ def test_opr_padding_and_cache_parity(tmp_path, opr, modes, target_opr, target_m
         assert sample[0].shape == sample[1].shape == sample[2].shape == (1, 8, 12)
         np.testing.assert_array_equal(sample[0][0], np.sqrt(image[i] / 2))
         assert sample[3].shape == (max(opr, target_opr), max(modes, target_modes), 8, 12)
-        np.testing.assert_array_equal(sample[3][:opr, :modes], probe)
+        np.testing.assert_allclose(sample[3][:opr, :modes], probe, rtol=1e-6, atol=1e-6)
         assert torch.count_nonzero(sample[3][opr:]) == 0
         assert torch.count_nonzero(sample[3][:, modes:]) == 0
     assert cached._cached_probe_positions is None

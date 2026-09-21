@@ -188,10 +188,14 @@ class _SampleReader(Dataset):
         )[0]
         # A sample owns its probe tensor so downstream in-place edits cannot
         # corrupt an admitted cache entry or another sample.
-        probe_tensor = torch.from_numpy(probe.copy())
+        # Keep the DataLoader's real fields float32 even when HDF5 contains
+        # double-precision objects/probes. Complex probes use complex64.
+        probe_tensor = torch.from_numpy(probe.astype(np.complex64, copy=True))
         return (
-            diffraction_amp, torch.abs(patch).unsqueeze(0), torch.angle(patch).unsqueeze(0),
-            probe_tensor, position, normalization, self.scale,
+            diffraction_amp, torch.abs(patch).unsqueeze(0).float(),
+            torch.angle(patch).unsqueeze(0).float(), probe_tensor,
+            position.float(), torch.tensor(normalization, dtype=torch.float32),
+            torch.tensor(self.scale, dtype=torch.float32),
         )
 
 

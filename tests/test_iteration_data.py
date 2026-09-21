@@ -71,3 +71,34 @@ def test_empty_loader_rejected_before_training():
 
     with pytest.raises(ValueError, match='at least one'):
         validate_loader_lengths([], [1], torch.device('cpu'))
+
+
+@pytest.mark.parametrize('source', ['native', 'packed'])
+def test_dataloader_real_fields_are_float32(tmp_path, source):
+    import h5py
+
+    from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
+
+    if source == 'native':
+        make_pair(tmp_path, dtype=np.complex128)
+        dataset = CombinedDataset(tmp_path, apply_noise=False, scale=7.3,
+                                  default_normalization=3.2, max_probe_modes=2)
+    else:
+        path = tmp_path / 'packed_00000.hdf5'
+        with h5py.File(path, 'w') as packed:
+            packed['n_dp'] = np.array([4])
+            packed['dp'] = np.ones((1, 4, 8, 12), dtype=np.float32)
+            packed['object'] = np.ones((1, 1, 32, 40), dtype=np.complex128)
+            packed['probe'] = np.ones((1, 1, 1, 8, 12), dtype=np.complex128)
+            packed['probe_position_y_m'] = np.array([[0, 10, 20, 30]], dtype=np.float64)
+            packed['probe_position_x_m'] = np.array([[0, 12, 24, 36]], dtype=np.float64)
+            packed['pixel_height_m'] = np.array([1e-8])
+            packed['normalization'] = np.array([3.2], dtype=np.float64)
+        dataset = PtychographyDatasetPacked(tmp_path, apply_noise=False,
+                                            scale=7.3, max_probe_modes=2)
+    batch = next(iter(DataLoader(dataset, batch_size=2)))
+    assert all(torch.is_tensor(field) for field in batch)
+    assert [field.dtype for field in batch] == [
+        torch.float32, torch.float32, torch.float32, torch.complex64,
+        torch.float32, torch.float32, torch.float32,
+    ]
