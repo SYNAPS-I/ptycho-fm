@@ -16,7 +16,6 @@ import numpy as np
 import yaml
 
 from ptycho_fm.utils.cli import parse_boolean
-
 from ptycho_fm.utils.dispatch import (
     get_available_gpus,
     gpu_environment,

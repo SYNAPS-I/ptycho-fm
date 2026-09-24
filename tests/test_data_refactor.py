@@ -285,7 +285,9 @@ def test_noise_is_sampled_on_every_read(tmp_path, monkeypatch):
 
     class Noise:
         count = 0
-        inputs = []
+
+        def __init__(self):
+            self.inputs = []
 
         def poisson(self, image):
             self.count += 1
