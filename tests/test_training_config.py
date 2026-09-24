@@ -2,6 +2,7 @@
 
 import math
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,6 +75,20 @@ def test_default_config_contains_merged_training_options():
     ].keys()
     assert config["data"]["apply_noise"] is True
     assert config["data"]["test_apply_noise"] is False
+    assert config["trainer"]["run_name"] is None
+    assert "run_num" not in config["trainer"]
+    assert config["mlflow"]["enabled"] is True
+    assert "wandb" not in config
+    assert {
+        "dataset_name",
+        "notes",
+        "log_parameters",
+        "log_metrics",
+        "log_artifacts",
+        "log_system_metrics",
+        "log_every_n_batches",
+    } <= config["tracking"].keys()
+    assert "# wandb:" in config_path.read_text()
 
 
 @pytest.mark.parametrize("config_option", ["default", "relative", "absolute"])
@@ -98,3 +113,42 @@ def test_training_reads_config_from_working_directory(tmp_path, monkeypatch, con
     monkeypatch.setattr(config_utils.yaml, "safe_load", read_config)
     with pytest.raises(ConfigRead):
         train.main()
+
+
+def test_run_name_is_generated_once_and_legacy_run_num_is_supported():
+    config = {"trainer": {"run_name": None}, "paths": {"model_save_path": "/models"}}
+    moment = datetime(2026, 9, 23, 14, 35, 12, tzinfo=UTC)
+    assert config_utils.resolve_run_name(config, generate=True, now=moment) == "20260923-143512"
+    assert config_utils.run_directory(config) == Path("/models/run20260923-143512")
+    assert config_utils.resolve_run_name(config, generate=True) == "20260923-143512"
+
+    legacy = {"trainer": {"run_num": 7}}
+    assert config_utils.resolve_run_name(legacy) == "7"
+
+
+def test_resume_requires_an_explicit_run_name():
+    with pytest.raises(ValueError, match="required when resuming"):
+        config_utils.resolve_run_name({"trainer": {"run_name": None}})
+
+
+def test_launcher_run_name_defaults_only_an_unnamed_fresh_run():
+    config = {
+        "training": {"resume_from_checkpoint": False},
+        "trainer": {"run_name": None},
+    }
+    train.apply_launcher_run_name(config, "20260924-191504")
+    assert config["trainer"]["run_name"] == "20260924-191504"
+
+    explicit = {
+        "training": {"resume_from_checkpoint": False},
+        "trainer": {"run_name": "deliberate-name"},
+    }
+    train.apply_launcher_run_name(explicit, "20260924-191504")
+    assert explicit["trainer"]["run_name"] == "deliberate-name"
+
+    resume = {
+        "training": {"resume_from_checkpoint": True},
+        "trainer": {"run_name": "existing-run"},
+    }
+    train.apply_launcher_run_name(resume, "20260924-191504")
+    assert resume["trainer"]["run_name"] == "existing-run"

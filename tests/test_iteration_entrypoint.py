@@ -27,7 +27,7 @@ def run_training(config, path, ranks, worker):
            'MKL_NUM_THREADS': '1', 'MPLBACKEND': 'Agg', 'PYTHONPATH': str(ROOT)}
     result = subprocess.run(command, env=env, cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stdout[-8000:] + result.stderr[-8000:]
-    run_dir = Path(config['paths']['model_save_path']) / ('run' + config['trainer']['run_num'])
+    run_dir = Path(config['paths']['model_save_path']) / ('run' + config['trainer']['run_name'])
     return (torch.load(run_dir / 'checkpoint_model.pth', weights_only=True),
             torch.load(run_dir / 'checkpoint.state', weights_only=True),
             pd.read_csv(run_dir / 'logs.txt'))
@@ -36,7 +36,7 @@ def run_training(config, path, ranks, worker):
 @pytest.mark.integration
 def test_entrypoint_resume_and_cooldown(tmp_path):
     ranks = 2
-    for name in ('a', 'b'):
+    for name in ('a', 'b', 'c', 'd'):
         make_pair(tmp_path / 'data', name, modes=1, pattern_shape=(16, 16))
     worker = tmp_path / 'worker.py'
     worker.write_text('import torch\nfrom ptycho_fm.train import main\ntorch.manual_seed(123)\nmain()\n')
@@ -50,8 +50,9 @@ def test_entrypoint_resume_and_cooldown(tmp_path):
     config['model']['encoder'].update(img_size=16, patch_size=4, embed_dim=16,
                                       num_heads=2, depth=1, mlp_ratio=2, dropout=0.1)
     config['model']['decoder'].update(base_channels=4, latent_dim=None, num_stages=2)
+    config['model']['coupled_decoder_mode'] = None
     config['paths']['model_save_path'] = str(tmp_path / 'models')
-    config['wandb']['enabled'] = False
+    config.pop('wandb', None)
     config['mlflow'] = {'enabled': False}
     config['training'].update(batch_size=2, epochs=2, log_every=1, track_flops=True,
                               loss_function='weighted', platform='slurm')
@@ -59,13 +60,15 @@ def test_entrypoint_resume_and_cooldown(tmp_path):
         'enabled': True, 'scheduler_class': 'warmup-stable', 'kwargs': {'warmup_steps': 2}}
     first_step_flops = PtychoFMFlopsCalculator(config['model'], batch_size=2).training_tflops(2) * ranks * 1e12
     config['training']['log_at_flops'] = [first_step_flops / 4, first_step_flops * 3 / 4]
-    config['trainer']['run_num'] = 'whole'
+    config['trainer']['run_name'] = 'whole'
     whole_model, whole_state, whole_log = run_training(config, tmp_path / 'whole.yaml', ranks, worker)
-    config['trainer']['run_num'] = 'split'
+    config['trainer']['run_name'] = 'split'
     config['training']['stop_at_last_flop_target'] = True
     _, first_state, _ = run_training(config, tmp_path / 'first.yaml', ranks, worker)
     assert first_state['rank_runtime'][0]['progress']['samples_in_epoch'] == 2
     assert first_state['rank_runtime'][0]['progress']['iters'] == 1
+    assert 'tracking_run_id' not in first_state
+    assert 'wandb_run_id' not in first_state
     assert whole_log['targets_crossed'].iloc[0] == 2
     config['training'].update(stop_at_last_flop_target=False, resume_from_checkpoint=True)
     resumed_model, resumed_state, resumed_log = run_training(config, tmp_path / 'resume.yaml', ranks, worker)
@@ -75,11 +78,11 @@ def test_entrypoint_resume_and_cooldown(tmp_path):
     for whole_rank, resumed_rank in zip(whole_state['rank_runtime'], resumed_state['rank_runtime'], strict=True):
         assert whole_rank['progress'] == resumed_rank['progress']
         assert torch.equal(whole_rank['torch_rng'], resumed_rank['torch_rng'])
-    assert resumed_state['rank_runtime'][0]['progress']['samples_seen'] == 12
+    assert resumed_state['rank_runtime'][0]['progress']['samples_seen'] == 24
     assert resumed_log['world_size'].eq(ranks).all()
 
     config = copy.deepcopy(config)
-    config['trainer']['run_num'] = 'cooldown'
+    config['trainer']['run_name'] = 'cooldown'
     config['training']['resume_from_checkpoint'] = False
     config['training']['lr_scheduler'] = {
         'enabled': True, 'scheduler_class': 'cooldown',
@@ -107,12 +110,14 @@ def test_plain_mse_trains_with_float32_batches(tmp_path):
     config['model']['encoder'].update(img_size=16, patch_size=4, embed_dim=16,
                                       num_heads=2, depth=1, mlp_ratio=2)
     config['model']['decoder'].update(base_channels=4, latent_dim=None, num_stages=2)
+    config['model']['coupled_decoder_mode'] = None
     config['paths']['model_save_path'] = str(tmp_path / 'models')
-    config['wandb']['enabled'] = False
+    config.pop('wandb', None)
     config['mlflow'] = {'enabled': False}
     config['training'].update(batch_size=2, epochs=1, log_every=1, track_flops=False,
                               loss_function='mse', platform='slurm')
-    config['trainer']['run_num'] = 'mse'
+    config['trainer']['run_name'] = 'mse'
     _, state, logs = run_training(config, tmp_path / 'mse.yaml', 1, worker)
-    assert state['rank_runtime'][0]['progress']['optimizer_steps'] == 3
+    assert state['rank_runtime'][0]['progress']['optimizer_steps'] == 2
     assert logs['val_loss'].notna().all()
+    assert list((tmp_path / 'models' / 'runmse').glob('validation_object_0_*.png'))

@@ -14,7 +14,6 @@ model:
 
 wandb:
   notes: 'Scaling, e512, d12'
-  run_name: 'ns-e512-d12'
 
 trainer:
-  run_num: 'ns-e512-d12'
+  run_name: 'ns-e512-d12'

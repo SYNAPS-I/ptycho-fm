@@ -109,8 +109,7 @@ wandb:
   project: 'PtychoViT'
   dataset_name: 'SparkPixRT2_130nm_subset5_rerecon'
   notes: 'finetune from 360k'
-  resume_run_id: null # Optional: manually specify wandb run ID to resume otherwise null 
 
 # Trainer Configuration
 trainer:
-  run_num: 7
+  run_name: 7

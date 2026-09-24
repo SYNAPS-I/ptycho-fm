@@ -14,7 +14,6 @@ model:
 
 wandb:
   notes: 'Scaling, e256, d8'
-  run_name: 'ns-e256-d8'
 
 trainer:
-  run_num: 'ns-e256-d8'
+  run_name: 'ns-e256-d8'

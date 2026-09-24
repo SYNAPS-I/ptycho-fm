@@ -58,7 +58,7 @@ def setup(tmp_path, max_iters=None, skip=None):
     })
     progress = TrainingProgress({'log_every': 2, 'max_iters': max_iters}, calculator=Cost())
     trainer = Trainer(model, 'unsupervised', 'test', torch.device('cpu'), str(tmp_path),
-                      wandb_enabled=False, progress=progress,
+                      progress=progress,
                       skip_batch_if_grad_norm_greater_than=skip,
                       resume_context={'world_size': 1, 'batch_size': 2})
     return trainer, optimizer, scheduler, unit
@@ -111,6 +111,67 @@ def test_skipped_updates_consume_compute_but_not_scheduler_steps(tmp_path):
         torch.testing.assert_close(trainer.model.state_dict()[key], value, rtol=0, atol=0)
 
 
+def test_batch_metrics_use_completed_iteration_steps(tmp_path):
+    class CapturingLogger:
+        log_every_n_batches = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def log_metrics(self, metrics, step=None):
+            self.calls.append((metrics, step))
+
+    trainer, optimizer, scheduler, unit = setup(tmp_path)
+    logger = CapturingLogger()
+    trainer.experiment_logger = logger
+    trainer.train(
+        make_loader(data()),
+        nn.MSELoss(),
+        optimizer,
+        metrics(),
+        epoch=0,
+        scheduler=scheduler,
+        scheduler_unit=unit,
+    )
+
+    batch_calls = [
+        (payload, step)
+        for payload, step in logger.calls
+        if "train_batch_loss" in payload
+    ]
+    assert [step for _, step in batch_calls] == [2, 4]
+
+
+def test_null_batch_interval_logs_epoch_after_final_iteration(tmp_path):
+    class CapturingLogger:
+        log_every_n_batches = None
+
+        def __init__(self):
+            self.calls = []
+
+        def log_metrics(self, metrics, step=None):
+            self.calls.append((metrics, step))
+
+    trainer, optimizer, scheduler, unit = setup(tmp_path)
+    trainer.progress = TrainingProgress()
+    logger = CapturingLogger()
+    trainer.experiment_logger = logger
+    trainer.train(
+        make_loader(data()),
+        nn.MSELoss(),
+        optimizer,
+        metrics(),
+        epoch=0,
+        scheduler=scheduler,
+        scheduler_unit=unit,
+    )
+
+    assert len(logger.calls) == 1
+    payload, step = logger.calls[0]
+    assert "train_epoch_loss" in payload
+    assert step == 5
+
+
 def test_targets_crossed_together_and_optional_stopping():
     progress = TrainingProgress({'log_at_flops': [5, 10], 'stop_at_last_flop_target': True}, Cost())
     due, crossed = progress.record(batch_size=2, global_samples=4, tflops=24e-12,
@@ -130,3 +191,18 @@ def test_checkpoint_rejects_changed_optimizer_and_context(tmp_path):
     changed = torch.optim.Adam([{'params': [p]} for p in trainer.model.parameters()])
     with pytest.raises(ValueError, match='Optimizer parameters changed'):
         trainer.load_state_checkpoint(changed, scheduler)
+
+
+def test_checkpoint_allows_changed_num_workers(tmp_path):
+    trainer, opt, scheduler, _ = setup(tmp_path)
+    trainer.resume_context['data'] = {'max_shards': 10, 'num_workers': 2}
+    trainer.save_model_and_states_checkpoint(
+        0, metrics(), opt, scheduler=scheduler
+    )
+
+    trainer.resume_context['data']['num_workers'] = 4
+    trainer.load_state_checkpoint(opt, scheduler)
+
+    trainer.resume_context['data']['max_shards'] = 11
+    with pytest.raises(ValueError, match='settings differ'):
+        trainer.load_state_checkpoint(opt, scheduler)

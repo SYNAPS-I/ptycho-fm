@@ -1,4 +1,4 @@
-IsoFLOP regression fixtures
+IsoFLOP regression products
 ===========================
 
 `isoflop_points.csv` is the 60-row historical-analysis input from branch

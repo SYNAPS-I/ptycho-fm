@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
 from ptychi.image_proc import place_patches_fourier_shift
@@ -40,21 +39,30 @@ def _atomic_torch_save(obj, path):
     os.replace(tmp_path, path)
 
 
+def _checkpoint_resume_context(context):
+    """Remove execution-only settings that do not change training semantics."""
+    normalized = dict(context)
+    data = context.get('data')
+    if isinstance(data, dict):
+        normalized['data'] = {
+            key: value for key, value in data.items() if key != 'num_workers'
+        }
+    return normalized
+
+
 class Trainer:
     def __init__(
         self,
         model,
         mode,
-        run_num,
+        run_name,
         device,
         model_save_path,
         is_main_process=True,
         use_ddp=False,
-        wandb_enabled=True,
         debug_mode=False,
         skip_batch_if_grad_norm_greater_than=None,
-        mlflow_logger=None,
-        mlflow_log_every_n_batches=50,
+        experiment_logger=None,
         progress=None,
         resume_context=None,
     ):
@@ -63,16 +71,14 @@ class Trainer:
         self.progress = progress or TrainingProgress()
         self.resume_context = resume_context or {}
         self.mode = mode
-        self.run_num = run_num
+        self.run_name = run_name
         self.device = device
         self.model_save_path = model_save_path
         self.is_main_process = is_main_process
         self.use_ddp = use_ddp
-        self.wandb_enabled = wandb_enabled
         self.debug_mode = debug_mode
         self.skip_batch_if_grad_norm_greater_than = skip_batch_if_grad_norm_greater_than
-        self.mlflow_logger = mlflow_logger
-        self.mlflow_log_every_n_batches = max(int(mlflow_log_every_n_batches), 1)
+        self.experiment_logger = experiment_logger
 
     def _range_push(self, name):
         if self.device.type == 'cuda':
@@ -109,7 +115,7 @@ class Trainer:
     def update_saved_model(self, name):
         """Update saved model (checkpoints and if validation loss is minimized)."""
         os.makedirs(self.model_save_path, exist_ok=True)
-        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
         os.makedirs(run_path, exist_ok=True)
 
         if isinstance(self.model, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
@@ -123,7 +129,7 @@ class Trainer:
 
     def save_config(self, config_path='config.yaml'):
         """Save a copy of the config file to the run path for reproducibility."""
-        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
         if not os.path.isdir(run_path):
             os.makedirs(run_path, exist_ok=True)
         if os.path.exists(config_path):
@@ -145,7 +151,7 @@ class Trainer:
         return [[(names[id(param)], tuple(param.shape)) for param in group['params']]
                 for group in optimizer.param_groups]
 
-    def generate_state_dict(self, epoch_num, metrics, optimizer, wandb_run_id=None, scheduler=None):
+    def generate_state_dict(self, epoch_num, metrics, optimizer, scheduler=None):
         """All ranks participate so resume restores each rank's RNG and interval."""
         local = self._rank_runtime()
         runtime = [local]
@@ -159,17 +165,17 @@ class Trainer:
             'optimizer_state_dict': optimizer.state_dict(),
             'optimizer_signature': self._optimizer_signature(optimizer),
             'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-            'wandb_run_id': wandb_run_id,
             'rank_runtime': runtime,
             'resume_context': self.resume_context,
         }
 
-    def save_model_and_states_checkpoint(self, epoch_num, metrics, optimizer=None,
-                                         wandb_run_id=None, scheduler=None):
-        state = self.generate_state_dict(epoch_num, metrics, optimizer, wandb_run_id, scheduler)
+    def save_model_and_states_checkpoint(
+        self, epoch_num, metrics, optimizer=None, scheduler=None
+    ):
+        state = self.generate_state_dict(epoch_num, metrics, optimizer, scheduler)
         if not self.is_main_process:
             return
-        state_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        state_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
         os.makedirs(state_path, exist_ok=True)
         self.update_saved_model('checkpoint_model')
         if self.progress.enabled:
@@ -182,7 +188,7 @@ class Trainer:
     def load_state_checkpoint(self, optimizer, scheduler=None, checkpoint_file=None,
                               skip_scheduler=False):
         checkpoint_fname = checkpoint_file or os.path.join(
-            self.model_save_path, 'run' + str(self.run_num), 'checkpoint.state')
+            self.model_save_path, 'run' + str(self.run_name), 'checkpoint.state')
         state = torch.load(checkpoint_fname, map_location='cpu', weights_only=True)
         signature = state.get('optimizer_signature')
         if signature is not None and signature != self._optimizer_signature(optimizer):
@@ -192,7 +198,9 @@ class Trainer:
                 raise ValueError('Legacy iteration/compute state requires explicit conversion before resume; weights-only loading is fine-tuning')
             self.progress.epoch = state['current_epoch']
         else:
-            if state['resume_context'] != self.resume_context:
+            saved_context = _checkpoint_resume_context(state['resume_context'])
+            active_context = _checkpoint_resume_context(self.resume_context)
+            if saved_context != active_context:
                 raise ValueError('Resume dataset/model/batch/world-size settings differ from the checkpoint')
             rank = dist.get_rank() if self.use_ddp and dist.is_initialized() else 0
             runtime = state['rank_runtime'][rank]
@@ -217,7 +225,7 @@ class Trainer:
             if scheduler is None:
                 raise ValueError('Checkpoint contains a scheduler; resume requires the same scheduler configuration')
             scheduler.load_state_dict(state['scheduler_state_dict'])
-        return self.progress.epoch, state['loss_tracker'], optimizer, state.get('wandb_run_id'), scheduler
+        return self.progress.epoch, state['loss_tracker'], optimizer, scheduler
 
     def generate_plot(self, in_dp, out_dp, gt_amp, pred_amp, gt_ph, pred_ph, filename):
         f, ax = plt.subplots(nrows=2, ncols=3)
@@ -259,12 +267,15 @@ class Trainer:
         ax[1, 2].set_title('Predicted Phase')
 
         plt.tight_layout()
-        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
         if not os.path.isdir(run_path):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
-    def generate_test_plot(self, dataloader, epoch, filename, central_crop=64, ph_crop=180):
+    def generate_test_plot(
+        self, dataloader, epoch, filename, central_crop=64, object_crop=180,
+        log_key="test_plot", artifact_path="test_plots", caption=None,
+    ):
         total_scan_points = len(dataloader.dataset)
         pred_amp = torch.zeros((total_scan_points, dataloader.dataset.pattern_shape[0], dataloader.dataset.pattern_shape[1]), device='cpu')
         pred_ph = torch.zeros(pred_amp.shape, device='cpu')
@@ -273,6 +284,7 @@ class Trainer:
         scan_idx = 0
 
         with torch.no_grad():
+            inference_model = self.model.module if self.use_ddp else self.model
             for i, batch in enumerate(dataloader):
                 if isinstance(batch, (list, tuple)) and len(batch) == 8:
                     diff_amp, amp_patch, ph_patch, probe, _probe_pos, norm, scale, _meta = batch
@@ -285,7 +297,7 @@ class Trainer:
                 input_norm = norm.to(self.device, non_blocking=True)
                 input_scale = scale.to(self.device, non_blocking=True)
 
-                _output_diff, output_amp, output_ph = self.model(input_diff, input_probe, input_norm, input_scale)
+                _output_diff, output_amp, output_ph = inference_model(input_diff, input_probe, input_norm, input_scale)
                 pred_amp[scan_idx:scan_idx + batch_size] = output_amp.squeeze().detach().cpu()
                 pred_ph[scan_idx:scan_idx + batch_size] = output_ph.squeeze().detach().cpu()
                 gt_amp[scan_idx:scan_idx + batch_size] = amp_patch.squeeze().detach().cpu()
@@ -300,12 +312,13 @@ class Trainer:
         buffer = torch.zeros(object_size, device='cpu')
 
         central_crop = int(central_crop)
-        if central_crop <= 0:
-            raise ValueError("test_plot central_crop must be a positive integer.")
+        if central_crop < 0 or 2 * central_crop >= min(dataloader.dataset.pattern_shape):
+            raise ValueError("central_crop must be non-negative and smaller than half the pattern size.")
+        patch_slice = slice(central_crop, -central_crop if central_crop else None)
         pred_amp_object = place_patches_fourier_shift(
             pred_amp_object,
             positions,
-            pred_amp[:, central_crop:-central_crop, central_crop:-central_crop],
+            pred_amp[:, patch_slice, patch_slice],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -313,7 +326,7 @@ class Trainer:
         pred_ph_object = place_patches_fourier_shift(
             pred_ph_object,
             positions,
-            pred_ph[:, central_crop:-central_crop, central_crop:-central_crop],
+            pred_ph[:, patch_slice, patch_slice],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -321,7 +334,7 @@ class Trainer:
         buffer = place_patches_fourier_shift(
             buffer,
             positions,
-            torch.ones_like(pred_ph[:, central_crop:-central_crop, central_crop:-central_crop]),
+            torch.ones_like(pred_ph[:, patch_slice, patch_slice]),
             op="add",
             adjoint_mode=False,
             pad=32
@@ -332,7 +345,7 @@ class Trainer:
         gt_amp_object = place_patches_fourier_shift(
             gt_amp_object,
             positions,
-            gt_amp[:, central_crop:-central_crop, central_crop:-central_crop],
+            gt_amp[:, patch_slice, patch_slice],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -340,7 +353,7 @@ class Trainer:
         gt_ph_object = place_patches_fourier_shift(
             gt_ph_object,
             positions,
-            gt_ph[:, central_crop:-central_crop, central_crop:-central_crop],
+            gt_ph[:, patch_slice, patch_slice],
             op="add",
             adjoint_mode=False,
             pad=32
@@ -351,50 +364,55 @@ class Trainer:
         gt_amp_object = gt_amp_object / torch.clip(buffer, min=1)
         gt_ph_object = gt_ph_object / torch.clip(buffer, min=1)
 
-        ph_crop = int(ph_crop)
-        if ph_crop <= 0:
-            raise ValueError("test_plot ph_crop must be a positive integer.")
-        vmin_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) - (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
-        vmax_ph = torch.mean(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]) + (2 * torch.std(pred_ph_object[ph_crop:-ph_crop, ph_crop:-ph_crop]))
+        object_crop = int(object_crop)
+        if object_crop < 0 or 2 * object_crop >= min(object_size):
+            raise ValueError("object_crop must be non-negative and smaller than half the object size.")
+        object_slice = slice(object_crop, -object_crop if object_crop else None)
+        phase_region = pred_ph_object[object_slice, object_slice]
+        vmin_ph = torch.mean(phase_region) - (2 * torch.std(phase_region))
+        vmax_ph = torch.mean(phase_region) + (2 * torch.std(phase_region))
 
         f, ax = plt.subplots(figsize=(9, 8), ncols=2, nrows=2)
 
-        gt0 = ax[0, 0].imshow(gt_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        gt0 = ax[0, 0].imshow(gt_amp_object[object_slice, object_slice], interpolation='none', vmin=0.9, vmax=1)
         divider = make_axes_locatable(ax[0, 0])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(gt0, cax=cax, orientation='vertical')
         ax[0, 0].set_title('LSQML amplitude')
 
-        gt1 = ax[0, 1].imshow(gt_ph_object[180:-180, 180:-180], interpolation='none', vmin=-1.3, vmax=1.3, cmap='magma')
+        gt1 = ax[0, 1].imshow(gt_ph_object[object_slice, object_slice], interpolation='none', vmin=-1.3, vmax=1.3, cmap='magma')
         divider = make_axes_locatable(ax[0, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(gt1, cax=cax, orientation='vertical')
         ax[0, 1].set_title('LSQML phase')
 
-        pred0 = ax[1, 0].imshow(pred_amp_object[180:-180, 180:-180], interpolation='none', vmin=0.9, vmax=1)
+        pred0 = ax[1, 0].imshow(pred_amp_object[object_slice, object_slice], interpolation='none', vmin=0.9, vmax=1)
         divider = make_axes_locatable(ax[1, 0])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(pred0, cax=cax, orientation='vertical')
         ax[1, 0].set_title('Predicted amplitude')
 
-        pred1 = ax[1, 1].imshow(pred_ph_object[180:-180, 180:-180], interpolation='none', vmin=vmin_ph, vmax=vmax_ph, cmap='magma')
+        pred1 = ax[1, 1].imshow(pred_ph_object[object_slice, object_slice], interpolation='none', vmin=vmin_ph, vmax=vmax_ph, cmap='magma')
         divider = make_axes_locatable(ax[1, 1])
         cax = divider.append_axes('right', size='5%', pad=0.05)
         f.colorbar(pred1, cax=cax, orientation='vertical')
         ax[1, 1].set_title('Predicted phase')
 
         plt.tight_layout()
-        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+        run_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
         if not os.path.isdir(run_path):
             os.mkdir(run_path)
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
         plt.close(f)
 
-        if self.wandb_enabled:
-            wandb.log({"test_plot": wandb.Image(os.path.join(run_path, filename), caption=f"Test: epoch {epoch}")}, step=epoch, commit=True)
-
-        if self.mlflow_logger is not None:
-            self.mlflow_logger.log_artifact(os.path.join(run_path, filename), artifact_path="test_plots")
+        if self.experiment_logger is not None:
+            self.experiment_logger.log_image(
+                log_key,
+                os.path.join(run_path, filename),
+                caption=caption or f"Test: epoch {epoch}",
+                step=self.progress.iters,
+                artifact_path=artifact_path,
+            )
 
     def train(self, dataloader, criterion, optimizer, metrics, profile=False, epoch=None,
               scheduler=None, scheduler_unit="epoch", on_iteration=None):
@@ -521,9 +539,6 @@ class Trainer:
                     dist.all_reduce(norm_tensor, op=dist.ReduceOp.MAX)
                     global_max_norm = float(norm_tensor.item())
 
-                if self.debug_mode and self.is_main_process and self.wandb_enabled:
-                    wandb.log({"grad_norm": global_max_norm}, step=self.progress.iters if self.progress.enabled else None)
-
             updated = False
             skip_threshold = self.skip_batch_if_grad_norm_greater_than
             if skip_threshold is not None and global_max_norm is not None and global_max_norm > skip_threshold:
@@ -562,26 +577,6 @@ class Trainer:
             running_amp_loss += batch_amp_loss
             running_ph_loss  += batch_ph_loss
 
-            # Sub-epoch MLflow granularity: per-N-batch loss + GPU mem, so the
-            # UI shows loss actually moving during a long epoch rather than
-            # only redrawing at end-of-epoch. Global step monotonically
-            # increases across epochs: epoch * total_batches + batch_idx.
-            if (
-                self.mlflow_logger is not None
-                and self.is_main_process
-                and (batch_idx % self.mlflow_log_every_n_batches == 0)
-            ):
-                global_step = self.progress.iters
-                batch_metrics = {
-                    "train_batch_loss": batch_loss,
-                    "train_batch_amp_loss": batch_amp_loss,
-                    "train_batch_ph_loss": batch_ph_loss,
-                }
-                if torch.cuda.is_available():
-                    batch_metrics["train_gpu_mem_gb"] = (
-                        torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
-                    )
-                self.mlflow_logger.log_metrics(batch_metrics, step=global_step)
 
             if (
                 batch_idx > 0
@@ -610,6 +605,41 @@ class Trainer:
                 tflops=float(totals[1].item()), updated=updated,
                 losses=(batch_loss, batch_amp_loss, batch_ph_loss),
             )
+
+            # Log only after record() advances the completed-iteration count.
+            if (
+                self.debug_mode
+                and self.experiment_logger is not None
+                and self.is_main_process
+            ):
+                self.experiment_logger.log_metrics(
+                    {'grad_norm': global_max_norm},
+                    step=self.progress.iters,
+                )
+
+            batch_log_interval = (
+                self.experiment_logger.log_every_n_batches
+                if self.experiment_logger is not None
+                else None
+            )
+            if (
+                batch_log_interval is not None
+                and self.is_main_process
+                and self.progress.iters % batch_log_interval == 0
+            ):
+                batch_metrics = {
+                    "train_batch_loss": batch_loss,
+                    "train_batch_amp_loss": batch_amp_loss,
+                    "train_batch_ph_loss": batch_ph_loss,
+                }
+                if self.device.type == 'cuda':
+                    batch_metrics["train_gpu_mem_gb"] = (
+                        torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
+                    )
+                self.experiment_logger.log_metrics(
+                    batch_metrics, step=self.progress.iters
+                )
+
             at_boundary = batch_idx + 1 == total_batches
             if at_boundary:
                 self.progress.finish_epoch()
@@ -645,20 +675,16 @@ class Trainer:
         avg_amp_loss = self.synchronize_loss(avg_amp_loss)
         avg_ph_loss = self.synchronize_loss(avg_ph_loss)
 
-        if self.is_main_process and self.wandb_enabled:
-            wandb.log({"train_loss": avg_train_loss}, step=epoch)
-            wandb.log({"train_amp_loss": avg_amp_loss}, step=epoch)
-            wandb.log({"train_ph_loss": avg_ph_loss}, step=epoch)
-
-        if self.mlflow_logger is not None and self.is_main_process:
-            self.mlflow_logger.log_metrics(
+        if self.experiment_logger is not None and self.is_main_process:
+            self.experiment_logger.log_metrics(
                 {
                     "train_epoch_loss": avg_train_loss,
                     "train_epoch_amp_loss": avg_amp_loss,
                     "train_epoch_ph_loss": avg_ph_loss,
                     "train_epoch_time_s": epoch_time,
+                    "epoch": epoch,
                 },
-                step=epoch,
+                step=self.progress.iters,
             )
 
         metrics['training_loss'].append(avg_train_loss)
@@ -821,17 +847,12 @@ class Trainer:
         avg_ph_ssim = self.synchronize_loss(avg_ph_ssim)
         avg_ph_psnr = self.synchronize_loss(avg_ph_psnr)
 
-        if emit_scalars and self.is_main_process and self.wandb_enabled:
-            wandb.log({"val_loss": avg_val_loss}, step=epoch)
-            wandb.log({"val_amp_loss": avg_val_amp_loss}, step=epoch)
-            wandb.log({"val_ph_loss": avg_val_ph_loss}, step=epoch)
-            wandb.log({"val_amp_ssim": avg_amp_ssim}, step=epoch)
-            wandb.log({"val_amp_psnr": avg_amp_psnr}, step=epoch)
-            wandb.log({"val_ph_ssim": avg_ph_ssim}, step=epoch)
-            wandb.log({"val_ph_psnr": avg_ph_psnr}, step=epoch)
-
-        if emit_scalars and self.mlflow_logger is not None and self.is_main_process:
-            self.mlflow_logger.log_metrics(
+        if (
+            emit_scalars
+            and self.experiment_logger is not None
+            and self.is_main_process
+        ):
+            self.experiment_logger.log_metrics(
                 {
                     "val_loss": avg_val_loss,
                     "val_amp_loss": avg_val_amp_loss,
@@ -840,8 +861,9 @@ class Trainer:
                     "val_amp_psnr": avg_amp_psnr,
                     "val_ph_ssim": avg_ph_ssim,
                     "val_ph_psnr": avg_ph_psnr,
+                    "epoch": epoch,
                 },
-                step=epoch,
+                step=self.progress.iters,
             )
 
         metrics['validation_loss'].append(avg_val_loss)
@@ -876,14 +898,17 @@ class Trainer:
 
             filename = 'plot_epoch' + str(epoch) + '.png'
             self.generate_plot(input_diff_np, output_diff_np, input_amp, output_amp, input_ph, output_ph, filename)
-            run_path = os.path.join(self.model_save_path, 'run' + str(self.run_num))
+            run_path = os.path.join(self.model_save_path, 'run' + str(self.run_name))
             plot_path = os.path.join(run_path, filename)
 
-            if self.wandb_enabled:
-                wandb.log({"val_plot": wandb.Image(plot_path, caption=f"Epoch {epoch}")}, step=epoch)
-
-            if self.mlflow_logger is not None:
-                self.mlflow_logger.log_artifact(plot_path, artifact_path="val_plots")
+            if self.experiment_logger is not None:
+                self.experiment_logger.log_image(
+                    'val_plot',
+                    plot_path,
+                    caption=f"Epoch {epoch}",
+                    step=self.progress.iters,
+                    artifact_path='val_plots',
+                )
 
         if scheduler:
             # Only ReduceLROnPlateau expects a monitored metric; others use epoch progression.
@@ -894,11 +919,14 @@ class Trainer:
             if 'lr' not in metrics:
                 metrics['lr'] = []
             metrics['lr'].append(optimizer.param_groups[0]['lr'])
-            if emit_scalars and self.is_main_process and self.wandb_enabled:
-                wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=epoch)
-            if self.is_main_process and self.mlflow_logger is not None:
-                self.mlflow_logger.log_metrics(
-                    {"lr": optimizer.param_groups[0]['lr']}, step=epoch
+            if (
+                emit_scalars
+                and self.is_main_process
+                and self.experiment_logger is not None
+            ):
+                self.experiment_logger.log_metrics(
+                    {"lr": optimizer.param_groups[0]['lr'], "epoch": epoch},
+                    step=self.progress.iters,
                 )
 
         if avg_val_loss < metrics['best_val_loss']:

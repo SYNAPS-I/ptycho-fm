@@ -11,12 +11,19 @@ Reference: gwbischof/mlflow-examples/mlflow_tool.py.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from typing import Any
 
 
 class MLflowLogger:
-    def __init__(self, config: dict, is_main_process: bool):
+    def __init__(
+        self,
+        config: dict,
+        is_main_process: bool,
+        *,
+        log_system_metrics: bool = True,
+        run_name: str | None = None,
+        resume: bool = False,
+    ):
         self.is_main_process = is_main_process
         mlflow_cfg = config.get('mlflow', {}) or {}
         self.enabled = bool(mlflow_cfg.get('enabled', False)) and is_main_process
@@ -39,21 +46,48 @@ class MLflowLogger:
             )
         mlflow.set_tracking_uri(tracking_uri)
 
-        self._apply_azureml_compat_shim()
-
-        experiment_name = mlflow_cfg.get('experiment_name', 'ptycho-vit')
-        mlflow.set_experiment(experiment_name)
-
-        run_name = mlflow_cfg.get('run_name')
+        if mlflow_cfg.get('azureml_compat', False):
+            self._apply_azureml_compat_shim()
+        experiment_name = mlflow_cfg.get("experiment_name", "ptycho-fm")
+        experiment = mlflow.set_experiment(experiment_name)
+        run_name = run_name or config.get("trainer", {}).get("run_name")
         if not run_name:
-            run_num = config.get('trainer', {}).get('run_num', 'run')
-            run_name = f"{run_num}-{datetime.now(tz=UTC).astimezone().strftime('%Y%m%d-%H%M%S')}"
+            raise ValueError("A canonical trainer.run_name is required for MLflow")
 
-        tags = mlflow_cfg.get('tags') or {}
-        self.run = mlflow.start_run(run_name=run_name, tags=tags)
+        tags = mlflow_cfg.get("tags") or {}
         self._mlflow = mlflow
         self._client = MlflowClient()
-        print(f"MLflow run started: {self.run.info.run_id} (experiment: {experiment_name})", flush=True)
+        if resume:
+            escaped_name = run_name.replace("'", "''")
+            matches = self._client.search_runs(
+                [experiment.experiment_id],
+                filter_string=f"tags.`mlflow.runName` = '{escaped_name}'",
+                max_results=2,
+            )
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Expected exactly one MLflow run named {run_name!r} in "
+                    f"experiment {experiment_name!r}, found {len(matches)}"
+                )
+            self.run = mlflow.start_run(
+                run_id=matches[0].info.run_id,
+                log_system_metrics=log_system_metrics,
+            )
+            if tags:
+                mlflow.set_tags(tags)
+            action = "resumed"
+        else:
+            self.run = mlflow.start_run(
+                run_name=run_name,
+                tags=tags,
+                log_system_metrics=log_system_metrics,
+            )
+            action = "started"
+        print(
+            f"MLflow run {action}: {self.run.info.run_id} "
+            f"(name: {run_name}, experiment: {experiment_name})",
+            flush=True,
+        )
 
     @staticmethod
     def _apply_azureml_compat_shim() -> None:
@@ -117,7 +151,7 @@ class MLflowLogger:
         except MlflowException:
             self._client.create_registered_model(
                 model_name,
-                description="ptycho-vit fine-tuned model",
+                description="ptycho-fm fine-tuned model",
             )
 
         result = self._client.create_model_version(

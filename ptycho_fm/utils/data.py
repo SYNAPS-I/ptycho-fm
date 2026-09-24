@@ -2,14 +2,107 @@
 
 import hashlib
 import json
-from itertools import islice
+from itertools import islice, pairwise
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, DistributedSampler, Sampler, Subset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler, Subset
 
 from ptycho_fm.data import RankShardedSubset
 from ptycho_fm.prefetcher import CUDAPrefetcher
+
+
+class ObjectDatasetView(Dataset):
+    """Sequential view of every diffraction pattern belonging to one object."""
+
+    def __init__(self, dataset: Dataset, object_index: int):
+        self.dataset = dataset
+        self.object_index = int(object_index)
+        offsets = dataset.object_offsets
+        if self.object_index < 0 or self.object_index >= len(offsets) - 1:
+            raise IndexError(object_index)
+        self.start = int(offsets[self.object_index])
+        self.stop = int(offsets[self.object_index + 1])
+        self.object_key = dataset.object_keys[self.object_index]
+        self._metadata = None
+
+    def __len__(self):
+        return self.stop - self.start
+
+    def __getitem__(self, index):
+        index = int(index)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self.dataset[self.start + index]
+
+    def _plot_metadata(self):
+        if self._metadata is None:
+            self._metadata = self.dataset.get_object_plot_metadata(self.object_index)
+            position_count = len(self._metadata["positions"])
+            if position_count != len(self):
+                raise ValueError(
+                    f"Object {self.object_key!r} has {len(self)} patterns but "
+                    f"{position_count} probe positions"
+                )
+        return self._metadata
+
+    @property
+    def pattern_shape(self):
+        return self._plot_metadata()["pattern_shape"]
+
+    @property
+    def object_shape(self):
+        return self._plot_metadata()["object_shape"]
+
+    def get_probe_positions(self):
+        return self._plot_metadata()["positions"]
+
+
+def split_dataset_by_object(dataset, train_fraction, random_seed, subset_fraction=None):
+    """Split complete objects, returning pattern-level subsets for existing loaders."""
+    train_fraction = float(train_fraction)
+    if not 0.0 < train_fraction < 1.0:
+        raise ValueError("data.train_split must be in the range (0, 1).")
+    offsets = [int(value) for value in dataset.object_offsets]
+    object_keys = list(dataset.object_keys)
+    if len(offsets) != len(object_keys) + 1 or offsets[0] != 0 or offsets[-1] != len(dataset):
+        raise ValueError("Dataset object catalog is inconsistent with its pattern count.")
+    if any(stop <= start for start, stop in pairwise(offsets)):
+        raise ValueError("Every object must contain at least one diffraction pattern.")
+
+    object_count = len(object_keys)
+    if subset_fraction is not None:
+        subset_fraction = float(subset_fraction)
+        if not 0.0 < subset_fraction <= 1.0:
+            raise ValueError("data.subset_fraction must be in the range (0, 1].")
+        object_count = int(object_count * subset_fraction)
+        if object_count < 1:
+            raise ValueError(
+                f"data.subset_fraction={subset_fraction} results in 0 objects. "
+                "Increase subset_fraction or use a larger dataset."
+            )
+
+    train_object_count = int(object_count * train_fraction)
+    if train_object_count < 1 or train_object_count >= object_count:
+        raise ValueError(
+            f"Object-level train/validation split requires at least one object in each "
+            f"split; got {object_count} selected object(s) and train_split={train_fraction}."
+        )
+    generator = torch.Generator().manual_seed(int(random_seed))
+    permutation = torch.randperm(object_count, generator=generator).tolist()
+    train_object_indices = permutation[:train_object_count]
+    val_object_indices = permutation[train_object_count:]
+
+    def pattern_indices(object_indices):
+        return [
+            pattern_index
+            for object_index in object_indices
+            for pattern_index in range(offsets[object_index], offsets[object_index + 1])
+        ]
+
+    train_subset = Subset(dataset, pattern_indices(train_object_indices))
+    val_subset = Subset(dataset, pattern_indices(val_object_indices))
+    return train_subset, val_subset, train_object_indices, val_object_indices
 
 
 class ResumeSampler(Sampler):

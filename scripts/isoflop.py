@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ptycho_fm.analysis.isoflop import (
+from ptycho_fm.isoflop import (
     METRICS,
     collect_points,
     plot_fit_diagnostic,

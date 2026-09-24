@@ -1,4 +1,4 @@
-config,label,run_num,target_flops,params_m,train_loss,val_loss,iter,tflops_consumed
+config,label,run_name,target_flops,params_m,train_loss,val_loss,iter,tflops_consumed
 configs/e192_d6.yaml,ns-e192-d6,ns-e192-d6,6e+17,3.44434,0.01904386840760708,0.010495586320757866,122009,600004.1472735314
 configs/e192_d6.yaml,ns-e192-d6,ns-e192-d6,1e+18,3.44434,0.010048933327198029,0.009748298674821854,203347,1000000.3551838866
 configs/e256_d8.yaml,ns-e256-d8,ns-e256-d8,6e+17,7.65114,0.024368079379200935,0.01069584395736456,60434,600002.0207614034

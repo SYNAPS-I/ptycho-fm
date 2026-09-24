@@ -14,7 +14,6 @@ data:
   deterministic_noise: true
   noise_seed: 42
   apply_noise: true
-  sharding_strategy: dynamic
   drop_last: true
 
 training:

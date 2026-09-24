@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 
 from ptycho_fm.data import PtychographyDataset
 from ptycho_fm.model.model import PtychoFM
+from ptycho_fm.utils.config import resolve_run_name, run_directory
 
 
 def main() -> None:
@@ -21,6 +22,7 @@ def main() -> None:
             return config
 
     config = load_config(config_path)
+    run_name = resolve_run_name(config, generate=False)
 
     # Create test dataset
     test_dataset = PtychographyDataset(
@@ -63,7 +65,7 @@ def main() -> None:
         torch.cuda.empty_cache()
         print(f'GPU memory before loading model: {torch.cuda.memory_allocated()/1024**3:.2f} GiB allocated, {torch.cuda.memory_reserved()/1024**3:.2f} GiB reserved')
 
-    run_path = os.path.join(config['paths']['model_save_path'], 'run' + str(config['trainer']['run_num']))
+    run_path = str(run_directory(config))
     model.load_state_dict(torch.load(os.path.join(run_path, 'best_model.pth'), map_location=DEVICE, weights_only=True))
     print('Model loaded successfully')
 
@@ -167,7 +169,7 @@ def main() -> None:
 
     # Save results
     RESULTS_PATH = '/scratch/aileenluo/ptycho-vit/results'
-    results_run = os.path.join(RESULTS_PATH, 'run' + str(config['trainer']['run_num']))
+    results_run = os.path.join(RESULTS_PATH, 'run' + run_name)
     if not os.path.isdir(RESULTS_PATH):
         os.mkdir(RESULTS_PATH)
     if not os.path.isdir(results_run):

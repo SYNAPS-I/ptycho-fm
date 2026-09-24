@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ptycho_fm.utils.config import load_config
+from ptycho_fm.utils.config import load_config, resolve_run_name, run_directory
 from ptycho_fm.utils.flops import PtychoFMFlopsCalculator
 
 METRICS = {'validation': ('val_loss', 'Validation loss'), 'training': ('train_loss', 'Training loss')}
@@ -64,8 +64,8 @@ def collect_points(config_flops, tolerance=0.05, loss_metric='val_loss'):
     for config_name, targets in config_flops.items():
         path = Path(config_name).expanduser().resolve()
         config = load_config(path)
-        run_num = config['trainer']['run_num']
-        run_dir = Path(config['paths']['model_save_path']).expanduser() / f'run{run_num}'
+        run_name = resolve_run_name(config, generate=False)
+        run_dir = run_directory(config)
         saved = run_dir / 'config.yaml'
         if saved.is_file():
             config = load_config(saved)
@@ -87,8 +87,8 @@ def collect_points(config_flops, tolerance=0.05, loss_metric='val_loss'):
                 params = PtychoFMFlopsCalculator(config['model'], batch_size=1).param_count()
                 param_source = 'current_model_reconstruction'
             points.append({
-                'config': str(path), 'label': config.get('wandb', {}).get('run_name') or path.stem,
-                'run_num': run_num, 'target_flops': float(target), 'params_m': params,
+                'config': str(path), 'label': run_name,
+                'run_name': run_name, 'target_flops': float(target), 'params_m': params,
                 'train_loss': to_float(row, 'train_loss'), 'val_loss': to_float(row, 'val_loss'),
                 'iter': int(float(row['iter'])), 'tflops_consumed': float(row['tflops_consumed']),
                 'relative_compute_error': abs(float(row['tflops_consumed']) * 1e12 - target) / target,

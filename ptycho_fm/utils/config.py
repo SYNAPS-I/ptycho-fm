@@ -1,9 +1,48 @@
 """YAML configuration inheritance shared by training and analysis."""
 
 import copy
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
+
+
+def resolve_run_name(config: dict, *, generate: bool = False, now=None) -> str:
+    """Resolve the canonical local/tracker run name, accepting legacy run_num."""
+    trainer = config.setdefault("trainer", {})
+    run_name = trainer.get("run_name")
+    legacy_run_num = trainer.get("run_num")
+
+    if run_name is None and legacy_run_num is not None:
+        run_name = str(legacy_run_num)
+    elif (
+        run_name is not None
+        and legacy_run_num is not None
+        and str(run_name) != str(legacy_run_num)
+    ):
+        raise ValueError("trainer.run_name and legacy trainer.run_num disagree")
+
+    if run_name is None:
+        if not generate:
+            raise ValueError(
+                "trainer.run_name is required when resuming or reading an existing run"
+            )
+        timestamp = now or datetime.now(tz=UTC).astimezone()
+        run_name = timestamp.strftime("%Y%m%d-%H%M%S")
+
+    run_name = str(run_name).strip()
+    if not run_name or run_name in {".", ".."} or "/" in run_name or "\\" in run_name:
+        raise ValueError(
+            "trainer.run_name must be a non-empty directory-safe name without slashes"
+        )
+    trainer["run_name"] = run_name
+    return run_name
+
+
+def run_directory(config: dict) -> Path:
+    """Return the model directory for an already resolved run name."""
+    run_name = resolve_run_name(config, generate=False)
+    return Path(config["paths"]["model_save_path"]).expanduser() / f"run{run_name}"
 
 
 def deep_merge_config(base: dict, override: dict) -> dict:

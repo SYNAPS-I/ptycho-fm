@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ptycho_fm.analysis.isoflop import METRICS, plot_metric, validate_data
+from ptycho_fm.isoflop import METRICS, plot_metric, validate_data
 
 DEFAULT_INPUT = Path("workspace/paper/isoflop_points.csv")
 DEFAULT_OUTPUT_DIR = Path("workspace/paper")

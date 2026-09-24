@@ -7,14 +7,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ptycho_fm.analysis.isoflop import (
+from ptycho_fm.isoflop import (
     find_row_for_target,
     fit_budget,
     historical_token_compute,
     validate_data,
 )
 
-FIXTURES = Path(__file__).parent / 'fixtures'
+FIXTURES = Path(__file__).parents[1] / 'products'
 
 
 def test_historical_fits_match_original_plotter():
@@ -62,11 +62,11 @@ def test_historical_compute_scales_with_tokens_not_batch_history():
 def test_collector_prefers_saved_config_and_preserves_logged_counts(tmp_path):
     import yaml
 
-    from ptycho_fm.analysis.isoflop import collect_points
+    from ptycho_fm.isoflop import collect_points
 
     run = tmp_path / 'run1'
     run.mkdir()
-    config = {'trainer': {'run_num': 1}, 'paths': {'model_save_path': str(tmp_path)},
+    config = {'trainer': {'run_name': '1'}, 'paths': {'model_save_path': str(tmp_path)},
               'model': {'encoder_type': 'unsupported'}, 'wandb': {'run_name': 'mutable'}}
     source = tmp_path / 'experiment.yaml'
     source.write_text(yaml.safe_dump(config))
@@ -77,7 +77,7 @@ def test_collector_prefers_saved_config_and_preserves_logged_counts(tmp_path):
     points = collect_points({source: [1e14]})
     assert len(points) == 1
     point = points[0]
-    assert point['label'] == 'saved'
+    assert point['label'] == '1'
     assert point['params_m'] == 42
     assert point['parameter_count_source'] == 'logged'
     assert point['accounting_version'] == 'old_record'

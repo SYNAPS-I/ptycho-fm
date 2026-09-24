@@ -65,7 +65,8 @@ def test_packed_noise_is_applied_before_normalization(tmp_path, monkeypatch):
         packed["normalization"] = np.array([4.0])
 
     class Noise:
-        inputs = []
+        def __init__(self):
+            self.inputs = []
 
         def poisson(self, image):
             self.inputs.append(image.copy())
@@ -141,3 +142,35 @@ def test_dataloader_real_fields_are_float32(tmp_path, source):
         torch.float32, torch.float32, torch.float32, torch.complex64,
         torch.float32, torch.float32, torch.float32,
     ]
+
+
+def test_packed_dataset_exposes_object_catalog_and_views(tmp_path):
+    import h5py
+
+    from ptycho_fm.data_simple_pack import PtychographyDatasetPacked
+    from ptycho_fm.utils.data import ObjectDatasetView
+
+    with h5py.File(tmp_path / "packed_00000.hdf5", "w") as packed:
+        packed["n_dp"] = np.array([2, 3])
+        packed["object_key"] = np.array(
+            ["first", "second"], dtype=h5py.string_dtype("utf-8")
+        )
+        packed["dp"] = np.ones((2, 3, 4, 4), dtype=np.float32)
+        packed["object"] = np.ones((2, 1, 8, 8), dtype=np.complex64)
+        packed["probe"] = np.ones((2, 1, 1, 4, 4), dtype=np.complex64)
+        packed["probe_position_y_m"] = np.zeros((2, 3), dtype=np.float32)
+        packed["probe_position_x_m"] = np.zeros((2, 3), dtype=np.float32)
+        packed["pixel_height_m"] = np.ones(2, dtype=np.float32)
+        packed["normalization"] = np.ones(2, dtype=np.float32)
+
+    dataset = PtychographyDatasetPacked(
+        tmp_path, apply_noise=False, scale=1.0, max_probe_modes=1
+    )
+    assert dataset.object_offsets == [0, 2, 5]
+    assert dataset.object_keys == ["first", "second"]
+    second = ObjectDatasetView(dataset, 1)
+    assert len(second) == 3
+    assert second.pattern_shape == (4, 4)
+    assert second.object_shape == (8, 8)
+    assert second.get_probe_positions().shape == (3, 2)
+    torch.testing.assert_close(second[0][0], dataset[2][0])

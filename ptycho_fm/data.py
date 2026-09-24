@@ -254,6 +254,8 @@ class PtychographyDataset(_SampleReader):
         ):
             self.num_patterns, self.pattern_shape, self.object_shape = self._layout(dp, para)
         self.object_name = object_name if object_name is not None else self.dp_file.stem[:-3]
+        self.object_keys = [self.object_name]
+        self.object_offsets = [0, self.num_patterns]
         values = _load_normalization_map(normalization_dict_path)
         self.normalization = float(values.get(self.object_name, default_normalization))
 
@@ -270,6 +272,17 @@ class PtychographyDataset(_SampleReader):
         """Read all positions for stitching, without retaining them on the dataset."""
         with h5py.File(self.para_file, "r", libver="latest", swmr=True) as para:
             return self._positions(para, self.num_patterns, self.object_shape)
+
+    def get_object_plot_metadata(self, object_index: int) -> dict:
+        """Return the geometry needed to stitch this dataset's sole object."""
+        if int(object_index) != 0:
+            raise IndexError(object_index)
+        return {
+            "key": self.object_name,
+            "pattern_shape": tuple(self.pattern_shape),
+            "object_shape": tuple(self.object_shape),
+            "positions": self.get_probe_positions(),
+        }
 
     def _cache_positions(self):
         """Compatibility helper for callers explicitly retaining stitching positions."""
@@ -432,6 +445,10 @@ class CombinedDataset(_SampleReader):
                 with h5py.File(path, "r", libver="latest", swmr=True) as dp:
                     count = int(dp["dp"].shape[0])
             self.file_offsets.append(self.file_offsets[-1] + count)
+        self.object_offsets = self.file_offsets
+        self.object_keys = [
+            self.derive_object_name(path, self.data_dir) for path in self.file_paths
+        ]
         self.total_patterns = self.file_offsets[-1]
         print(
             f"[Rank {rank}] CombinedDataset: {len(self.file_paths)} files, "
@@ -457,6 +474,27 @@ class CombinedDataset(_SampleReader):
             self.debug_call_count += 1
         para_path = path.with_name(f"{path.stem[:-3]}_para{path.suffix}")
         return self._read_sample(path, para_path, local_idx, self._norm_by_path[path], sample_id=idx)
+
+
+    def get_object_plot_metadata(self, object_index: int) -> dict:
+        """Read one object's geometry without materializing its diffraction data."""
+        object_index = int(object_index)
+        if object_index < 0 or object_index >= len(self.file_paths):
+            raise IndexError(object_index)
+        dp_path = self.file_paths[object_index]
+        para_path = dp_path.with_name(f"{dp_path.stem[:-3]}_para{dp_path.suffix}")
+        with (
+            h5py.File(dp_path, "r", libver="latest", swmr=True) as dp,
+            h5py.File(para_path, "r", libver="latest", swmr=True) as para,
+        ):
+            num_patterns, pattern_shape, object_shape = self._layout(dp, para)
+            positions = self._positions(para, num_patterns, object_shape)
+        return {
+            "key": self.object_keys[object_index],
+            "pattern_shape": tuple(pattern_shape),
+            "object_shape": tuple(object_shape),
+            "positions": positions,
+        }
 
 
 class RankShardedSubset(Dataset):

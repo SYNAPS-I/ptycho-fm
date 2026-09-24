@@ -23,4 +23,10 @@ uv run pytest -m ""
 
 `test_pack_hdf5_consistency.py` is a standalone verification script for
 site-specific packed datasets and is intentionally excluded from pytest
-collection.
+collection. Run it with explicit source and packed-data paths:
+
+```bash
+uv run python tests/test_pack_hdf5_consistency.py \
+  --source /path/to/source \
+  --packed /path/to/packed
+```
