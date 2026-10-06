@@ -55,7 +55,8 @@ def test_entrypoint_resume_and_cooldown(tmp_path):
     config.pop('wandb', None)
     config['mlflow'] = {'enabled': False}
     config['training'].update(batch_size=2, epochs=2, log_every=1, track_flops=True,
-                              loss_function='weighted', platform='slurm')
+                              loss_function='weighted', platform='slurm',
+                              resume_from_checkpoint=False)
     config['training']['lr_scheduler'] = {
         'enabled': True, 'scheduler_class': 'warmup-stable', 'kwargs': {'warmup_steps': 2}}
     first_step_flops = PtychoFMFlopsCalculator(config['model'], batch_size=2).training_tflops(2) * ranks * 1e12

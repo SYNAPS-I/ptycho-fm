@@ -19,11 +19,13 @@ export MASTER_PORT=29500
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export WANDB_DIR="${SCRATCH}/results/ptycho"
 
 # Submit from the repository root; optionally pass an absolute config path.
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 CONFIG="${1:-${PROJECT_DIR}/config.yaml}"
 
+mkdir -p "$WANDB_DIR"
 cd "$PROJECT_DIR" || exit 1
 
 srun -u --mpi=pmi2 --module=gpu \
