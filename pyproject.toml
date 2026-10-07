@@ -5,10 +5,10 @@ description = "A foundation model for single-shot coherent diffractive imaging"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "cmcrameri>=1.9",
     "h5py>=3.15.0",
     "hdf5plugin>=6.0.0",
     "matplotlib>=3.10.7",
+    "mlflow>=3.0.0",
     "numpy>=2.3.3",
     "onnx>=1.17.0",
     "pandas>=2.3.3",
@@ -22,6 +22,18 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.22.2",
 ]
+
+[project.optional-dependencies]
+viz = [
+    "cmcrameri>=1.9",
+    "seaborn>=0.13.2",
+]
+mpi = [
+    "mpi4py>=4.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.uv.sources]
 ptychi = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git", branch = "main" }
@@ -44,6 +56,8 @@ build-backend = "hatchling.build"
 packages = ["ptycho_fm"]
 
 [tool.pytest.ini_options]
-# test_pack_hdf5_consistency is a standalone verification script that reads
-# sys.argv[1] and hardcodes NERSC paths; it is not a pytest-collectable test.
-addopts = "--ignore=tests/test_pack_hdf5_consistency.py"
+# These are standalone diagnostic scripts, not pytest-collectable tests.
+addopts = "--ignore=tests/test_pack_hdf5_consistency.py --ignore=tests/debug_positions.py -m 'not integration'"
+markers = [
+    "integration: slower multi-process coverage excluded from the default test run",
+]

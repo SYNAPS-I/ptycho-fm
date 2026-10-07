@@ -7,6 +7,8 @@ import h5py
 import hdf5plugin  # noqa: F401
 import numpy as np
 
+from ptycho_fm.utils.cli import parse_boolean
+
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -62,16 +64,6 @@ def validate_frame_reduction(frame_stride: int, frame_sum: int) -> None:
         raise ValueError(f"--frame-stride must be >= 1, got {frame_stride}")
     if frame_sum < 1:
         raise ValueError(f"--frame-sum must be >= 1, got {frame_sum}")
-
-
-def parse_boolean(value: str) -> bool:
-    """Parse explicit true/false CLI values while also supporting a bare flag."""
-    normalized = value.lower()
-    if normalized == "true":
-        return True
-    if normalized == "false":
-        return False
-    raise argparse.ArgumentTypeError("expected true or false")
 
 
 def mask_negative_pixels(data: np.ndarray) -> np.ndarray:

@@ -77,9 +77,15 @@ class _SampleReader(Dataset):
         max_probe_modes=8,
         max_OPR_modes=1,
         cache_memory_budget_mb=512,
+        deterministic_noise=False,
+        noise_seed=0,
     ):
         self.scale = scale
         self.apply_noise = apply_noise
+        self.deterministic_noise = deterministic_noise
+        self.noise_seed = int(noise_seed)
+        if self.noise_seed < 0:
+            raise ValueError("noise_seed must be non-negative")
         self.cache_object = cache_object
         self.max_probe_modes = max_probe_modes
         self.max_OPR_modes = max_OPR_modes
@@ -139,7 +145,7 @@ class _SampleReader(Dataset):
             return read()
         return self._array_cache.load(key, estimated_bytes, read)
 
-    def _read_sample(self, dp_path, para_path, index, normalization):
+    def _read_sample(self, dp_path, para_path, index, normalization, sample_id=None):
         with (
             h5py.File(dp_path, "r", libver="latest", swmr=True) as dp,
             h5py.File(para_path, "r", libver="latest", swmr=True) as para,
@@ -147,9 +153,13 @@ class _SampleReader(Dataset):
             num_patterns, pattern_shape, object_shape = self._layout(dp, para)
             if index < 0 or index >= num_patterns:
                 raise IndexError(index)
-            image = (dp["dp"][index] / normalization) * self.scale
+            image = dp["dp"][index]
             if self.apply_noise:
-                image = np.random.default_rng().poisson(image)
+                identity = index if sample_id is None else sample_id
+                seed = self.noise_seed + identity if self.deterministic_noise else None
+                rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
+                image = rng.poisson(image)
+            image = (image / normalization) * self.scale
             diffraction_amp = torch.from_numpy(np.sqrt(image.astype(np.float32))).unsqueeze(0)
             position = self._positions(para, num_patterns, object_shape, index)
 
@@ -179,10 +189,14 @@ class _SampleReader(Dataset):
         )[0]
         # A sample owns its probe tensor so downstream in-place edits cannot
         # corrupt an admitted cache entry or another sample.
-        probe_tensor = torch.from_numpy(probe.copy())
+        # Keep the DataLoader's real fields float32 even when HDF5 contains
+        # double-precision objects/probes. Complex probes use complex64.
+        probe_tensor = torch.from_numpy(probe.astype(np.complex64, copy=True))
         return (
-            diffraction_amp, torch.abs(patch).unsqueeze(0), torch.angle(patch).unsqueeze(0),
-            probe_tensor, position, normalization, self.scale,
+            diffraction_amp, torch.abs(patch).unsqueeze(0).float(),
+            torch.angle(patch).unsqueeze(0).float(), probe_tensor,
+            position.float(), torch.tensor(normalization, dtype=torch.float32),
+            torch.tensor(self.scale, dtype=torch.float32),
         )
 
 
@@ -209,9 +223,12 @@ class PtychographyDataset(_SampleReader):
         max_OPR_modes: int = 1,
         object_name: str | None = None,
         cache_memory_budget_mb: float = 512,
+        deterministic_noise: bool = False,
+        noise_seed: int = 0,
     ):
         super().__init__(
-            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb,
+            deterministic_noise=deterministic_noise, noise_seed=noise_seed,
         )
         self.file_path = Path(file_path)
         self.normalization_dict_path = normalization_dict_path
@@ -237,6 +254,8 @@ class PtychographyDataset(_SampleReader):
         ):
             self.num_patterns, self.pattern_shape, self.object_shape = self._layout(dp, para)
         self.object_name = object_name if object_name is not None else self.dp_file.stem[:-3]
+        self.object_keys = [self.object_name]
+        self.object_offsets = [0, self.num_patterns]
         values = _load_normalization_map(normalization_dict_path)
         self.normalization = float(values.get(self.object_name, default_normalization))
 
@@ -253,6 +272,17 @@ class PtychographyDataset(_SampleReader):
         """Read all positions for stitching, without retaining them on the dataset."""
         with h5py.File(self.para_file, "r", libver="latest", swmr=True) as para:
             return self._positions(para, self.num_patterns, self.object_shape)
+
+    def get_object_plot_metadata(self, object_index: int) -> dict:
+        """Return the geometry needed to stitch this dataset's sole object."""
+        if int(object_index) != 0:
+            raise IndexError(object_index)
+        return {
+            "key": self.object_name,
+            "pattern_shape": tuple(self.pattern_shape),
+            "object_shape": tuple(self.object_shape),
+            "positions": self.get_probe_positions(),
+        }
 
     def _cache_positions(self):
         """Compatibility helper for callers explicitly retaining stitching positions."""
@@ -367,9 +397,12 @@ class CombinedDataset(_SampleReader):
         scale=10000.0, normalization_dict_path=None, default_normalization=100000.0,
         apply_noise=True, cache_object=True, max_probe_modes=8, max_OPR_modes=1,
         cache_memory_budget_mb=512,
+        deterministic_noise=False,
+        noise_seed=0,
     ):
         super().__init__(
-            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb
+            scale, apply_noise, cache_object, max_probe_modes, max_OPR_modes, cache_memory_budget_mb,
+            deterministic_noise=deterministic_noise, noise_seed=noise_seed,
         )
         self.data_dir = Path(file_paths)
         self.file_paths = self.find_paired_files(self.data_dir)
@@ -412,6 +445,10 @@ class CombinedDataset(_SampleReader):
                 with h5py.File(path, "r", libver="latest", swmr=True) as dp:
                     count = int(dp["dp"].shape[0])
             self.file_offsets.append(self.file_offsets[-1] + count)
+        self.object_offsets = self.file_offsets
+        self.object_keys = [
+            self.derive_object_name(path, self.data_dir) for path in self.file_paths
+        ]
         self.total_patterns = self.file_offsets[-1]
         print(
             f"[Rank {rank}] CombinedDataset: {len(self.file_paths)} files, "
@@ -436,7 +473,28 @@ class CombinedDataset(_SampleReader):
             )
             self.debug_call_count += 1
         para_path = path.with_name(f"{path.stem[:-3]}_para{path.suffix}")
-        return self._read_sample(path, para_path, local_idx, self._norm_by_path[path])
+        return self._read_sample(path, para_path, local_idx, self._norm_by_path[path], sample_id=idx)
+
+
+    def get_object_plot_metadata(self, object_index: int) -> dict:
+        """Read one object's geometry without materializing its diffraction data."""
+        object_index = int(object_index)
+        if object_index < 0 or object_index >= len(self.file_paths):
+            raise IndexError(object_index)
+        dp_path = self.file_paths[object_index]
+        para_path = dp_path.with_name(f"{dp_path.stem[:-3]}_para{dp_path.suffix}")
+        with (
+            h5py.File(dp_path, "r", libver="latest", swmr=True) as dp,
+            h5py.File(para_path, "r", libver="latest", swmr=True) as para,
+        ):
+            num_patterns, pattern_shape, object_shape = self._layout(dp, para)
+            positions = self._positions(para, num_patterns, object_shape)
+        return {
+            "key": self.object_keys[object_index],
+            "pattern_shape": tuple(pattern_shape),
+            "object_shape": tuple(object_shape),
+            "positions": positions,
+        }
 
 
 class RankShardedSubset(Dataset):

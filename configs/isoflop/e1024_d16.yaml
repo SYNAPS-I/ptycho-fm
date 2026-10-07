@@ -1,0 +1,19 @@
+extends: base.yaml
+
+training:
+  log_at_flops: [6.0e17, 1.0e18, 3.0e18, 6.0e18, 8.0e18, 1.0e19]
+
+model:
+  encoder:
+    embed_dim: 1024
+    depth: 16
+    num_heads: 16
+  decoder:
+    base_channels: 128
+    latent_dim: null
+
+wandb:
+  notes: 'Scaling, e1024, d16'
+
+trainer:
+  run_name: 'ns-e1024-d16'

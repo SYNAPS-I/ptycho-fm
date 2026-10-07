@@ -55,6 +55,7 @@ ptycho-fm/
 - h5py >= 3.15.0
 - matplotlib >= 3.10.7
 - torchinfo >= 1.8.0
+- MLflow >= 3.0.0
 - wandb >= 0.22.2
 
 ## Installation
@@ -79,7 +80,7 @@ The class rename preserves the architecture and parameter names. Existing
 state-dict weights from the same architecture can be loaded for inference or
 fine-tuning with the original model configuration. Training resumes from
 `checkpoint_model.pth` plus `checkpoint.state`, which stores optimizer and
-scheduler state, epoch, metrics, and the WandB run ID. Keep the same optimizer
+scheduler state, epoch, metrics, and per-rank random state. Keep the same optimizer
 parameter groups when resuming. Whole-model pickle files created with
 `torch.save(model, ...)` depend on the old class/module path and require
 conversion to a state dict in an environment containing the original class.
@@ -160,7 +161,7 @@ data:
   normalization_dict_path: '/path/to/norm_factors.pkl'  # Optional
   apply_noise: true        # Add synthetic noise to training and validation data
   test_apply_noise: false  # Add synthetic noise to test/inference data independently
-  train_split: 0.95
+  train_split: 0.95  # Fraction of complete objects assigned to training
   random_seed: 8
 
   # DataLoader settings
@@ -182,6 +183,9 @@ training:
   ngpus: 2
   loss_function: 'l1'  # Options: 'smooth_l1', 'mse', 'l1', 'poisson_nll'
   validation_plot_freq: 10
+  validation_plot_num_objects: 1  # Complete held-out objects to stitch; null logs all
+  validation_plot_central_crop: 64
+  validation_plot_object_crop: 180
   resume_from_checkpoint: false
 ```
 
@@ -279,25 +283,89 @@ Checkpoints include:
 
 Resume training by setting `resume_from_checkpoint: true` in config.
 
+## Iteration and isoFLOP training
+
+See [iteration training and isoFLOP analysis](docs/iter_flops.md) for configuration inheritance, compute accounting, exact mid-epoch resume, cooldown, sweep/plot commands, and historical Figure 4 conventions. Epoch training remains the default.
+
 ## Experiment Tracking
 
-Weights & Biases integration tracks:
-- Training and validation losses
-- Amplitude and phase reconstruction errors
-- Model architecture and hyperparameters
-- Periodic validation visualizations
-- System metrics (GPU usage, memory)
+Training supports either Weights & Biases or MLflow. Enable exactly one backend
+and comment out the unused backend's complete configuration block. The shared
+`tracking` section controls parameter, scalar metric, artifact, system metric,
+and per-batch logging identically for both backends.
 
-Configure in `config.yaml`:
 ```yaml
+trainer:
+  # null creates YYYYMMDD-HHMMSS for a fresh run; set the saved name to resume
+  run_name: null
+
+tracking:
+  dataset_name: 'dataset-description'
+  notes: 'Experiment notes'
+  log_parameters: true
+  log_metrics: true
+  log_artifacts: true
+  log_system_metrics: true
+  log_every_n_batches: 50  # Set to null to disable batch metrics
+
 wandb:
   enabled: true
   entity: 'your-entity'
-  project: 'PtychoFM'
-  dataset_name: 'dataset-description'
-  notes: 'Experiment notes'
-  resume_run_id: null  # Optional: resume existing run
+  project: 'ptycho-fm'
+
+# mlflow:
+#   enabled: true
+#   tracking_uri: 'http://127.0.0.1:5000'  # Or set MLFLOW_TRACKING_URI
+#   experiment_name: 'ptycho-fm'
+#   tags: {}
+#   azureml_compat: false  # Enable only for Azure ML registry endpoints
 ```
+
+The resolved `trainer.run_name` is shared by the local `run<name>` directory,
+MLflow, and W&B. On `resume_from_checkpoint: true`, set `run_name` to the
+existing timestamp; the tracker run is looked up by that name, so no tracker ID
+is required. Run names must be unique within the selected tracker experiment or
+project.
+
+For epoch-only tracking, set `tracking.log_every_n_batches: null` and leave
+`training.log_every: 0` and `training.log_at_flops: []`. Training and validation
+metrics are then emitted after each completed epoch. Set `training.log_every` to
+a positive iteration interval, or populate `training.log_at_flops`, to enable
+the iteration/FLOP validation and logging path instead. All scalar metric steps
+refer to completed iterations.
+
+Setting `tracking_uri` configures the MLflow client; it does not start a
+tracking server. Start the repository's local server launcher with:
+
+```bash
+./scripts/start_mlflow_server.sh
+```
+
+The host and port defaults are editable near the top of the script. They can
+also be overridden for one run, for example:
+
+```bash
+MLFLOW_SERVER_HOST=0.0.0.0 MLFLOW_SERVER_PORT=5001 ./scripts/start_mlflow_server.sh
+```
+
+`127.0.0.1` permits local clients only; `0.0.0.0` accepts connections on all
+interfaces and should be protected by appropriate firewall and authentication
+controls. Alternatively, point `tracking_uri` at an existing accessible
+server. The Azure ML registry compatibility workaround is disabled by default
+and should be enabled only for an Azure ML endpoint.
+
+Both backends receive the same flattened run parameters, metric names, batch
+cadence, global iteration step, configuration artifact, and validation/test
+plots. Backend-native presentation still differs:
+
+| Capability | W&B | MLflow |
+| --- | --- | --- |
+| Plots | Interactive media entries | Files under `val_plots/` and `test_plots/` |
+| Configuration | Versioned W&B artifact | File under the `config/` artifact path |
+| System metrics | W&B system monitor | MLflow system-metrics collector |
+| Resume tracking run | Lookup by `trainer.run_name` | Lookup by `trainer.run_name` |
+| Model registry | Not wired | Available in `MLflowLogger`, but not called by training |
+
 
 ## Testing
 

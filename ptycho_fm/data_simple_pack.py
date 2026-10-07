@@ -50,6 +50,8 @@ class PtychographyDatasetPacked(Dataset):
         normalization_dict_path: str | None = None,
         default_normalization: float = 100000.0,
         apply_noise: bool = True,
+        deterministic_noise: bool = False,
+        noise_seed: int = 0,
         max_probe_modes: int = 8,
     ):
         _ = world_size, debug
@@ -63,6 +65,10 @@ class PtychographyDatasetPacked(Dataset):
 
         self.scale = scale
         self.apply_noise = apply_noise
+        self.deterministic_noise = deterministic_noise
+        self.noise_seed = int(noise_seed)
+        if self.noise_seed < 0:
+            raise ValueError("noise_seed must be non-negative")
         self.max_probe_modes = max_probe_modes
         self.default_normalization = default_normalization
         self.fake_data = None
@@ -80,12 +86,27 @@ class PtychographyDatasetPacked(Dataset):
         # shard_offsets[k] = pattern index where shard k starts; length n_shards+1
         self.shard_offsets: list[int] = [0]
         self._obj_starts: list[np.ndarray] = []
-        for p in self.shard_paths:
+        self.object_offsets: list[int] = [0]
+        self.object_keys: list[str] = []
+        self._object_locations: list[tuple[int, int]] = []
+        for shard_index, p in enumerate(self.shard_paths):
             with h5py.File(p, "r", libver="latest", swmr=True) as f:
                 n_dp = f["n_dp"][:].astype(np.int64)
+                if "object_key" in f:
+                    raw_keys = f["object_key"][:]
+                    keys = [
+                        value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                        for value in raw_keys
+                    ]
+                else:
+                    keys = [f"{p.stem}:{slot}" for slot in range(len(n_dp))]
             starts = np.concatenate([[0], np.cumsum(n_dp[:-1])])
             self._obj_starts.append(starts)
             self.shard_offsets.append(int(self.shard_offsets[-1] + int(np.sum(n_dp))))
+            for slot, (key, count) in enumerate(zip(keys, n_dp, strict=True)):
+                self.object_keys.append(key)
+                self._object_locations.append((shard_index, slot))
+                self.object_offsets.append(self.object_offsets[-1] + int(count))
 
         self._len = self.shard_offsets[-1]
         print(
@@ -164,9 +185,10 @@ class PtychographyDatasetPacked(Dataset):
         norm = self._norm_for_slot(f, o, obj_key)
 
         img = np.asarray(f["dp"][o, pi], dtype=np.float32)
-        img = (img / norm) * self.scale
         if self.apply_noise:
-            img = np.random.default_rng().poisson(img).astype(np.float32)
+            seed = self.noise_seed + idx if self.deterministic_noise else None
+            img = np.random.default_rng(seed).poisson(img).astype(np.float32)
+        img = (img / norm) * self.scale
         amp = np.sqrt(np.float32(img))
 
         osh = tuple(int(x) for x in f["object"].shape[2:])
@@ -185,7 +207,7 @@ class PtychographyDatasetPacked(Dataset):
         probe = _pad_probe(probe, self.max_probe_modes)
 
         amp = torch.from_numpy(np.asarray(amp))
-        probe = torch.from_numpy(probe)
+        probe = torch.from_numpy(np.asarray(probe, dtype=np.complex64))
 
         if amp.dim() == 2:
             amp = amp.unsqueeze(0)
@@ -198,4 +220,33 @@ class PtychographyDatasetPacked(Dataset):
         elif probe.dim() == 3:
             probe = probe.unsqueeze(0)
 
-        return amp, ap, ph, probe, xy, norm, self.scale
+        # All real DataLoader fields are float32; the probe stays complex64.
+        return (amp.float(), ap.float(), ph.float(), probe, xy.float(),
+                torch.tensor(norm, dtype=torch.float32),
+                torch.tensor(self.scale, dtype=torch.float32))
+
+    def get_object_plot_metadata(self, object_index: int) -> dict:
+        """Read one packed object geometry for full-object stitching."""
+        object_index = int(object_index)
+        if object_index < 0 or object_index >= len(self._object_locations):
+            raise IndexError(object_index)
+        shard_index, slot = self._object_locations[object_index]
+        f = self._shard_file(self.shard_paths[shard_index])
+        num_patterns = int(f["n_dp"][slot])
+        object_shape = tuple(int(value) for value in f["object"].shape[2:])
+        pattern_shape = tuple(int(value) for value in f["dp"].shape[-2:])
+        py = np.asarray(f["probe_position_y_m"][slot, :num_patterns])
+        px = np.asarray(f["probe_position_x_m"][slot, :num_patterns])
+        pixel_height_m = float(f["pixel_height_m"][slot])
+        positions = torch.stack([
+            self._probe_xy_from_packed(
+                py, px, pattern_index, num_patterns, object_shape, pixel_height_m
+            )
+            for pattern_index in range(num_patterns)
+        ])
+        return {
+            "key": self.object_keys[object_index],
+            "pattern_shape": pattern_shape,
+            "object_shape": object_shape,
+            "positions": positions,
+        }

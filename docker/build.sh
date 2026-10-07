@@ -8,16 +8,17 @@
 # To access the registry, do: podman-hpc login registry.nersc.gov
 # See https://docs.nersc.gov/development/shifter/how-to-use/#using-registrynerscgov
 
+set -euxo pipefail
+
 NVC_TAG=26.01
 BASE=registry.nersc.gov/amsc006/shas1693/ptychofm
 IMAGE=$BASE:$NVC_TAG
 
-# build base image
-set -x
+# Build and push only if every Dockerfile step, including the runtime import
+# verification, succeeds.
 podman-hpc build --build-arg nvc_tag=$NVC_TAG-py3 -t $IMAGE -f docker/Dockerfile .
-
 podman-hpc push $IMAGE
 
-# shifterimg login registry.nersc.gov to pull from shifter
-# shifterimg pull <image_name>
+# Refresh Shifter's converted image after replacing this tag.
+shifterimg pull "$IMAGE"
 

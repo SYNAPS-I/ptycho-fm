@@ -1,3 +1,4 @@
+import argparse
 import json
 import pickle
 import sys
@@ -6,7 +7,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from mpi4py import MPI
 
 
 def find_paired_files(directory: Path) -> list[Path]:
@@ -38,12 +38,55 @@ def derive_object_name(file_path: Path, base_dir: Path) -> str:
     return rel.as_posix()
 
 
-SOURCE = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2")
-OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed")
-MAX_SHARDS = 500
-MAX_OBJECTS: int | None = None  # e.g. 200 for a short test; None = full catalog
-MAX_PROBE_MODES = 10
-NORMALIZATION_DICT: Path | None = Path("/pscratch/sd/s/shas1693/data/ptycho/normalization.pkl")
+def positive_int(value: str) -> int:
+    """Return a positive integer for argparse options."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Pack paired *_dp.hdf5/*_para.hdf5 files into HDF5 shards."
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="Root directory containing paired *_dp.hdf5 and *_para.hdf5 files",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Directory in which to write packed shards and pack_index.json",
+    )
+    parser.add_argument(
+        "--max-shards",
+        type=positive_int,
+        default=500,
+        help="Maximum number of output shards (default: 500)",
+    )
+    parser.add_argument(
+        "--max-objects",
+        type=positive_int,
+        default=None,
+        help="Pack only the first N objects; omit to pack the full catalog",
+    )
+    parser.add_argument(
+        "--max-probe-modes",
+        type=positive_int,
+        default=10,
+        help="Number of probe modes retained or padded to (default: 10)",
+    )
+    parser.add_argument(
+        "--normalization-dict",
+        type=Path,
+        default=None,
+        help="Optional pickle mapping object keys to normalization values",
+    )
+    return parser
 
 
 def _para_path(dp_path: Path) -> Path:
@@ -79,6 +122,7 @@ def write_packed_shard(
     norm_map: dict,
     dt,
     mpi_rank: int,
+    max_probe_modes: int,
 ) -> tuple[int, float, list[str]]:
     """Build one packed_{shard_idx:05d}.hdf5 from source pair paths in chunk.
 
@@ -91,7 +135,9 @@ def write_packed_shard(
         try:
             dpf = h5py.File(dp_path, "r")
         except OSError:
-            print(f"[rank {mpi_rank}] open failed: {dp_path}", file=sys.stderr, flush=True)
+            print(
+                f"[rank {mpi_rank}] open failed: {dp_path}", file=sys.stderr, flush=True
+            )
             raise
         try:
             pf = h5py.File(para, "r")
@@ -126,7 +172,9 @@ def write_packed_shard(
                         "dtype_px": dpx,
                         "dtype_py": dpy,
                         "norm": norm_map.get(key),
-                        "pixel_height_m": float(pf["object"].attrs.get("pixel_height_m", np.nan)),
+                        "pixel_height_m": float(
+                            pf["object"].attrs.get("pixel_height_m", np.nan)
+                        ),
                     }
                 )
         except OSError:
@@ -151,7 +199,7 @@ def write_packed_shard(
 
     t_shard0 = time.perf_counter()
     with h5py.File(out_path, "w") as out:
-        out.attrs["max_probe_modes"] = MAX_PROBE_MODES
+        out.attrs["max_probe_modes"] = max_probe_modes
         out.create_dataset(
             "dp",
             shape=(nob, mxp, dh, dw),
@@ -166,7 +214,7 @@ def write_packed_shard(
         )
         out.create_dataset(
             "probe",
-            shape=(nob, 1, MAX_PROBE_MODES, ph, pw),
+            shape=(nob, 1, max_probe_modes, ph, pw),
             dtype=m0["dtype_probe"],
             fillvalue=fillvalue_for(m0["dtype_probe"]),
         )
@@ -183,7 +231,9 @@ def write_packed_shard(
             fillvalue=fillvalue_for(m0["dtype_py"]),
         )
         ds_n = out.create_dataset("n_dp", shape=(nob,), dtype=np.int64)
-        ds_norm = out.create_dataset("normalization", shape=(nob,), dtype=np.float64, fillvalue=np.nan)
+        ds_norm = out.create_dataset(
+            "normalization", shape=(nob,), dtype=np.float64, fillvalue=np.nan
+        )
         ds_pix = out.create_dataset("pixel_height_m", shape=(nob,), dtype=np.float64)
         keys = []
         ds_dp = out["dp"]
@@ -203,13 +253,21 @@ def write_packed_shard(
             try:
                 dpf = h5py.File(dp_p, "r", libver="latest", swmr=True)
             except OSError:
-                print(f"[rank {mpi_rank}] open failed: {dp_p}", file=sys.stderr, flush=True)
+                print(
+                    f"[rank {mpi_rank}] open failed: {dp_p}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise
             try:
                 pf = h5py.File(para_p, "r", libver="latest", swmr=True)
             except OSError:
                 dpf.close()
-                print(f"[rank {mpi_rank}] open failed: {para_p}", file=sys.stderr, flush=True)
+                print(
+                    f"[rank {mpi_rank}] open failed: {para_p}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 raise
             try:
                 with dpf, pf:
@@ -220,7 +278,7 @@ def write_packed_shard(
                     ds_py[i, :ni] = pf["probe_position_y_m"][:ni]
                     idx = (i,) + tuple(slice(0, s) for s in m["obj_shape"])
                     ds_obj[idx] = pf["object"][...]
-                    pr = probe_modes(pf["probe"][...], MAX_PROBE_MODES)
+                    pr = probe_modes(pf["probe"][...], max_probe_modes)
                     ds_pr[i, 0, : pr.shape[1], : pr.shape[2], : pr.shape[3]] = pr[0]
             except OSError:
                 print(
@@ -235,19 +293,35 @@ def write_packed_shard(
     return nob, time.perf_counter() - t_shard0, keys
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    try:
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise SystemExit(
+            "mpi4py is required to pack data; install it with `uv sync --extra mpi`"
+        ) from exc
+
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
     t_wall0 = time.perf_counter()
-    source = SOURCE.resolve()
-    out_dir = OUT.resolve()
+    source = args.source.expanduser().resolve()
+    out_dir = args.output.expanduser().resolve()
+    normalization_dict = (
+        args.normalization_dict.expanduser().resolve()
+        if args.normalization_dict is not None
+        else None
+    )
 
     norm_map: dict = {}
-    if NORMALIZATION_DICT is not None:
-        with open(NORMALIZATION_DICT, "rb") as _f:
+    if normalization_dict is not None:
+        with open(normalization_dict, "rb") as _f:
             norm_map = pickle.load(_f)
+        if not isinstance(norm_map, dict):
+            raise TypeError("normalization dictionary must contain a dict")
 
     t_list = 0.0
     if rank == 0:
@@ -271,18 +345,11 @@ if __name__ == "__main__":
 
     pairs_all = [Path(s) for s in paths_payload]
 
-    per = max(1, (n_total + MAX_SHARDS - 1) // MAX_SHARDS)
+    per = max(1, (n_total + args.max_shards - 1) // args.max_shards)
     n_shards_if_full = (n_total + per - 1) // per
 
-    if MAX_OBJECTS is not None:
-        if MAX_OBJECTS < 1:
-            if rank == 0:
-                print(
-                    "MAX_OBJECTS must be >= 1 when set, or use None to pack the full catalog.",
-                    file=sys.stderr,
-                )
-            sys.exit(1)
-        pairs = pairs_all[:MAX_OBJECTS]
+    if args.max_objects is not None:
+        pairs = pairs_all[: args.max_objects]
     else:
         pairs = pairs_all
 
@@ -291,7 +358,7 @@ if __name__ == "__main__":
 
     if rank == 0:
         print(
-            f"MPI {size} ranks | catalog {n_total} pair(s), per_shard={per} (MAX_SHARDS={MAX_SHARDS}) "
+            f"MPI {size} ranks | catalog {n_total} pair(s), per_shard={per} (max_shards={args.max_shards}) "
             f"-> full catalog = {n_shards_if_full} shard(s)."
         )
         print(
@@ -300,9 +367,9 @@ if __name__ == "__main__":
         print(
             f"  Shards round-robin: indices rank, rank+{size}, … (~{(n_shards + size - 1) // size} file(s)/rank)."
         )
-        if NORMALIZATION_DICT is not None:
-            print(f"Normalization dict: {NORMALIZATION_DICT}")
-        print(f"Max probe modes (padded): {MAX_PROBE_MODES}")
+        if normalization_dict is not None:
+            print(f"Normalization dict: {normalization_dict}")
+        print(f"Max probe modes (padded): {args.max_probe_modes}")
         print(f"Listing pairs: {t_list:.2f}s")
 
     if rank == 0:
@@ -325,6 +392,7 @@ if __name__ == "__main__":
             norm_map=norm_map,
             dt=dt,
             mpi_rank=rank,
+            max_probe_modes=args.max_probe_modes,
         )
         pack_name = f"packed_{shard_idx:05d}.hdf5"
         local_index.append((shard_idx, pack_name, keys))
@@ -363,3 +431,9 @@ if __name__ == "__main__":
             f"Done: wall {t_wall:.2f}s (list {t_list:.2f}s, slowest pack {t_slow[0]:.2f}s), "
             f"{int(n_tot[0])} pairs in {n_shards} shard(s)."
         )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

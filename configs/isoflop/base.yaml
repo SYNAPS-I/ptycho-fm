@@ -1,0 +1,57 @@
+# Site-independent experiment settings; extend a model YAML for local data paths.
+extends: ../../config.yaml
+
+data:
+  data_path: ./data/isoflop
+  packed: true
+  normalization_dict_path: null
+  test_path: null
+  test_normalization: null
+  scale: 10000.0
+  default_normalization: 100000.0
+  train_split: 0.975
+  random_seed: 8
+  deterministic_noise: true
+  noise_seed: 42
+  apply_noise: true
+  drop_last: true
+
+training:
+  batch_size: 32
+  valid_batch_size: 32
+  learning_rate: 1.0e-6
+  encoder_lr: 1.0e-6
+  amp_decoder_lr: 1.0e-6
+  ph_decoder_lr: 1.0e-6
+  coupled_decoder_lr: 1.0e-6
+  epochs: 100
+  log_every: 4000
+  log_at_flops: [6.0e17, 1.0e18, 3.0e18, 6.0e18, 8.0e18, 1.0e19]
+  track_flops: true
+  stop_at_last_flop_target: true
+  max_iters: null
+  resume_from_checkpoint: false
+  finetune_from_model: null
+  lr_scheduler:
+    enabled: true
+    scheduler_class: warmup-stable
+    kwargs:
+      warmup_steps: 2000
+
+model:
+  encoder_type: custom
+  decoder_type: standard
+  coupled_decoder_mode: null
+  encoder:
+    img_size: 256
+    patch_size: 16
+    dropout: 0.0
+    attn_dropout: 0.0
+  decoder:
+    num_stages: 4
+    use_batchnorm: true
+    dropout: 0.0
+    phase_activation: custom
+
+paths:
+  model_save_path: ./outputs/isoflop

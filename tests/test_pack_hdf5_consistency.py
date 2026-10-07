@@ -1,29 +1,74 @@
 """Spot-check that packed shards match their source *_dp / *_para files.
 
-Usage: python tests/test_pack_hdf5_consistency.py [num_shards]
+Usage: python tests/test_pack_hdf5_consistency.py --source PATH --packed PATH
 """
+
+import argparse
 import json
 import random
-import sys
 import time
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-SOURCE = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2")
-OUT = Path("/pscratch/sd/s/shas1693/data/ptycho/simulated_data_cleanedProbe_2_packed")
-NUM_SHARDS = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-TOL = 1e-5
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="Root directory containing the source *_dp.hdf5/*_para.hdf5 pairs",
+    )
+    parser.add_argument(
+        "--packed",
+        type=Path,
+        required=True,
+        help="Directory containing packed_*.hdf5 and pack_index.json",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=positive_int,
+        default=10,
+        help="Number of randomly selected shards to check (default: 10)",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=nonnegative_float,
+        default=1e-5,
+        help="Maximum allowed norm difference (default: 1e-5)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random shard-selection seed (default: 0)",
+    )
+    return parser
 
 
 def err(a, b):
     return float(np.linalg.norm(np.asarray(a).ravel() - np.asarray(b).ravel()))
 
 
-def check_row(pack, row, key):
-    dp_src = SOURCE / f"{key}_dp.hdf5"
-    para_src = SOURCE / f"{key}_para.hdf5"
+def check_row(pack, row, key, *, source: Path, tolerance: float):
+    dp_src = source / f"{key}_dp.hdf5"
+    para_src = source / f"{key}_para.hdf5"
     ni = int(pack["n_dp"][row])
     max_modes = int(pack.attrs["max_probe_modes"])
 
@@ -34,29 +79,57 @@ def check_row(pack, row, key):
 
         diffs = {
             "dp": err(pack["dp"][row, :ni, :dh, :dw], dpf["dp"][:ni]),
-            "object": err(pack["object"][(row,) + tuple(slice(0, s) for s in osh)], pf["object"][...]),
+            "object": err(
+                pack["object"][(row,) + tuple(slice(0, s) for s in osh)],
+                pf["object"][...],
+            ),
             "probe": err(pack["probe"][row, 0, : pr.shape[1]], pr[0]),
-            "px": err(pack["probe_position_x_m"][row, :ni], pf["probe_position_x_m"][:ni]),
-            "py": err(pack["probe_position_y_m"][row, :ni], pf["probe_position_y_m"][:ni]),
+            "px": err(
+                pack["probe_position_x_m"][row, :ni], pf["probe_position_x_m"][:ni]
+            ),
+            "py": err(
+                pack["probe_position_y_m"][row, :ni], pf["probe_position_y_m"][:ni]
+            ),
         }
         # fmt = "  ".join(f"{n}={d:.3e}" for n, d in diffs.items())
         # print(f"    {key}  {fmt}")
         for n, d in diffs.items():
-            assert d <= TOL, f"{key}: {n} norm_diff={d}"
+            assert d <= tolerance, f"{key}: {n} norm_diff={d}"
 
 
-with open(OUT / "pack_index.json", encoding="utf-8") as f:
-    index = json.load(f)
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    source = args.source.expanduser().resolve()
+    packed = args.packed.expanduser().resolve()
 
-picked = random.Random(0).sample(sorted(index), min(NUM_SHARDS, len(index)))
-print(f"Checking {len(picked)} shard(s) in {OUT}")
+    with open(packed / "pack_index.json", encoding="utf-8") as f:
+        index = json.load(f)
 
-t0 = time.perf_counter()
-for name in picked:
-    t_shard = time.perf_counter()
-    with h5py.File(OUT / name, "r") as pack:
-        for row, key in enumerate(index[name]):
-            check_row(pack, row, key)
-    print(f"  ok {name} ({len(index[name])} objects, {time.perf_counter() - t_shard:.2f}s)")
+    picked = random.Random(args.seed).sample(
+        sorted(index), min(args.num_shards, len(index))
+    )
+    print(f"Checking {len(picked)} shard(s) in {packed}")
 
-print(f"All sampled shards match source. Total: {time.perf_counter() - t0:.2f}s")
+    t0 = time.perf_counter()
+    for name in picked:
+        t_shard = time.perf_counter()
+        with h5py.File(packed / name, "r") as pack:
+            for row, key in enumerate(index[name]):
+                check_row(
+                    pack,
+                    row,
+                    key,
+                    source=source,
+                    tolerance=args.tolerance,
+                )
+        print(
+            f"  ok {name} ({len(index[name])} objects, "
+            f"{time.perf_counter() - t_shard:.2f}s)"
+        )
+
+    print(f"All sampled shards match source. Total: {time.perf_counter() - t0:.2f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

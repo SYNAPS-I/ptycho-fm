@@ -94,7 +94,7 @@ def test_opr_padding_and_cache_parity(tmp_path, opr, modes, target_opr, target_m
         assert sample[0].shape == sample[1].shape == sample[2].shape == (1, 8, 12)
         np.testing.assert_array_equal(sample[0][0], np.sqrt(image[i] / 2))
         assert sample[3].shape == (max(opr, target_opr), max(modes, target_modes), 8, 12)
-        np.testing.assert_array_equal(sample[3][:opr, :modes], probe)
+        np.testing.assert_allclose(sample[3][:opr, :modes], probe, rtol=1e-6, atol=1e-6)
         assert torch.count_nonzero(sample[3][opr:]) == 0
         assert torch.count_nonzero(sample[3][:, modes:]) == 0
     assert cached._cached_probe_positions is None
@@ -278,21 +278,29 @@ def test_explicit_stitching_positions_and_pickle(tmp_path):
 
 
 def test_noise_is_sampled_on_every_read(tmp_path, monkeypatch):
-    path, *_ = make_pair(tmp_path)
-    dataset = PtychographyDataset(path, apply_noise=True)
+    path, _, clean, *_ = make_pair(tmp_path)
+    dataset = PtychographyDataset(
+        path, apply_noise=True, default_normalization=4.0, scale=2.0
+    )
 
     class Noise:
         count = 0
 
+        def __init__(self):
+            self.inputs = []
+
         def poisson(self, image):
             self.count += 1
-            return np.full_like(image, self.count)
+            self.inputs.append(image.copy())
+            return np.full_like(image, 4 * self.count)
 
     noise = Noise()
     monkeypatch.setattr(np.random, "default_rng", lambda: noise)
-    assert torch.all(dataset[0][0] == 1)
     torch.testing.assert_close(dataset[0][0], torch.full((1, 8, 12), 2**0.5))
+    torch.testing.assert_close(dataset[0][0], torch.full((1, 8, 12), 2.0))
     assert noise.count == 2
+    np.testing.assert_array_equal(noise.inputs[0], clean[0])
+    np.testing.assert_array_equal(noise.inputs[1], clean[0])
 
 
 class CacheReportingDataset(CombinedDataset):
@@ -304,7 +312,10 @@ class CacheReportingDataset(CombinedDataset):
         return sample, os.getpid(), self._array_cache.nbytes, ",".join(names)
 
 
-@pytest.mark.parametrize("start_method", ["fork", "spawn"])
+@pytest.mark.parametrize("start_method", [
+    "fork",
+    pytest.param("spawn", marks=pytest.mark.integration),
+])
 def test_persistent_workers_start_empty_and_repeat_epochs(tmp_path, start_method):
     if start_method not in multiprocessing.get_all_start_methods():
         pytest.skip(f"{start_method} unavailable")

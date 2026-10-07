@@ -1,0 +1,122 @@
+[
+  {
+    "metric": "train_loss",
+    "target_flops": 6e+17,
+    "n_points": 13,
+    "optimum_params_m": 3.44434,
+    "optimum_iterations": 122009.00000000012,
+    "fitted_min_loss": 0.018435895270687196,
+    "unconstrained_params_m": 1.4323843428157288e-10,
+    "vertex_in_observed_range": false,
+    "model_fit_r2_log_loss": 0.9797720940993601,
+    "iteration_fit_r2_log_loss": 0.9779982237431761
+  },
+  {
+    "metric": "train_loss",
+    "target_flops": 1e+18,
+    "n_points": 13,
+    "optimum_params_m": 6.435641086769321,
+    "optimum_iterations": 117291.0687609799,
+    "fitted_min_loss": 0.010148511558642074,
+    "unconstrained_params_m": 6.435641086769321,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.9865423823152829,
+    "iteration_fit_r2_log_loss": 0.9869927347470514
+  },
+  {
+    "metric": "train_loss",
+    "target_flops": 3e+18,
+    "n_points": 12,
+    "optimum_params_m": 18.143214133054084,
+    "optimum_iterations": 131304.48392039892,
+    "fitted_min_loss": 0.009206626515113829,
+    "unconstrained_params_m": 18.143214133054084,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.9623359250304939,
+    "iteration_fit_r2_log_loss": 0.9598739285569542
+  },
+  {
+    "metric": "train_loss",
+    "target_flops": 6e+18,
+    "n_points": 11,
+    "optimum_params_m": 36.953164237831785,
+    "optimum_iterations": 138031.44493706123,
+    "fitted_min_loss": 0.008714886443660605,
+    "unconstrained_params_m": 36.953164237831785,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.911497396560153,
+    "iteration_fit_r2_log_loss": 0.9050790243048538
+  },
+  {
+    "metric": "train_loss",
+    "target_flops": 1e+19,
+    "n_points": 11,
+    "optimum_params_m": 17.093860000000003,
+    "optimum_iterations": 463840.0000000004,
+    "fitted_min_loss": 0.008231552255794888,
+    "unconstrained_params_m": 16.867557020207396,
+    "vertex_in_observed_range": false,
+    "model_fit_r2_log_loss": 0.9238502396878768,
+    "iteration_fit_r2_log_loss": 0.9194289428421143
+  },
+  {
+    "metric": "val_loss",
+    "target_flops": 6e+17,
+    "n_points": 13,
+    "optimum_params_m": 5.1686146146990035,
+    "optimum_iterations": 85355.74930718208,
+    "fitted_min_loss": 0.010578890396317691,
+    "unconstrained_params_m": 5.1686146146990035,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.9840871978570599,
+    "iteration_fit_r2_log_loss": 0.9855100854039532
+  },
+  {
+    "metric": "val_loss",
+    "target_flops": 1e+18,
+    "n_points": 13,
+    "optimum_params_m": 7.3689160651418275,
+    "optimum_iterations": 104110.951160362,
+    "fitted_min_loss": 0.009773663400237215,
+    "unconstrained_params_m": 7.3689160651418275,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.9847963628865913,
+    "iteration_fit_r2_log_loss": 0.9858592612686361
+  },
+  {
+    "metric": "val_loss",
+    "target_flops": 3e+18,
+    "n_points": 12,
+    "optimum_params_m": 21.556329137109838,
+    "optimum_iterations": 111004.51635358951,
+    "fitted_min_loss": 0.00875182818472915,
+    "unconstrained_params_m": 21.556329137109838,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.948432130612867,
+    "iteration_fit_r2_log_loss": 0.9447768028018867
+  },
+  {
+    "metric": "val_loss",
+    "target_flops": 6e+18,
+    "n_points": 11,
+    "optimum_params_m": 33.05163188643969,
+    "optimum_iterations": 149639.0823230215,
+    "fitted_min_loss": 0.008720726728247334,
+    "unconstrained_params_m": 33.05163188643969,
+    "vertex_in_observed_range": true,
+    "model_fit_r2_log_loss": 0.8628342677285342,
+    "iteration_fit_r2_log_loss": 0.8571483997127979
+  },
+  {
+    "metric": "val_loss",
+    "target_flops": 1e+19,
+    "n_points": 11,
+    "optimum_params_m": 17.093860000000003,
+    "optimum_iterations": 463840.0000000004,
+    "fitted_min_loss": 0.008276496588905034,
+    "unconstrained_params_m": 1.800227749742705,
+    "vertex_in_observed_range": false,
+    "model_fit_r2_log_loss": 0.8381217619922771,
+    "iteration_fit_r2_log_loss": 0.8355267288071475
+  }
+]
