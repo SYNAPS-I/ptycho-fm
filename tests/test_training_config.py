@@ -149,8 +149,8 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
         assert config['data'] == {
             'data_path': overrides['data_path'],
             'test_path': overrides['test_path'],
-            'normalization_dict_path': 'new/data/train_norm.pkl',
-            'test_normalization': 'new/test/test_norm.pkl',
+            'normalization_dict_path': 'new/data/normalization.pkl',
+            'test_normalization': 'new/data/normalization.pkl',
         }
         assert config['training']['finetune_from_model'] == overrides['finetune_from_model']
         assert config['paths']['model_save_path'] == overrides['model_save_path']
@@ -185,10 +185,10 @@ def test_path_overrides_are_independent_and_optional(override):
     assert config['data']['data_path'] == ('/new/location' if override == 'data_path' else '/old/data')
     assert config['data']['test_path'] == ('/new/location' if override == 'test_path' else '/old/test/scan_dp.hdf5')
     assert config['data']['normalization_dict_path'] == (
-        '/new/location/norm.pkl' if override == 'data_path' else '/old/data/norm.pkl'
+        '/new/location/normalization.pkl' if override == 'data_path' else '/old/data/norm.pkl'
     )
     assert config['data']['test_normalization'] == (
-        '/new/test_norm.pkl' if override == 'test_path' else '/old/test/test_norm.pkl'
+        '/new/location/normalization.pkl' if override == 'data_path' else '/old/test/test_norm.pkl'
     )
     assert config['training']['finetune_from_model'] == (
         '/new/location' if override == 'finetune_from_model' else '/old/model.pth'
@@ -199,23 +199,19 @@ def test_path_overrides_are_independent_and_optional(override):
 
 
 @pytest.mark.parametrize('normalization', ['norm.pkl', 'metadata/norm.pkl', '/old/norm.pkl', None])
-def test_normalization_paths_follow_cli_data_locations(normalization):
+@pytest.mark.parametrize('test_path', [None, '/new/test/scan_dp.hdf5'])
+def test_normalization_paths_always_use_cli_training_directory(normalization, test_path):
     config = {'data': {
         'normalization_dict_path': normalization, 'test_normalization': normalization,
     }}
     args = SimpleNamespace(
-        data_path='/new/train', test_path='/new/test/scan_dp.hdf5',
+        data_path='/new/train', test_path=test_path,
         finetune_from_model=None, model_save_path=None,
     )
     train.apply_cli_path_overrides(config, args)
 
-    relative = 'norm.pkl' if normalization == '/old/norm.pkl' else normalization
-    assert config['data']['normalization_dict_path'] == (
-        str(Path('/new/train') / relative) if relative else None
-    )
-    assert config['data']['test_normalization'] == (
-        str(Path('/new/test') / relative) if relative else None
-    )
+    assert config['data']['normalization_dict_path'] == '/new/train/normalization.pkl'
+    assert config['data']['test_normalization'] == '/new/train/normalization.pkl'
 
 
 def test_cli_paths_can_supply_missing_settings_and_expand_home():
@@ -231,6 +227,8 @@ def test_cli_paths_can_supply_missing_settings_and_expand_home():
         'data': {
             'data_path': str(home / 'data'),
             'test_path': str(home / 'test/scan_dp.hdf5'),
+            'normalization_dict_path': str(home / 'data/normalization.pkl'),
+            'test_normalization': str(home / 'data/normalization.pkl'),
         },
         'training': {'finetune_from_model': str(home / 'model.pth')},
         'paths': {'model_save_path': str(home / 'models')},

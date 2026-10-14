@@ -86,27 +86,16 @@ def apply_launcher_run_name(config, launch_run_name):
 
 
 def apply_cli_path_overrides(config, args):
-    """Apply explicit CLI paths and relocate their configured normalization files."""
-    def relocate_normalization(data, key, directory):
-        value = data.get(key)
-        if value:
-            path = Path(value).expanduser()
-            if path.is_absolute():
-                path = Path(path.name)
-            data[key] = str(directory / path)
-
+    """Apply explicit CLI paths and use the CLI data directory's normalization."""
     if args.data_path is not None:
         data = config.setdefault('data', {})
         data['data_path'] = os.path.expanduser(args.data_path)
-        relocate_normalization(
-            data, 'normalization_dict_path', Path(data['data_path'])
-        )
+        normalization_path = str(Path(data['data_path']) / 'normalization.pkl')
+        data['normalization_dict_path'] = normalization_path
+        data['test_normalization'] = normalization_path
     if args.test_path is not None:
         data = config.setdefault('data', {})
         data['test_path'] = os.path.expanduser(args.test_path)
-        relocate_normalization(
-            data, 'test_normalization', Path(data['test_path']).parent
-        )
     if args.finetune_from_model is not None:
         config.setdefault('training', {})['finetune_from_model'] = os.path.expanduser(
             args.finetune_from_model
@@ -142,11 +131,11 @@ def main() -> None:
     )
     parser.add_argument(
         '--data-path', '--data_path',
-        help='Override data.data_path; resolve normalization_dict_path relative to this directory',
+        help='Override data.data_path and use <data_path>/normalization.pkl for training and test normalization',
     )
     parser.add_argument(
         '--test-path', '--test_path',
-        help='Override data.test_path; resolve test_normalization relative to this HDF5 file\'s directory',
+        help='Override data.test_path with a test HDF5 file path',
     )
     parser.add_argument(
         '--finetune-from-model', '--finetune_from_model',

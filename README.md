@@ -128,13 +128,12 @@ also accepted. Each supplied option overrides the corresponding YAML value,
 including values inherited through `extends`; omitted options keep the YAML settings.
 Relative CLI paths are interpreted from the working directory, and `~` is expanded.
 
-When `--data-path` is supplied, `data.normalization_dict_path` is resolved
-relative to that training directory. When `--test-path` is supplied,
-`data.test_normalization` is resolved relative to the test HDF5 file's containing
-directory. Relative normalization paths retain their subdirectories; absolute
-normalization paths retain only their filename. For example, a configured
-`/old/data/normalization.pkl` becomes `/path/to/training-data/normalization.pkl`
-in the command above. Missing or `null` normalization settings remain unchanged.
+When `--data-path` is supplied, both `data.normalization_dict_path` and
+`data.test_normalization` are always set to `<data_path>/normalization.pkl`,
+overriding any configured values, including missing or `null` settings.
+Training and test data use the same normalization file, even when `--test-path`
+points to another directory. In the command above, both normalization paths are
+`/path/to/training-data/normalization.pkl`.
 
 ### Model Architecture
 
