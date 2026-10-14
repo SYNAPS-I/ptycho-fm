@@ -112,6 +112,29 @@ data/
 
 All training parameters are configured in `config.yaml`. The configuration uses a unified decoder structure to reduce redundancy.
 
+Training also accepts optional path overrides:
+
+```bash
+ptycho-fm-train --config config.yaml \
+  --data-path /path/to/training-data \
+  --test-path /path/to/test-data/scan_dp.hdf5 \
+  --finetune-from-model /path/to/model.pth \
+  --model-save-path /path/to/models
+```
+
+The same options work with `python -m ptycho_fm.train` and
+`python ptycho_fm/train.py`. Underscore spellings such as `--data_path` are
+also accepted. Each supplied option overrides the corresponding YAML value,
+including values inherited through `extends`; omitted options keep the YAML settings.
+Relative CLI paths are interpreted from the working directory, and `~` is expanded.
+
+When `--data-path` is supplied, both `data.normalization_dict_path` and
+`data.test_normalization` are always set to `<data_path>/normalization.pkl`,
+overriding any configured values, including missing or `null` settings.
+Training and test data use the same normalization file, even when `--test-path`
+points to another directory. In the command above, both normalization paths are
+`/path/to/training-data/normalization.pkl`.
+
 ### Model Architecture
 
 Training and inference use `PtychoFM`. Select its encoder via `encoder_type`:
