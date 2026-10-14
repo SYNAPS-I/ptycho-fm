@@ -5,6 +5,7 @@ import os
 import pickle
 import socket
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -84,6 +85,38 @@ def apply_launcher_run_name(config, launch_run_name):
         trainer['run_name'] = str(launch_run_name)
 
 
+def apply_cli_path_overrides(config, args):
+    """Apply explicit CLI paths and relocate their configured normalization files."""
+    def relocate_normalization(data, key, directory):
+        value = data.get(key)
+        if value:
+            path = Path(value).expanduser()
+            if path.is_absolute():
+                path = Path(path.name)
+            data[key] = str(directory / path)
+
+    if args.data_path is not None:
+        data = config.setdefault('data', {})
+        data['data_path'] = os.path.expanduser(args.data_path)
+        relocate_normalization(
+            data, 'normalization_dict_path', Path(data['data_path'])
+        )
+    if args.test_path is not None:
+        data = config.setdefault('data', {})
+        data['test_path'] = os.path.expanduser(args.test_path)
+        relocate_normalization(
+            data, 'test_normalization', Path(data['test_path']).parent
+        )
+    if args.finetune_from_model is not None:
+        config.setdefault('training', {})['finetune_from_model'] = os.path.expanduser(
+            args.finetune_from_model
+        )
+    if args.model_save_path is not None:
+        config.setdefault('paths', {})['model_save_path'] = os.path.expanduser(
+            args.model_save_path
+        )
+
+
 def main() -> None:
     """Entry point for `ptycho-fm-train` and `python -m ptycho_fm.train`."""
     def resolve_config_path(config_path):
@@ -106,6 +139,22 @@ def main() -> None:
         '--config',
         default='config.yaml',
         help='Path to config YAML file (default: config.yaml in the working directory)',
+    )
+    parser.add_argument(
+        '--data-path', '--data_path',
+        help='Override data.data_path; resolve normalization_dict_path relative to this directory',
+    )
+    parser.add_argument(
+        '--test-path', '--test_path',
+        help='Override data.test_path; resolve test_normalization relative to this HDF5 file\'s directory',
+    )
+    parser.add_argument(
+        '--finetune-from-model', '--finetune_from_model',
+        help='Override training.finetune_from_model with a model weights path',
+    )
+    parser.add_argument(
+        '--model-save-path', '--model_save_path',
+        help='Override paths.model_save_path with the model output directory',
     )
     parser.add_argument('--debug', action='store_true', 
                         help='Enable debug logging to verify CSV usage and shuffling')
@@ -158,6 +207,7 @@ def main() -> None:
     # Load configuration
     config_path = resolve_config_path(args.config)
     config = load_config(config_path)
+    apply_cli_path_overrides(config, args)
     apply_launcher_run_name(config, os.environ.get('PTYCHO_FM_LAUNCH_RUN_NAME'))
 
     # Training parameters
