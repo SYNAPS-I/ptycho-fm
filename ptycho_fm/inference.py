@@ -2,12 +2,11 @@ import os
 
 import numpy as np
 import torch
-import yaml
 from torch.utils.data import DataLoader
 
 from ptycho_fm.data import PtychographyDataset
 from ptycho_fm.model.model import PtychoFM
-from ptycho_fm.utils.config import resolve_run_name, run_directory
+from ptycho_fm.utils.config import load_config, resolve_run_name, run_directory
 
 
 def main() -> None:
@@ -15,13 +14,7 @@ def main() -> None:
     config_path = '/global/cfs/cdirs/m5073/pecomyint/ptycho-vit/scratch/models/run1/config.yaml'
     test_data_path = '/global/cfs/cdirs/m5073/synaps_data/simulated_data/n07581931_1001_dp.hdf5'
 
-    def load_config(path):
-        """Load configuration from YAML file."""
-        with open(path, 'r') as f:
-            config = yaml.safe_load(f)
-            return config
-
-    config = load_config(config_path)
+    config = load_config(config_path).model_dump(exclude_unset=True)
     run_name = resolve_run_name(config, generate=False)
 
     # Create test dataset

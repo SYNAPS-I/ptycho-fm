@@ -6,10 +6,15 @@ from pathlib import Path
 
 import yaml
 
+from ptycho_fm.config import PtychoFMConfig
 
-def resolve_run_name(config: dict, *, generate: bool = False, now=None) -> str:
+
+def resolve_run_name(config: dict | PtychoFMConfig, *, generate: bool = False, now=None) -> str:
     """Resolve the canonical local/tracker run name, accepting legacy run_num."""
-    trainer = config.setdefault("trainer", {})
+    if isinstance(config, PtychoFMConfig):
+        trainer = config.trainer.model_dump(exclude_unset=True)
+    else:
+        trainer = config.setdefault("trainer", {})
     run_name = trainer.get("run_name")
     legacy_run_num = trainer.get("run_num")
 
@@ -36,13 +41,16 @@ def resolve_run_name(config: dict, *, generate: bool = False, now=None) -> str:
             "trainer.run_name must be a non-empty directory-safe name without slashes"
         )
     trainer["run_name"] = run_name
+    if isinstance(config, PtychoFMConfig):
+        config.trainer = trainer
     return run_name
 
 
-def run_directory(config: dict) -> Path:
+def run_directory(config: dict | PtychoFMConfig) -> Path:
     """Return the model directory for an already resolved run name."""
     run_name = resolve_run_name(config, generate=False)
-    return Path(config["paths"]["model_save_path"]).expanduser() / f"run{run_name}"
+    model_save_path = config.paths.model_save_path if isinstance(config, PtychoFMConfig) else config["paths"]["model_save_path"]
+    return Path(model_save_path).expanduser() / f"run{run_name}"
 
 
 def deep_merge_config(base: dict, override: dict) -> dict:
@@ -56,7 +64,12 @@ def deep_merge_config(base: dict, override: dict) -> dict:
     return result
 
 
-def load_config(config_path='config.yaml', *, _seen=None) -> dict:
+def load_config(config_path='config.yaml') -> PtychoFMConfig:
+    """Load and validate YAML after resolving all inheritance."""
+    return PtychoFMConfig.model_validate(_load_config_mapping(config_path))
+
+
+def _load_config_mapping(config_path, *, _seen=None) -> dict:
     """Resolve the first path from cwd and each parent from its child file."""
     path = Path(config_path).expanduser().resolve()
     seen = set() if _seen is None else set(_seen)
@@ -77,4 +90,4 @@ def load_config(config_path='config.yaml', *, _seen=None) -> dict:
     parent_path = Path(parent).expanduser()
     if not parent_path.is_absolute():
         parent_path = path.parent / parent_path
-    return deep_merge_config(load_config(parent_path, _seen=seen), config)
+    return deep_merge_config(_load_config_mapping(parent_path, _seen=seen), config)

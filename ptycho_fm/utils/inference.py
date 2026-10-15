@@ -7,7 +7,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
-import yaml
 from torch.utils.data import DataLoader, Dataset
 
 from ptycho_fm.data import PtychographyDataset
@@ -16,12 +15,7 @@ from ptycho_fm.model.model import (
     PtychoFMInference,
     PtychoFMReIm,
 )
-
-
-def load_config(path: str | Path) -> dict:
-    """Load a YAML configuration file."""
-    with open(path, encoding="utf-8") as file:
-        return yaml.safe_load(file)
+from ptycho_fm.utils.config import load_config
 
 
 def resolve_inference_model(config: dict) -> tuple[torch.nn.Module, int]:

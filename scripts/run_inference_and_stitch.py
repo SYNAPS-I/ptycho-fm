@@ -164,7 +164,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config(args.config).model_dump(exclude_unset=True)
     model, img_size = resolve_model_and_size(config)
     device = torch.device(
         args.device
