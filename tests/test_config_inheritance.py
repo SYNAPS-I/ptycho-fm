@@ -11,7 +11,7 @@ def test_relative_parents_and_caller_path(tmp_path, monkeypatch):
     (configs / 'base.yaml').write_text('model: {encoder: {depth: 12, embed_dim: 512}}\nitems: [1, 2]\n')
     (configs / 'child.yaml').write_text('extends: base.yaml\nmodel: {encoder: {depth: 6}}\nitems: [3]\n')
     monkeypatch.chdir(tmp_path)
-    assert load_config('configs/child.yaml') == {
+    assert load_config('configs/child.yaml').model_dump(exclude_unset=True) == {
         'model': {'encoder': {'depth': 6, 'embed_dim': 512}}, 'items': [3],
     }
 

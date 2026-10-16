@@ -116,7 +116,7 @@ def test_plain_mse_trains_with_float32_batches(tmp_path):
     config.pop('wandb', None)
     config['mlflow'] = {'enabled': False}
     config['training'].update(batch_size=2, epochs=1, log_every=1, track_flops=False,
-                              loss_function='mse', platform='slurm')
+                              loss_function='mse', platform='slurm', resume_from_checkpoint=False)
     config['trainer']['run_name'] = 'mse'
     _, state, logs = run_training(config, tmp_path / 'mse.yaml', 1, worker)
     assert state['rank_runtime'][0]['progress']['optimizer_steps'] == 2

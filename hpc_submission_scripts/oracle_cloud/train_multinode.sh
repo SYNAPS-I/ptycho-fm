@@ -101,16 +101,16 @@ import sys
 from ptycho_fm.utils.config import load_config, resolve_run_name, run_directory
 
 config = load_config(sys.argv[1])
-resume = bool(config.get("training", {}).get("resume_from_checkpoint", False))
-trainer = config.get("trainer", {}) or {}
+resume = config.training.resume_from_checkpoint
+trainer = config.trainer
 has_name = (
-    trainer.get("run_name") is not None
-    or trainer.get("run_num") is not None
+    trainer.run_name is not None
+    or trainer.run_num is not None
 )
 if resume or has_name:
     run_name = resolve_run_name(config, generate=False)
 else:
-    config.setdefault("trainer", {})["run_name"] = sys.argv[2]
+    config.trainer.run_name = sys.argv[2]
     run_name = resolve_run_name(config, generate=False)
 print("1" if resume else "0")
 print(run_name)

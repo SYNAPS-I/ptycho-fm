@@ -84,7 +84,7 @@ def collect_points(config_flops, tolerance=0.05, loss_metric='val_loss'):
             param_source = 'logged'
             if params is None:
                 # Explicitly label reconstruction; never imply these are legacy counts.
-                params = PtychoFMFlopsCalculator(config['model'], batch_size=1).param_count()
+                params = PtychoFMFlopsCalculator(config.model.model_dump(exclude_unset=True), batch_size=1).param_count()
                 param_source = 'current_model_reconstruction'
             points.append({
                 'config': str(path), 'label': run_name,

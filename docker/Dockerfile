@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir \
         hdf5plugin \
         mlflow \
         mpi4py \
+        "pydantic>=2.0,<3" \
         scikit-image \
         seaborn \
         timm \
@@ -15,4 +16,3 @@ RUN pip install --no-cache-dir \
         wandb \
         "ptychi @ git+https://github.com/AdvancedPhotonSource/pty-chi.git@main" \
     && python -c "import cmcrameri, fvcore, h5py, hdf5plugin, mlflow, mpi4py, skimage, seaborn, timm, torchinfo, wandb; from ptychi.image_proc import extract_patches_fourier_shift; assert all(hasattr(wandb, name) for name in ('login', 'init', 'Settings', 'Api', 'Image', 'Artifact'))"
-

@@ -551,7 +551,7 @@ def main() -> None:
     if data_format == "raw-h5" and args.raw_crop is None:
         parser.error("--raw-crop is required for raw HDF5 input")
 
-    config = load_config(args.config)
+    config = load_config(args.config).model_dump(exclude_unset=True)
     model, image_size = resolve_inference_model(config)
     device = torch.device(
         args.device
