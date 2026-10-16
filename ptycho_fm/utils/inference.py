@@ -15,7 +15,7 @@ from ptycho_fm.model.model import (
     PtychoFMInference,
     PtychoFMReIm,
 )
-from ptycho_fm.utils.config import load_config
+from ptycho_fm.utils.config import load_config  # noqa: F401 - public re-export for inference scripts
 
 
 def resolve_inference_model(config: dict) -> tuple[torch.nn.Module, int]:
