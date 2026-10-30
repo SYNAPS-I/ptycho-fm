@@ -1,6 +1,7 @@
 """Config lookup for the installed training entry point."""
 
 import math
+import pickle
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,8 @@ import yaml
 
 from ptycho_fm import train
 from ptycho_fm.utils import config as config_utils
+
+from .test_data_refactor import make_pair
 
 
 @pytest.mark.parametrize(
@@ -140,6 +143,8 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
         flag = key.replace('_', '-') if spelling == 'hyphen' else key
         argv.extend(['--' + flag, value])
     monkeypatch.chdir(tmp_path)
+    (tmp_path / 'new/data').mkdir(parents=True)
+    (tmp_path / 'new/data/normalization.pkl').write_bytes(pickle.dumps({}))
     monkeypatch.setattr(sys, 'argv', argv)
 
     class ConfigReady(Exception):
@@ -164,7 +169,7 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize('override', [None, 'data_path', 'test_path', 'finetune_from_model', 'model_save_path'])
-def test_path_overrides_are_independent_and_optional(override):
+def test_path_overrides_are_independent_and_optional(tmp_path, override):
     config = {
         'data': {
             'data_path': '/old/data',
@@ -179,42 +184,76 @@ def test_path_overrides_are_independent_and_optional(override):
         data_path=None, test_path=None, finetune_from_model=None, model_save_path=None
     )
     if override is not None:
-        setattr(args, override, '/new/location')
+        setattr(args, override, str(tmp_path))
     train.apply_cli_path_overrides(config, args)
 
-    assert config['data']['data_path'] == ('/new/location' if override == 'data_path' else '/old/data')
-    assert config['data']['test_path'] == ('/new/location' if override == 'test_path' else '/old/test/scan_dp.hdf5')
+    assert config['data']['data_path'] == (str(tmp_path) if override == 'data_path' else '/old/data')
+    assert config['data']['test_path'] == (str(tmp_path) if override == 'test_path' else '/old/test/scan_dp.hdf5')
     assert config['data']['normalization_dict_path'] == (
-        '/new/location/normalization.pkl' if override == 'data_path' else '/old/data/norm.pkl'
+        None if override == 'data_path' else '/old/data/norm.pkl'
     )
     assert config['data']['test_normalization'] == (
-        '/new/location/normalization.pkl' if override == 'data_path' else '/old/test/test_norm.pkl'
+        None if override == 'data_path' else '/old/test/test_norm.pkl'
     )
     assert config['training']['finetune_from_model'] == (
-        '/new/location' if override == 'finetune_from_model' else '/old/model.pth'
+        str(tmp_path) if override == 'finetune_from_model' else '/old/model.pth'
     )
     assert config['paths']['model_save_path'] == (
-        '/new/location' if override == 'model_save_path' else '/old/models'
+        str(tmp_path) if override == 'model_save_path' else '/old/models'
     )
 
 
 @pytest.mark.parametrize('normalization', ['norm.pkl', 'metadata/norm.pkl', '/old/norm.pkl', None])
 @pytest.mark.parametrize('test_path', [None, '/new/test/scan_dp.hdf5'])
-def test_normalization_paths_always_use_cli_training_directory(normalization, test_path):
+@pytest.mark.parametrize('file_exists', [False, True])
+def test_normalization_paths_use_optional_cli_training_map(tmp_path, normalization, test_path, file_exists):
+    norm_path = tmp_path / 'normalization.pkl'
+    if file_exists:
+        norm_path.write_bytes(pickle.dumps({}))
     config = {'data': {
         'normalization_dict_path': normalization, 'test_normalization': normalization,
     }}
     args = SimpleNamespace(
-        data_path='/new/train', test_path=test_path,
+        data_path=str(tmp_path), test_path=test_path,
         finetune_from_model=None, model_save_path=None,
     )
     train.apply_cli_path_overrides(config, args)
 
-    assert config['data']['normalization_dict_path'] == '/new/train/normalization.pkl'
-    assert config['data']['test_normalization'] == '/new/train/normalization.pkl'
+    expected = str(norm_path) if file_exists else None
+    assert config['data']['normalization_dict_path'] == expected
+    assert config['data']['test_normalization'] == expected
 
 
-def test_cli_paths_can_supply_missing_settings_and_expand_home():
+@pytest.mark.parametrize('file_exists', [False, True])
+def test_cli_normalization_applies_to_training_and_test_samples(tmp_path, file_exists):
+    data_dir = tmp_path / 'train'
+    make_pair(data_dir)
+    test_path, *_ = make_pair(tmp_path / 'test')
+    if file_exists:
+        (data_dir / 'normalization.pkl').write_bytes(pickle.dumps({'sample': 7.0}))
+    config = {'data': {'normalization_dict_path': None, 'default_normalization': 3.2}}
+    args = SimpleNamespace(
+        data_path=str(data_dir), test_path=str(test_path),
+        finetune_from_model=None, model_save_path=None,
+    )
+    train.apply_cli_path_overrides(config, args)
+    settings = config['data']
+    training = train.CombinedDataset(
+        data_dir, normalization_dict_path=settings['normalization_dict_path'],
+        default_normalization=settings['default_normalization'], apply_noise=False,
+    )
+    test = train.PtychographyDataset(
+        test_path, normalization_dict_path=settings['test_normalization'],
+        default_normalization=settings['default_normalization'], apply_noise=False,
+    )
+    expected = 7.0 if file_exists else 3.2
+    assert training[0][5] == test[0][5] == expected
+    # Checkpoint fingerprinting must also work when the optional file is absent.
+    assert train.dataset_fingerprint(training, settings['normalization_dict_path'])
+
+
+def test_cli_paths_can_supply_missing_settings_and_expand_home(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
     home = Path.home()
     config = {}
     args = SimpleNamespace(
@@ -227,8 +266,8 @@ def test_cli_paths_can_supply_missing_settings_and_expand_home():
         'data': {
             'data_path': str(home / 'data'),
             'test_path': str(home / 'test/scan_dp.hdf5'),
-            'normalization_dict_path': str(home / 'data/normalization.pkl'),
-            'test_normalization': str(home / 'data/normalization.pkl'),
+            'normalization_dict_path': None,
+            'test_normalization': None,
         },
         'training': {'finetune_from_model': str(home / 'model.pth')},
         'paths': {'model_save_path': str(home / 'models')},
