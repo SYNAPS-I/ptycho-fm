@@ -129,11 +129,15 @@ including values inherited through `extends`; omitted options keep the YAML sett
 Relative CLI paths are interpreted from the working directory, and `~` is expanded.
 
 When `--data-path` is supplied, both `data.normalization_dict_path` and
-`data.test_normalization` are always set to `<data_path>/normalization.pkl`,
-overriding any configured values, including missing or `null` settings.
+`data.test_normalization` are set to `<data_path>/normalization.pkl` if it exists,
+or to `null` if it is absent, overriding any configured values.
 Training and test data use the same normalization file, even when `--test-path`
-points to another directory. In the command above, both normalization paths are
-`/path/to/training-data/normalization.pkl`.
+points to another directory. Without that file, unpacked training and test data
+use `data.default_normalization`; packed data use their embedded normalization,
+falling back to `data.default_normalization` for missing (NaN) values.
+An existing invalid or unreadable file still raises an error. Without `--data-path`,
+explicit normalization paths in YAML retain their existing behavior, including an
+error for a missing file.
 
 ### Model Architecture
 

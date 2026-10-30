@@ -17,6 +17,7 @@ data:
 
   # Normalization dictionary: pickle file containing {object_name: normalization_factor} mapping
   # Omitted file or missing object key uses the default; invalid/unreadable files raise an error.
+  # --data-path uses normalization.pkl when present, otherwise leaves normalization paths null.
   # normalization_dict_path: '/pscratch/sd/e/edey/ptycho_peco/ptycho-vit/normalization_fulldata.pkl'  # Set to null if normalization file doesn't exist, or provide path to .pkl file
   normalization_dict_path: '/mnt/localdisk/scratch/aileenluo/sim_cleanedProbe_2_packed/normalization.pkl'
   test_normalization: '/mnt/localdisk/scratch/aileenluo/norm_20260225.pkl'

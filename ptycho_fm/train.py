@@ -86,11 +86,12 @@ def apply_launcher_run_name(config, launch_run_name):
 
 
 def apply_cli_path_overrides(config, args):
-    """Apply explicit CLI paths and use the CLI data directory's normalization."""
+    """Apply CLI paths and use the data directory's normalization when present."""
     if args.data_path is not None:
         data = config.setdefault('data', {})
         data['data_path'] = os.path.expanduser(args.data_path)
-        normalization_path = str(Path(data['data_path']) / 'normalization.pkl')
+        candidate = Path(data['data_path']) / 'normalization.pkl'
+        normalization_path = str(candidate) if candidate.exists() else None
         data['normalization_dict_path'] = normalization_path
         data['test_normalization'] = normalization_path
     if args.test_path is not None:
@@ -131,7 +132,8 @@ def main() -> None:
     )
     parser.add_argument(
         '--data-path', '--data_path',
-        help='Override data.data_path and use <data_path>/normalization.pkl for training and test normalization',
+        help=('Override data.data_path and use <data_path>/normalization.pkl for training '
+              'and test normalization when present; otherwise use dataset defaults'),
     )
     parser.add_argument(
         '--test-path', '--test_path',

@@ -17,12 +17,12 @@ from tests.test_data_refactor import make_pair
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_training(config, path, ranks, worker):
+def run_training(config, path, ranks, worker, extra_args=()):
     path.write_text(yaml.safe_dump(config))
     command = [sys.executable]
     if ranks > 1:
         command += ['-m', 'torch.distributed.run', '--standalone', '--nproc-per-node', str(ranks)]
-    command += [str(worker), '--config', str(path)]
+    command += [str(worker), '--config', str(path), *extra_args]
     env = {**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '1',
            'MKL_NUM_THREADS': '1', 'MPLBACKEND': 'Agg', 'PYTHONPATH': str(ROOT)}
     result = subprocess.run(command, env=env, cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
@@ -125,7 +125,12 @@ def test_plain_mse_trains_with_float32_batches(tmp_path, split_unit, ranks):
     config['training'].update(batch_size=2, epochs=1, log_every=1, track_flops=False,
                               loss_function='mse', platform='slurm', resume_from_checkpoint=False)
     config['trainer']['run_name'] = 'mse'
-    _, state, logs = run_training(config, tmp_path / 'mse.yaml', ranks, worker)
+    _, state, logs = run_training(
+        config, tmp_path / 'mse.yaml', ranks, worker,
+        extra_args=['--data-path', str(tmp_path / 'data')],
+    )
+    assert state['resume_context']['data']['normalization_dict_path'] is None
+    assert state['resume_context']['data']['test_normalization'] is None
     assert state['rank_runtime'][0]['progress']['optimizer_steps'] == (2 if ranks == 1 else 1)
     assert logs['val_loss'].notna().all()
     plots = list((tmp_path / 'models' / 'runmse').glob('validation_object_0_*.png'))
