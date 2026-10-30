@@ -36,7 +36,8 @@ mpi = [
 default-groups = ["dev"]
 
 [tool.uv.sources]
-ptychi = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git", branch = "main" }
+# Keep the legacy +0.5 origin used by existing reconstruction datasets.
+ptychi = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git", rev = "19c86a616620f88c1cb594b430adc1bb17db6c4e" }
 
 [project.scripts]
 ptycho-fm-train = "ptycho_fm.train:main"

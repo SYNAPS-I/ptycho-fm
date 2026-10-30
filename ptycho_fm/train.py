@@ -33,7 +33,7 @@ from ptycho_fm.utils.config import resolve_run_name
 from ptycho_fm.utils.data import (
     ObjectDatasetView,
     dataset_fingerprint,
-    split_dataset_by_object,
+    split_dataset,
     validate_loader_lengths,
 )
 from ptycho_fm.utils.data import build_train_loader as _build_train_loader
@@ -308,35 +308,38 @@ def main() -> None:
             max_files=config['data'].get('max_files'),
             debug=DEBUG_MODE
         )
-    # Select and split complete objects, then flatten each side to pattern indices.
-    # No object can contribute diffraction patterns to both training and validation.
+    # Split globally before distributing pattern indices across ranks.
+    split_unit = config["data"].get("split_unit", "object")
     subset_fraction = config["data"].get("subset_fraction")
     (
         train_subset,
         val_subset,
         train_object_indices,
         val_object_indices,
-    ) = split_dataset_by_object(
+    ) = split_dataset(
         base_dataset,
         train_fraction=config["data"]["train_split"],
         random_seed=config["data"]["random_seed"],
         subset_fraction=subset_fraction,
+        split_unit=split_unit,
     )
     train_subset_base = train_subset
     train_size = len(train_subset)
     val_size = len(val_subset)
     total_size = train_size + val_size
-    selected_object_count = len(train_object_indices) + len(val_object_indices)
+    selected_object_count = len(set(train_object_indices) | set(val_object_indices))
     if is_main_process:
         if subset_fraction is not None:
             print(
                 f"Using subset_fraction={subset_fraction} -> "
-                f"{selected_object_count}/{len(base_dataset.object_keys)} objects",
+                f"{selected_object_count}/{len(base_dataset.object_keys)} objects, "
+                f"{total_size}/{len(base_dataset)} patterns",
                 flush=True,
             )
         print(
-            f"Object-level split: {len(train_object_indices)} train object(s) / "
-            f"{len(val_object_indices)} validation object(s)",
+            f"{split_unit.capitalize()}-level split: "
+            f"{train_size} train patterns from {len(train_object_indices)} object(s) / "
+            f"{val_size} validation patterns from {len(val_object_indices)} object(s)",
             flush=True,
         )
 
@@ -447,7 +450,9 @@ def main() -> None:
         if validation_plot_count < 0:
             raise ValueError("training.validation_plot_num_objects must be non-negative or null.")
     validation_plot_objects = []
-    if is_main_process:
+    if is_main_process and split_unit == "pattern" and validation_plot_count:
+        print("Skipping complete-object validation plots for pattern-level splitting.", flush=True)
+    if is_main_process and split_unit == "object":
         for object_index in val_object_indices[:validation_plot_count]:
             object_view = ObjectDatasetView(base_dataset, object_index)
             object_loader = DataLoader(
@@ -748,7 +753,7 @@ def main() -> None:
     resume_context = {
         'world_size': world_size, 'batch_size': BATCH_SIZE, 'model': config['model'],
         'data': config['data'], 'train_size': train_size, 'val_size': val_size,
-        'split_unit': 'object',
+        'split_unit': split_unit,
         'train_object_count': len(train_object_indices),
         'val_object_count': len(val_object_indices),
         'subsetting': config['training'].get('data_subsetting_schedule'),

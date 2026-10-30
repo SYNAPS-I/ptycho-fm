@@ -40,13 +40,14 @@ def _atomic_torch_save(obj, path):
 
 
 def _checkpoint_resume_context(context):
-    """Remove execution-only settings that do not change training semantics."""
+    """Normalize defaults and execution-only settings for resume comparisons."""
     normalized = dict(context)
     data = context.get('data')
     if isinstance(data, dict):
         normalized['data'] = {
             key: value for key, value in data.items() if key != 'num_workers'
         }
+        normalized['data'].setdefault('split_unit', 'object')
     return normalized
 
 

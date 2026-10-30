@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from bisect import bisect_right
 from itertools import islice, pairwise
 from pathlib import Path
 
@@ -103,6 +104,42 @@ def split_dataset_by_object(dataset, train_fraction, random_seed, subset_fractio
     train_subset = Subset(dataset, pattern_indices(train_object_indices))
     val_subset = Subset(dataset, pattern_indices(val_object_indices))
     return train_subset, val_subset, train_object_indices, val_object_indices
+
+
+def split_dataset(dataset, train_fraction, random_seed, subset_fraction=None, split_unit="object"):
+    """Split objects or patterns; return subsets and objects represented on each side.
+
+    In pattern mode the object lists can overlap and do not denote held-out objects.
+    subset_fraction selects a prefix in the chosen split unit before random splitting.
+    """
+    if split_unit == "object":
+        return split_dataset_by_object(dataset, train_fraction, random_seed, subset_fraction)
+    if split_unit != "pattern":
+        raise ValueError("data.split_unit must be 'object' or 'pattern'.")
+    train_fraction = float(train_fraction)
+    if not 0.0 < train_fraction < 1.0:
+        raise ValueError("data.train_split must be in the range (0, 1).")
+    pattern_count = len(dataset)
+    if subset_fraction is not None:
+        subset_fraction = float(subset_fraction)
+        if not 0.0 < subset_fraction <= 1.0:
+            raise ValueError("data.subset_fraction must be in the range (0, 1].")
+        pattern_count = int(pattern_count * subset_fraction)
+    train_count = int(pattern_count * train_fraction)
+    if train_count < 1 or train_count >= pattern_count:
+        raise ValueError(
+            "Pattern-level train/validation split requires at least one pattern in each "
+            f"split; got {pattern_count} selected pattern(s) and train_split={train_fraction}."
+        )
+    generator = torch.Generator().manual_seed(int(random_seed))
+    permutation = torch.randperm(pattern_count, generator=generator).tolist()
+    train_subset = Subset(dataset, permutation[:train_count])
+    val_subset = Subset(dataset, permutation[train_count:])
+
+    def represented_objects(subset):
+        return sorted({bisect_right(dataset.object_offsets, index) - 1 for index in subset.indices})
+
+    return train_subset, val_subset, represented_objects(train_subset), represented_objects(val_subset)
 
 
 class ResumeSampler(Sampler):
