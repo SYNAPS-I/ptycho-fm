@@ -24,7 +24,7 @@ def main():
     writer = csv.DictWriter(sys.stdout, fieldnames=['config', 'target_flops', 'params_m', 'iter', 'actual_flops', 'global_batch_size'])
     writer.writeheader()
     for path in args.configs:
-        config = load_config(path)
+        config = load_config(path).model_dump(exclude_unset=True)
         batch = args.batch_size or config['training']['batch_size']
         calc = PtychoFMFlopsCalculator(config['model'], batch_size=batch)
         per_step = calc.training_tflops(batch) * 1e12 * args.world_size
