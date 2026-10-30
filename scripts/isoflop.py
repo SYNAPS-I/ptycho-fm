@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--fit-space', choices=['loglog', 'log_params', 'params'], default='loglog',
                         help='Optional diagnostic plot space; optima always use canonical log-log fits')
     args = parser.parse_args()
-    selection = {path: args.targets or load_config(path)['training'].get('log_at_flops', []) for path in args.configs}
+    selection = {path: args.targets or load_config(path).training.log_at_flops for path in args.configs}
     data = pd.DataFrame(collect_points(selection, args.tolerance, args.loss_metric))
     if data.empty:
         raise ValueError('No isoFLOP points found within the requested tolerance')

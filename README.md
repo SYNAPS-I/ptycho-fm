@@ -47,6 +47,31 @@ ptycho-fm/
 └── pyproject.toml                 # Package + dependencies
 ```
 
+## Configuration API
+
+`ptycho_fm.utils.config.load_config(path)` returns a Pydantic 2
+`ptycho_fm.config.PtychoFMConfig`, with typed nested sections (for example,
+`config.model.encoder.img_size`). The training alias `load_yaml_config` returns
+the same model. Inheritance is merged before validation; unknown extension keys
+are retained. YAML keys and CLI path overrides keep their existing meanings.
+
+For dictionary consumers, YAML/JSON output, or checkpoint metadata, use
+`config.model_dump(exclude_unset=True)`. Keeping unset fields excluded preserves
+runtime defaults, including defaults that depend on the selected encoder or data
+loader. Explicit `null` values are retained. Partial configs remain supported;
+fields without a universal default use `None` until supplied or resolved by the
+runtime. Assigning a section (e.g. `config.data = {...}`) validates it and marks it
+for serialization; when editing a previously omitted section, assign that section
+back before an `exclude_unset` dump.
+
+Downstream integration: in `../ptychoFM-finetune/scripts/export_ptycho_fm.py`,
+replace `load_config(config_path)["model"]` with
+`load_config(config_path).model.model_dump(exclude_unset=True)`. The exporter's
+remaining dictionary access and model constructor then work as before.
+`inspect_ptycho_fm_inputs.py` reads JSON dictionaries and
+`render_inference_test_plot.py` uses its own YAML loader; neither needs a change
+for this API. Environments installing PtychoFM must include `pydantic>=2.0,<3`.
+
 ## Requirements
 
 - Python >= 3.11

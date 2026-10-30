@@ -16,6 +16,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torchinfo import summary
 
+from ptycho_fm.config import PtychoFMConfig
 from ptycho_fm.custom_loss import (
     CombinedLoss,
     ProbeAwareLoss,
@@ -78,6 +79,11 @@ def override_output_norm_from_config(model, model_config):
 
 def apply_launcher_run_name(config, launch_run_name):
     """Use a launcher-provided name only for an otherwise unnamed fresh run."""
+    if isinstance(config, PtychoFMConfig):
+        if (launch_run_name and not config.training.resume_from_checkpoint
+                and config.trainer.run_name is None and config.trainer.run_num is None):
+            config.trainer = config.trainer.model_copy(update={'run_name': str(launch_run_name)})
+        return
     if not launch_run_name or config.get('training', {}).get('resume_from_checkpoint', False):
         return
     trainer = config.setdefault('trainer', {})
@@ -116,9 +122,8 @@ def main() -> None:
     def load_config(config_path='config.yaml'):
         """Load configuration from YAML file."""
         config = load_yaml_config(config_path)
-        resume = bool(config.get("training", {}).get("resume_from_checkpoint", False))
-        trainer_config = config.get("trainer", {})
-        has_name = trainer_config.get("run_name") is not None or trainer_config.get("run_num") is not None
+        resume = config.training.resume_from_checkpoint
+        has_name = config.trainer.run_name is not None or config.trainer.run_num is not None
         if resume or has_name:
             resolve_run_name(config, generate=False)
         return config
@@ -200,6 +205,9 @@ def main() -> None:
     config = load_config(config_path)
     apply_cli_path_overrides(config, args)
     apply_launcher_run_name(config, os.environ.get('PTYCHO_FM_LAUNCH_RUN_NAME'))
+    # Runtime consumers and persisted checkpoint/tracker metadata use plain
+    # mappings. Preserve omissions for their context-dependent defaults.
+    config = config.model_dump(exclude_unset=True)
 
     # Training parameters
     tracking_settings = resolve_tracking_config(config)

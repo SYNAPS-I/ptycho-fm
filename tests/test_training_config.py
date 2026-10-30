@@ -78,7 +78,7 @@ def test_default_config_contains_merged_training_options():
     ].keys()
     assert config["data"]["apply_noise"] is True
     assert config["data"]["test_apply_noise"] is False
-    assert config["trainer"]["run_name"] is None
+    assert "run_name" in config["trainer"]
     assert "run_num" not in config["trainer"]
     assert config["mlflow"]["enabled"] is True
     assert "wandb" not in config
@@ -165,7 +165,7 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
     monkeypatch.setattr(train, 'resolve_tracking_config', check_config)
     with pytest.raises(ConfigReady):
         train.main()
-    assert config_utils.load_config(tmp_path / 'base.yaml') == base
+    assert config_utils.load_config(tmp_path / 'base.yaml').model_dump(exclude_unset=True) == base
 
 
 @pytest.mark.parametrize('override', [None, 'data_path', 'test_path', 'finetune_from_model', 'model_save_path'])

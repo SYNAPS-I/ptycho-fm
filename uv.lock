@@ -3444,6 +3444,7 @@ dependencies = [
     { name = "onnx" },
     { name = "pandas" },
     { name = "ptychi" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "scikit-image" },
     { name = "scipy" },
