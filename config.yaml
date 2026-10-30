@@ -28,9 +28,10 @@ data:
   max_OPR_modes: 1  # Minimum OPR mode count for unpacked/test loaders; larger inputs are preserved
   # Diffraction patterns and probes retain native spatial dimensions, which must match the model.
 
-  train_split: 0.95  # Fraction of objects for training
+  split_unit: object  # object (generalization) or pattern (e.g. single-scan fine-tuning)
+  train_split: 0.95  # Fraction of the chosen split unit for training
   random_seed: 8
-  # Optional: use only the first fraction of objects from the full dataset (0 < fraction <= 1)
+  # Optional: use only the first fraction of the chosen split unit (0 < fraction <= 1)
   # subset_fraction: 0.1
 
   # Distributed data loading strategy:

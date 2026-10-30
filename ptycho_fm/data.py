@@ -118,6 +118,9 @@ class _SampleReader(Dataset):
         ry, rx = float(py.max() - py.min()), float(px.max() - px.min())
         in_pixels = 0.1 * oh < ry < 10 * oh and 0.1 * ow < rx < 10 * ow
         pixel_size = float(para["object"].attrs["pixel_height_m"])
+        # Preserve the +0.5 origin used by existing legacy Pty-Chi datasets.
+        # Future versions will switch to -0.5 to match current Pty-Chi, requiring
+        # legacy-origin support or migration of saved positions (+1 pixel per axis).
         origin = (np.array(object_shape, dtype=np.float32) / 2.0).round() + 0.5
         if index is None:
             positions = np.column_stack((py, px)).astype(np.float32)

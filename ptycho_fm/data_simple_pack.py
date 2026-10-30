@@ -152,6 +152,9 @@ class PtychographyDatasetPacked(Dataset):
         ry, rx = float(py.max() - py.min()), float(px.max() - px.min())
         in_px = 0.1 * oh < ry < 10 * oh and 0.1 * ow < rx < 10 * ow
         ps = float(pixel_height_m)
+        # Preserve the +0.5 origin used by existing legacy Pty-Chi datasets.
+        # Future versions will switch to -0.5 to match current Pty-Chi, requiring
+        # legacy-origin support or migration of saved positions (+1 pixel per axis).
         origin = ((np.array(object_shape, dtype=np.float32) / 2.0).round() + 0.5).astype(np.float32)
         py_i, px_i = float(py_full[i]), float(px_full[i])
         v = np.array([py_i, px_i], dtype=np.float32)

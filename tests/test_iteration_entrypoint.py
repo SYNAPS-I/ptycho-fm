@@ -96,9 +96,15 @@ def test_entrypoint_resume_and_cooldown(tmp_path):
     assert cooldown_log['lr'].iloc[-1] == 0
 
 
-def test_plain_mse_trains_with_float32_batches(tmp_path):
+@pytest.mark.parametrize("split_unit,ranks", [
+    ("object", 1),
+    ("pattern", 1),
+    pytest.param("pattern", 2, marks=pytest.mark.integration),
+])
+def test_plain_mse_trains_with_float32_batches(tmp_path, split_unit, ranks):
     make_pair(tmp_path / 'data', 'a', modes=1, pattern_shape=(16, 16))
-    make_pair(tmp_path / 'data', 'b', modes=1, pattern_shape=(16, 16))
+    if split_unit == 'object':
+        make_pair(tmp_path / 'data', 'b', modes=1, pattern_shape=(16, 16))
     worker = tmp_path / 'worker.py'
     worker.write_text('from ptycho_fm.train import main\nmain()\n')
     config = yaml.safe_load((ROOT / 'config.yaml').read_text())
@@ -106,6 +112,7 @@ def test_plain_mse_trains_with_float32_batches(tmp_path):
                           normalization_dict_path=None, num_workers=0, pin_memory=False,
                           use_cuda_prefetcher=False, persistent_workers=False,
                           train_split=0.75, sharding_strategy='dynamic', drop_last=False,
+                          split_unit=split_unit,
                           apply_noise=False, scale=2.0, default_normalization=3.2,
                           max_probe_modes=1)
     config['model']['encoder'].update(img_size=16, patch_size=4, embed_dim=16,
@@ -118,7 +125,8 @@ def test_plain_mse_trains_with_float32_batches(tmp_path):
     config['training'].update(batch_size=2, epochs=1, log_every=1, track_flops=False,
                               loss_function='mse', platform='slurm', resume_from_checkpoint=False)
     config['trainer']['run_name'] = 'mse'
-    _, state, logs = run_training(config, tmp_path / 'mse.yaml', 1, worker)
-    assert state['rank_runtime'][0]['progress']['optimizer_steps'] == 2
+    _, state, logs = run_training(config, tmp_path / 'mse.yaml', ranks, worker)
+    assert state['rank_runtime'][0]['progress']['optimizer_steps'] == (2 if ranks == 1 else 1)
     assert logs['val_loss'].notna().all()
-    assert list((tmp_path / 'models' / 'runmse').glob('validation_object_0_*.png'))
+    plots = list((tmp_path / 'models' / 'runmse').glob('validation_object_0_*.png'))
+    assert bool(plots) == (split_unit == 'object')

@@ -3412,8 +3412,8 @@ wheels = [
 
 [[package]]
 name = "ptychi"
-version = "2.1.1.dev1+g7f2c08c61"
-source = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git?branch=main#7f2c08c61e68ceb48c3b00d1fe90415e5a86b170" }
+version = "2.0.1.dev2+g19c86a616"
+source = { git = "https://github.com/AdvancedPhotonSource/pty-chi.git?rev=19c86a616620f88c1cb594b430adc1bb17db6c4e#19c86a616620f88c1cb594b430adc1bb17db6c4e" }
 dependencies = [
     { name = "h5py" },
     { name = "matplotlib" },
@@ -3481,8 +3481,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3.3" },
     { name = "onnx", specifier = ">=1.17.0" },
     { name = "pandas", specifier = ">=2.3.3" },
-    { name = "ptychi", git = "https://github.com/AdvancedPhotonSource/pty-chi.git?branch=main" },
-    { name = "pydantic", specifier = ">=2.0,<3" },
+    { name = "ptychi", git = "https://github.com/AdvancedPhotonSource/pty-chi.git?rev=19c86a616620f88c1cb594b430adc1bb17db6c4e" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-image", specifier = ">=0.25.2" },
     { name = "scipy", specifier = ">=1.16.3" },

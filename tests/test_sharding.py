@@ -1,10 +1,15 @@
 """External train/validation splitting and static/dynamic rank sharding."""
 
+import pytest
 import torch
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 from ptycho_fm.data import CombinedDataset, RankShardedSubset
-from ptycho_fm.utils.data import ObjectDatasetView, split_dataset_by_object
+from ptycho_fm.utils.data import (
+    ObjectDatasetView,
+    split_dataset,
+    split_dataset_by_object,
+)
 
 from .test_data_refactor import make_pair
 
@@ -102,3 +107,56 @@ def test_object_level_subset_fraction_selects_whole_prefix_objects(tmp_path):
     )
     assert set(train_objects + val_objects) == {0, 1}
     assert len(train) == len(validation) == 4
+
+
+def test_pattern_split_supports_one_object(tmp_path):
+    make_pair(tmp_path, "a")
+    dataset = CombinedDataset(tmp_path, apply_noise=False)
+    train, validation, train_objects, val_objects = split_dataset(
+        dataset, train_fraction=0.75, random_seed=11, split_unit="pattern"
+    )
+    repeated = split_dataset(dataset, 0.75, 11, split_unit="pattern")
+    assert train.indices == repeated[0].indices
+    assert validation.indices == repeated[1].indices
+    assert len(train) == 3
+    assert len(validation) == 1
+    assert set(train.indices).isdisjoint(validation.indices)
+    assert set(train.indices) | set(validation.indices) == set(range(len(dataset)))
+    assert train_objects == val_objects == [0]
+    with pytest.raises(ValueError, match="at least one object"):
+        split_dataset(dataset, 0.75, 11)
+
+
+def test_pattern_subset_fraction_selects_prefix_patterns(tmp_path):
+    for name in ("a", "b"):
+        make_pair(tmp_path, name)
+    dataset = CombinedDataset(tmp_path, apply_noise=False)
+    train, validation, train_objects, val_objects = split_dataset(
+        dataset, 0.5, 3, subset_fraction=0.75, split_unit="pattern"
+    )
+    assert len(train) == len(validation) == 3
+    assert set(train.indices) | set(validation.indices) == set(range(6))
+    assert set(train_objects) | set(val_objects) == {0, 1}
+    default = split_dataset(dataset, 0.5, 3)
+    explicit = split_dataset_by_object(dataset, 0.5, 3)
+    assert default[0].indices == explicit[0].indices
+    assert default[1].indices == explicit[1].indices
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"split_unit": "invalid"}, "data.split_unit"),
+    ({"train_fraction": 0}, "data.train_split"),
+    ({"train_fraction": 1}, "data.train_split"),
+    ({"subset_fraction": 0}, "data.subset_fraction"),
+    ({"subset_fraction": 1.1}, "data.subset_fraction"),
+    ({"subset_fraction": 0.1}, "at least one pattern"),
+    ({"subset_fraction": 0.25}, "at least one pattern"),
+    ({"train_fraction": 0.1}, "at least one pattern"),
+])
+def test_invalid_pattern_split(tmp_path, kwargs, message):
+    make_pair(tmp_path)
+    dataset = CombinedDataset(tmp_path, apply_noise=False)
+    settings = {"train_fraction": 0.75, "random_seed": 3, "split_unit": "pattern"}
+    settings.update(kwargs)
+    with pytest.raises(ValueError, match=message):
+        split_dataset(dataset, **settings)

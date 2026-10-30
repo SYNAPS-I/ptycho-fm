@@ -71,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
 
         print("\n--- Test: treat positions as pixels directly ---")
         pos_origin = np.array(object_shape, dtype=np.float64) / 2.0
+        # Match the loaders' legacy +0.5 origin; future versions will use -0.5
+        # with legacy-origin support or migration of saved positions.
         pos_origin = np.round(pos_origin) + 0.5
         print(f"Position origin (object center): {pos_origin}")
 

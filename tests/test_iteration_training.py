@@ -206,3 +206,14 @@ def test_checkpoint_allows_changed_num_workers(tmp_path):
     trainer.resume_context['data']['max_shards'] = 11
     with pytest.raises(ValueError, match='settings differ'):
         trainer.load_state_checkpoint(opt, scheduler)
+
+
+def test_checkpoint_split_unit_default_and_change(tmp_path):
+    trainer, opt, scheduler, _ = setup(tmp_path)
+    trainer.resume_context['data'] = {'train_split': 0.75}
+    trainer.save_model_and_states_checkpoint(0, metrics(), opt, scheduler=scheduler)
+    trainer.resume_context['data']['split_unit'] = 'object'
+    trainer.load_state_checkpoint(opt, scheduler)
+    trainer.resume_context['data']['split_unit'] = 'pattern'
+    with pytest.raises(ValueError, match='settings differ'):
+        trainer.load_state_checkpoint(opt, scheduler)

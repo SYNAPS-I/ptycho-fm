@@ -209,7 +209,8 @@ data:
   normalization_dict_path: '/path/to/norm_factors.pkl'  # Optional
   apply_noise: true        # Add synthetic noise to training and validation data
   test_apply_noise: false  # Add synthetic noise to test/inference data independently
-  train_split: 0.95  # Fraction of complete objects assigned to training
+  split_unit: object  # object (default) or pattern
+  train_split: 0.95  # Fraction of the chosen split unit assigned to training
   random_seed: 8
 
   # DataLoader settings
@@ -219,6 +220,19 @@ data:
   drop_last: false
   persistent_workers: false
 ```
+
+Use `split_unit: object` for pre-training validation on unseen objects. All patterns
+from an object stay together, and at least one object is required in each split.
+For fine-tuning on a single scan, set `split_unit: pattern`; individual diffraction
+patterns are randomly assigned to training and validation using `data.random_seed`.
+This measures performance on held-out patterns within the scan, rather than on
+unseen objects. Each split must contain at least one pattern, and each rank must
+still receive at least one batch (a full batch when `drop_last: true`).
+
+`data.subset_fraction`, when set, selects the first fraction of objects or patterns
+according to `split_unit` before splitting. Complete-object validation plots are
+skipped in pattern mode because its objects may also contain training patterns;
+validation loss and separately configured test plots remain available.
 
 ### Training Configuration
 
