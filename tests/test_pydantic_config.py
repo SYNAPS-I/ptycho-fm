@@ -114,15 +114,21 @@ def test_nullable_backend_and_scheduler_options():
     assert PtychoFMConfig.model_validate(raw).model_dump(exclude_unset=True) == raw
 
 
-def test_typed_cli_overrides_missing_sections_and_launcher():
+@pytest.mark.parametrize('file_exists', [False, True])
+def test_typed_cli_overrides_missing_sections_and_launcher(tmp_path, monkeypatch, file_exists):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    normalization_path = tmp_path / 'data' / 'normalization.pkl'
+    if file_exists:
+        normalization_path.parent.mkdir()
+        normalization_path.write_bytes(b'')
     config = PtychoFMConfig()
     args = SimpleNamespace(data_path='~/data', test_path='~/test.hdf5',
                            finetune_from_model='~/weights.pth', model_save_path='~/models')
-    train.apply_cli_path_overrides(config, args)
+    config = train.apply_cli_path_overrides(config, args)
     train.apply_launcher_run_name(config, 'launch-name')
     raw = config.model_dump(exclude_unset=True)
     assert raw['data']['data_path'] == str(Path.home() / 'data')
-    assert raw['data']['normalization_dict_path'] == str(Path.home() / 'data/normalization.pkl')
+    assert raw['data']['normalization_dict_path'] == (str(normalization_path) if file_exists else None)
     assert raw['data']['test_normalization'] == raw['data']['normalization_dict_path']
     assert raw['data']['test_path'] == str(Path.home() / 'test.hdf5')
     assert raw['training']['finetune_from_model'] == str(Path.home() / 'weights.pth')
@@ -134,6 +140,18 @@ def test_typed_cli_overrides_missing_sections_and_launcher():
     config.training.resume_from_checkpoint = True
     train.apply_launcher_run_name(config, 'other-name')
     assert config.trainer.run_name is None
+
+
+@pytest.mark.parametrize('test_path', [None, '/test.hdf5'])
+def test_typed_cli_preserves_unrelated_settings_and_omissions(test_path):
+    config = PtychoFMConfig.model_validate({'data': {'split_unit': 'pattern'}})
+    args = SimpleNamespace(data_path=None, test_path=test_path,
+                           finetune_from_model=None, model_save_path=None)
+    config = train.apply_cli_path_overrides(config, args)
+    expected = {'data': {'split_unit': 'pattern'}}
+    if test_path is not None:
+        expected['data']['test_path'] = test_path
+    assert config.model_dump(exclude_unset=True) == expected
 
 
 @pytest.mark.parametrize('model_class', [PtychoFM, PtychoFMInference, PtychoFMReIm, PtychoFMCoupledAmpPh])

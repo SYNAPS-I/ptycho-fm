@@ -12,6 +12,7 @@ import torch
 import yaml
 
 from ptycho_fm import train
+from ptycho_fm.config import PtychoFMConfig
 from ptycho_fm.utils import config as config_utils
 
 from .test_data_refactor import make_pair
@@ -119,7 +120,10 @@ def test_training_reads_config_from_working_directory(tmp_path, monkeypatch, con
 
 
 @pytest.mark.parametrize('spelling', ['hyphen', 'underscore'])
-def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypatch, spelling):
+@pytest.mark.parametrize('file_exists', [False, True])
+def test_cli_paths_override_inherited_config_before_training(
+    tmp_path, monkeypatch, spelling, file_exists,
+):
     base = {
         'data': {
             'data_path': '/old/data',
@@ -144,7 +148,8 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
         argv.extend(['--' + flag, value])
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'new/data').mkdir(parents=True)
-    (tmp_path / 'new/data/normalization.pkl').write_bytes(pickle.dumps({}))
+    if file_exists:
+        (tmp_path / 'new/data/normalization.pkl').write_bytes(pickle.dumps({}))
     monkeypatch.setattr(sys, 'argv', argv)
 
     class ConfigReady(Exception):
@@ -154,8 +159,8 @@ def test_cli_paths_override_inherited_config_before_training(tmp_path, monkeypat
         assert config['data'] == {
             'data_path': overrides['data_path'],
             'test_path': overrides['test_path'],
-            'normalization_dict_path': 'new/data/normalization.pkl',
-            'test_normalization': 'new/data/normalization.pkl',
+            'normalization_dict_path': 'new/data/normalization.pkl' if file_exists else None,
+            'test_normalization': 'new/data/normalization.pkl' if file_exists else None,
         }
         assert config['training']['finetune_from_model'] == overrides['finetune_from_model']
         assert config['paths']['model_save_path'] == overrides['model_save_path']
@@ -185,7 +190,12 @@ def test_path_overrides_are_independent_and_optional(tmp_path, override):
     )
     if override is not None:
         setattr(args, override, str(tmp_path))
-    train.apply_cli_path_overrides(config, args)
+    original = PtychoFMConfig.model_validate(config)
+    updated = train.apply_cli_path_overrides(original, args)
+    assert isinstance(updated, PtychoFMConfig)
+    assert updated is not original
+    assert original.model_dump(exclude_unset=True) == config
+    config = updated.model_dump(exclude_unset=True)
 
     assert config['data']['data_path'] == (str(tmp_path) if override == 'data_path' else '/old/data')
     assert config['data']['test_path'] == (str(tmp_path) if override == 'test_path' else '/old/test/scan_dp.hdf5')
@@ -206,7 +216,9 @@ def test_path_overrides_are_independent_and_optional(tmp_path, override):
 @pytest.mark.parametrize('normalization', ['norm.pkl', 'metadata/norm.pkl', '/old/norm.pkl', None])
 @pytest.mark.parametrize('test_path', [None, '/new/test/scan_dp.hdf5'])
 @pytest.mark.parametrize('file_exists', [False, True])
-def test_normalization_paths_use_optional_cli_training_map(tmp_path, normalization, test_path, file_exists):
+def test_normalization_paths_use_optional_cli_training_map(
+    tmp_path, normalization, test_path, file_exists,
+):
     norm_path = tmp_path / 'normalization.pkl'
     if file_exists:
         norm_path.write_bytes(pickle.dumps({}))
@@ -217,7 +229,8 @@ def test_normalization_paths_use_optional_cli_training_map(tmp_path, normalizati
         data_path=str(tmp_path), test_path=test_path,
         finetune_from_model=None, model_save_path=None,
     )
-    train.apply_cli_path_overrides(config, args)
+    config = train.apply_cli_path_overrides(PtychoFMConfig.model_validate(config), args)
+    config = config.model_dump(exclude_unset=True)
 
     expected = str(norm_path) if file_exists else None
     assert config['data']['normalization_dict_path'] == expected
@@ -236,7 +249,8 @@ def test_cli_normalization_applies_to_training_and_test_samples(tmp_path, file_e
         data_path=str(data_dir), test_path=str(test_path),
         finetune_from_model=None, model_save_path=None,
     )
-    train.apply_cli_path_overrides(config, args)
+    config = train.apply_cli_path_overrides(PtychoFMConfig.model_validate(config), args)
+    config = config.model_dump(exclude_unset=True)
     settings = config['data']
     training = train.CombinedDataset(
         data_dir, normalization_dict_path=settings['normalization_dict_path'],
@@ -255,12 +269,12 @@ def test_cli_normalization_applies_to_training_and_test_samples(tmp_path, file_e
 def test_cli_paths_can_supply_missing_settings_and_expand_home(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     home = Path.home()
-    config = {}
+    config = PtychoFMConfig()
     args = SimpleNamespace(
         data_path='~/data', test_path='~/test/scan_dp.hdf5',
         finetune_from_model='~/model.pth', model_save_path='~/models',
     )
-    train.apply_cli_path_overrides(config, args)
+    config = train.apply_cli_path_overrides(config, args).model_dump(exclude_unset=True)
 
     assert config == {
         'data': {
