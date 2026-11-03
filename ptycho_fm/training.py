@@ -3,6 +3,7 @@ import random
 import shutil
 import time
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -34,9 +35,16 @@ def _move_to_cpu(obj):
 
 
 def _atomic_torch_save(obj, path):
-    tmp_path = f"{path}.tmp"
-    torch.save(obj, tmp_path)
-    os.replace(tmp_path, path)
+    """Replace one file atomically, giving overlapping saves independent temp files."""
+    tmp_path = f"{path}.{uuid4().hex}.tmp"
+    try:
+        torch.save(obj, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _checkpoint_resume_context(context):

@@ -91,26 +91,27 @@ def apply_launcher_run_name(config, launch_run_name):
         trainer['run_name'] = str(launch_run_name)
 
 
-def apply_cli_path_overrides(config, args):
-    """Apply CLI paths and use the data directory's normalization when present."""
+def apply_cli_path_overrides(config: PtychoFMConfig, args) -> PtychoFMConfig:
+    """Rewrite explicitly set values with CLI paths and return a validated model."""
+    values = config.model_dump(exclude_unset=True)
     if args.data_path is not None:
-        data = config.setdefault('data', {})
-        data['data_path'] = os.path.expanduser(args.data_path)
-        candidate = Path(data['data_path']) / 'normalization.pkl'
+        data_path = os.path.expanduser(args.data_path)
+        candidate = Path(data_path) / 'normalization.pkl'
         normalization_path = str(candidate) if candidate.exists() else None
-        data['normalization_dict_path'] = normalization_path
-        data['test_normalization'] = normalization_path
+        values.setdefault('data', {}).update({
+            'data_path': data_path,
+            'normalization_dict_path': normalization_path,
+            'test_normalization': normalization_path,
+        })
     if args.test_path is not None:
-        data = config.setdefault('data', {})
-        data['test_path'] = os.path.expanduser(args.test_path)
+        values.setdefault('data', {})['test_path'] = os.path.expanduser(args.test_path)
     if args.finetune_from_model is not None:
-        config.setdefault('training', {})['finetune_from_model'] = os.path.expanduser(
+        values.setdefault('training', {})['finetune_from_model'] = os.path.expanduser(
             args.finetune_from_model
         )
     if args.model_save_path is not None:
-        config.setdefault('paths', {})['model_save_path'] = os.path.expanduser(
-            args.model_save_path
-        )
+        values.setdefault('paths', {})['model_save_path'] = os.path.expanduser(args.model_save_path)
+    return PtychoFMConfig.model_validate(values)
 
 
 def main() -> None:
@@ -203,7 +204,7 @@ def main() -> None:
     # Load configuration
     config_path = resolve_config_path(args.config)
     config = load_config(config_path)
-    apply_cli_path_overrides(config, args)
+    config = apply_cli_path_overrides(config, args)
     apply_launcher_run_name(config, os.environ.get('PTYCHO_FM_LAUNCH_RUN_NAME'))
     # Runtime consumers and persisted checkpoint/tracker metadata use plain
     # mappings. Preserve omissions for their context-dependent defaults.
