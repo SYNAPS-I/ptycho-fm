@@ -4,8 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy.integrate import simpson
-from scipy.special import j1, j0
-
+from scipy.special import j0, j1
 
 SCRIPT = Path(__file__).parents[1] / "scripts/iterative_reconstruction/ptychi_recon.py"
 spec = importlib.util.spec_from_file_location("ptychi_recon", SCRIPT)
@@ -14,16 +13,16 @@ spec.loader.exec_module(recon)
 
 
 def make_probe(**overrides):
-    parameters = dict(
-        zp_diameter_m=100e-6,
-        central_stop_diameter_m=30e-6,
-        zp_outer_zone_width_m=40e-9,
-        energy_kev=8.6,
-        defocus_distance_m=0.0,
-        probe_shape=(97, 129),
-        pixel_size_m=10e-9,
-        upsample_factor=8,
-    )
+    parameters = {
+        "zp_diameter_m": 100e-6,
+        "central_stop_diameter_m": 30e-6,
+        "zp_outer_zone_width_m": 40e-9,
+        "energy_kev": 8.6,
+        "defocus_distance_m": 0.0,
+        "probe_shape": (97, 129),
+        "pixel_size_m": 10e-9,
+        "upsample_factor": 8,
+    }
     parameters.update(overrides)
     return recon.generate_zone_plate_probe(**parameters)
 
