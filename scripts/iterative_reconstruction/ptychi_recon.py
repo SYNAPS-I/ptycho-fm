@@ -255,6 +255,121 @@ def calculate_stage_m_per_detector_px(
     return binned_detector_pixel_size_m / detector_shift_gain
 
 
+def generate_zone_plate_probe(
+    zp_diameter_m: float,
+    central_stop_diameter_m: float,
+    zp_outer_zone_width_m: float,
+    energy_kev: float,
+    defocus_distance_m: float,
+    *,
+    probe_shape: tuple[int, int],
+    pixel_size_m: float,
+    upsample_factor: int = 10,
+) -> np.ndarray:
+    """Generate a centered, first-order X-ray zone-plate probe on the sample grid.
+
+    Follows the focused-probe method in PtychoShelves (Wakonig et al.,
+    J. Appl. Cryst. 53, 574-586, 2020, doi:10.1107/S1600576720001776):
+    illuminate an annular pupil with a plane wave, apply a thin-lens phase,
+    propagate by focal length plus defocus, then crop and apodize the field.
+    This models the focusing diffraction order, not individual binary zones.
+
+    All lengths are in meters; energy is in keV. Positive defocus places the
+    sample downstream of focus. ``probe_shape`` is (height, width), and
+    ``pixel_size_m`` is the sample-plane pixel pitch in both directions.
+    ``upsample_factor`` enlarges the simulated sample window and refines the
+    pupil sampling; it does not change the returned sample-plane pixel pitch.
+
+    Uses Pty-Chi's FourierPropagator for the scaled Fresnel integral. Lens and
+    input propagation phases are combined before sampling to avoid aliasing
+    the rapidly varying, mutually canceling quadratic phases near focus.
+    The circular pupil has sharp edges; a Tukey taper covers the outer 5% on
+    each side of the cropped field. An irrelevant global propagation phase
+    is omitted. Returns a complex64 NumPy array of shape ``probe_shape`` with
+    sum(abs(probe)**2) = height * width, as in PtychoShelves. Scale to measured
+    diffraction intensities separately (e.g. with ptychi.utils.rescale_probe).
+
+    Imports torch/Pty-Chi only when called; load HDF5 detector data first.
+    """
+    for name, value in {
+        "zp_diameter_m": zp_diameter_m,
+        "zp_outer_zone_width_m": zp_outer_zone_width_m,
+        "energy_kev": energy_kev,
+        "pixel_size_m": pixel_size_m,
+    }.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and > 0, got {value}")
+    if not np.isfinite(central_stop_diameter_m) or not (
+        0 <= central_stop_diameter_m < zp_diameter_m
+    ):
+        raise ValueError("central_stop_diameter_m must be finite and in [0, zp_diameter_m)")
+    if not np.isfinite(defocus_distance_m):
+        raise ValueError("defocus_distance_m must be finite")
+    if len(probe_shape) != 2 or any(
+        isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 3
+        for n in probe_shape
+    ):
+        raise ValueError("probe_shape must contain two integers >= 3")
+    if (
+        isinstance(upsample_factor, (bool, np.bool_))
+        or not isinstance(upsample_factor, (int, np.integer))
+        or upsample_factor < 1
+    ):
+        raise ValueError("upsample_factor must be a positive integer")
+
+    wavelength_m = 1.239841984e-9 / energy_kev
+    focal_length_m = zp_diameter_m * zp_outer_zone_width_m / wavelength_m
+    propagation_distance_m = focal_length_m + defocus_distance_m
+    if propagation_distance_m <= 0:
+        raise ValueError("focal length + defocus_distance_m must be > 0")
+
+    height, width = probe_shape
+    sim_height, sim_width = height * upsample_factor, width * upsample_factor
+    # Scaled Fresnel sampling: dx_pupil * dx_sample = lambda * z / N.
+    pupil_dy = wavelength_m * propagation_distance_m / (sim_height * pixel_size_m)
+    pupil_dx = wavelength_m * propagation_distance_m / (sim_width * pixel_size_m)
+    if zp_diameter_m >= min(sim_height * pupil_dy, sim_width * pupil_dx):
+        raise ValueError("Zone plate does not fit in the pupil grid; reduce pixel_size_m")
+    pupil_y = (np.arange(sim_height) - sim_height // 2) * pupil_dy
+    pupil_x = (np.arange(sim_width) - sim_width // 2) * pupil_dx
+    radius_sq = pupil_y[:, None] ** 2 + pupil_x[None, :] ** 2
+    pupil = radius_sq < (zp_diameter_m / 2) ** 2
+    if central_stop_diameter_m > 0:
+        pupil &= radius_sq >= (central_stop_diameter_m / 2) ** 2
+    if not np.any(pupil):
+        raise ValueError("Pupil grid misses the transmitting annulus; increase upsample_factor")
+
+    # 1/z - 1/f = -defocus/(z*f); this remains exactly zero at focus.
+    phase = -np.pi * defocus_distance_m * radius_sq / (
+        wavelength_m * propagation_distance_m * focal_length_m
+    )
+    pupil_field = pupil * np.exp(1j * phase)
+
+    import torch
+    from ptychi.propagate import FourierPropagator
+    from scipy.signal.windows import tukey
+
+    # Pty-Chi's FourierPropagator uses unshifted FFTs. Center both planes.
+    pupil_tensor = torch.from_numpy(pupil_field)
+    propagated = torch.fft.fftshift(
+        FourierPropagator().propagate_forward(torch.fft.ifftshift(pupil_tensor))
+    )
+    y0, x0 = sim_height // 2 - height // 2, sim_width // 2 - width // 2
+    probe = propagated[y0 : y0 + height, x0 : x0 + width].numpy().copy()
+    sample_y = (np.arange(height) - height // 2) * pixel_size_m
+    sample_x = (np.arange(width) - width // 2) * pixel_size_m
+    output_phase = np.pi * (sample_y[:, None] ** 2 + sample_x[None, :] ** 2) / (
+        wavelength_m * propagation_distance_m
+    )
+    probe *= np.exp(1j * output_phase)
+    probe *= tukey(height, alpha=0.1)[:, None] * tukey(width, alpha=0.1)[None, :]
+    power = np.sum(np.abs(probe) ** 2)
+    if not np.isfinite(power) or power <= 0:
+        raise ValueError("Propagated probe has zero or nonfinite power; check sampling and optics")
+    probe *= np.sqrt(height * width / power)
+    return probe.astype(np.complex64)
+
+
 def preprocess_weakly_scattering_data(
     data: np.ndarray,
     positions: np.ndarray,
