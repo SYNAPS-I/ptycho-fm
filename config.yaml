@@ -118,10 +118,8 @@ training:
 
   validation_plot_freq: 1  # Plot validation results every N epochs
   validation_plot_num_objects: 10  # Number of complete validation objects to stitch; null logs all
-  validation_plot_central_crop: 64
   validation_plot_object_crop: 180
   test_plot_freq: 1 # Plot stitched test results every M epochs
-  test_plot_central_crop: 64
   test_plot_object_crop: 180
   resume_from_checkpoint: true  # Set to true to resume training from checkpoint
   # Save model weights each epoch as model_epoch_XXX.pth

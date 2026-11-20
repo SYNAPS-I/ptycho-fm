@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 from matplotlib import colors
 from mpl_toolkits.axes_grid1.axes_divider import make_axes_locatable
-from ptychi.image_proc import place_patches_fourier_shift
 from torch import nn
 
 from ptycho_fm.metrics import (
@@ -20,6 +19,11 @@ from ptycho_fm.metrics import (
     prepare_image_metric_inputs,
 )
 from ptycho_fm.utils.progress import TrainingProgress
+from ptycho_fm.utils.stitching import (
+    ProbeWeightedStitcher,
+    probe_power,
+    warn_ignored_central_crop,
+)
 
 
 def _move_to_cpu(obj):
@@ -282,14 +286,14 @@ class Trainer:
         f.savefig(os.path.join(run_path, filename), bbox_inches='tight', transparent=True)
 
     def generate_test_plot(
-        self, dataloader, epoch, filename, central_crop=64, object_crop=180,
+        self, dataloader, epoch, filename, central_crop=None, object_crop=180,
         log_key="test_plot", artifact_path="test_plots", caption=None,
     ):
-        total_scan_points = len(dataloader.dataset)
-        pred_amp = torch.zeros((total_scan_points, dataloader.dataset.pattern_shape[0], dataloader.dataset.pattern_shape[1]), device='cpu')
-        pred_ph = torch.zeros(pred_amp.shape, device='cpu')
-        gt_amp = torch.zeros(pred_amp.shape, device='cpu')
-        gt_ph = torch.zeros(pred_amp.shape, device='cpu')
+        if central_crop is not None:
+            warn_ignored_central_crop("central_crop")
+        object_size = dataloader.dataset.object_shape
+        positions = dataloader.dataset.get_probe_positions()
+        stitcher = ProbeWeightedStitcher(object_size, num_channels=4)
         scan_idx = 0
 
         with torch.no_grad():
@@ -307,71 +311,15 @@ class Trainer:
                 input_scale = scale.to(self.device, non_blocking=True)
 
                 _output_diff, output_amp, output_ph = inference_model(input_diff, input_probe, input_norm, input_scale)
-                pred_amp[scan_idx:scan_idx + batch_size] = output_amp.squeeze().detach().cpu()
-                pred_ph[scan_idx:scan_idx + batch_size] = output_ph.squeeze().detach().cpu()
-                gt_amp[scan_idx:scan_idx + batch_size] = amp_patch.squeeze().detach().cpu()
-                gt_ph[scan_idx:scan_idx + batch_size] = ph_patch.squeeze().detach().cpu()
-
+                stitcher.add(
+                    positions[scan_idx:scan_idx + batch_size],
+                    (output_amp.squeeze(1), output_ph.squeeze(1),
+                     amp_patch.squeeze(1), ph_patch.squeeze(1)),
+                    probe_power(probe),
+                )
                 scan_idx += batch_size
 
-        object_size = dataloader.dataset.object_shape
-        positions = dataloader.dataset.get_probe_positions()
-        pred_amp_object = torch.zeros(object_size, device='cpu')
-        pred_ph_object = torch.zeros(object_size, device='cpu')
-        buffer = torch.zeros(object_size, device='cpu')
-
-        central_crop = int(central_crop)
-        if central_crop < 0 or 2 * central_crop >= min(dataloader.dataset.pattern_shape):
-            raise ValueError("central_crop must be non-negative and smaller than half the pattern size.")
-        patch_slice = slice(central_crop, -central_crop if central_crop else None)
-        pred_amp_object = place_patches_fourier_shift(
-            pred_amp_object,
-            positions,
-            pred_amp[:, patch_slice, patch_slice],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        pred_ph_object = place_patches_fourier_shift(
-            pred_ph_object,
-            positions,
-            pred_ph[:, patch_slice, patch_slice],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        buffer = place_patches_fourier_shift(
-            buffer,
-            positions,
-            torch.ones_like(pred_ph[:, patch_slice, patch_slice]),
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-
-        gt_amp_object = torch.zeros(object_size, device='cpu')
-        gt_ph_object = torch.zeros(object_size, device='cpu')
-        gt_amp_object = place_patches_fourier_shift(
-            gt_amp_object,
-            positions,
-            gt_amp[:, patch_slice, patch_slice],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-        gt_ph_object = place_patches_fourier_shift(
-            gt_ph_object,
-            positions,
-            gt_ph[:, patch_slice, patch_slice],
-            op="add",
-            adjoint_mode=False,
-            pad=32
-        )
-
-        pred_amp_object = pred_amp_object / torch.clip(buffer, min=1)
-        pred_ph_object = pred_ph_object / torch.clip(buffer, min=1)
-        gt_amp_object = gt_amp_object / torch.clip(buffer, min=1)
-        gt_ph_object = gt_ph_object / torch.clip(buffer, min=1)
+        pred_amp_object, pred_ph_object, gt_amp_object, gt_ph_object = stitcher.result()
 
         object_crop = int(object_crop)
         if object_crop < 0 or 2 * object_crop >= min(object_size):

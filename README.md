@@ -250,10 +250,20 @@ training:
   loss_function: 'l1'  # Options: 'smooth_l1', 'mse', 'l1', 'poisson_nll'
   validation_plot_freq: 10
   validation_plot_num_objects: 1  # Complete held-out objects to stitch; null logs all
-  validation_plot_central_crop: 64
   validation_plot_object_crop: 180
   resume_from_checkpoint: false
 ```
+
+Test and validation object plots stitch full patches using probe-power weights
+(`|probe|²`, summed over incoherent modes of the first OPR component, matching
+the forward model). Amplitude and phase are divided by accumulated illumination;
+unilluminated pixels are zero. Legacy `test_plot_central_crop` and
+`validation_plot_central_crop` settings warn and are ignored. Final object-border
+cropping remains controlled by the object-crop settings.
+
+`scripts/run_inference_and_stitch.py` uses the same weighting for paired
+`*_dp.hdf5` / `*_para.hdf5` inputs. Its legacy `--central-crop` option is also
+ignored with a warning.
 
 ## Model Architecture Details
 

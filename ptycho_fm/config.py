@@ -6,9 +6,10 @@ values must stay missing for context-dependent runtime defaults (for example,
 pretrained encoder sizes, validation batch size, and dataset normalization).
 """
 
+import warnings
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class ConfigModel(BaseModel):
@@ -110,7 +111,7 @@ class TrainingConfig(ConfigModel):
     validation_plot_central_crop: int | None = None
     validation_plot_object_crop: int | None = None
     test_plot_freq: int | None = None
-    test_plot_central_crop: int = 64
+    test_plot_central_crop: int | None = None
     test_plot_object_crop: int = 180
     resume_from_checkpoint: bool = False
     save_epoch_models: bool = False
@@ -118,6 +119,17 @@ class TrainingConfig(ConfigModel):
     finetune_from_model: str | None = None
     platform: str = 'slurm'
     profile: bool = False
+
+    @field_validator('test_plot_central_crop', 'validation_plot_central_crop', mode='before')
+    @classmethod
+    def warn_legacy_plot_crop(cls, value, info: ValidationInfo):
+        warnings.warn(
+            f"training.{info.field_name} is deprecated and ignored; stitching now "
+            "uses full patches weighted by probe power.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return value
 
 
 class EncoderConfig(ConfigModel):
