@@ -916,18 +916,12 @@ def main() -> None:
     def generate_validation_object_plots(step, label):
         if not is_main_process or not validation_plot_objects:
             return
-        requested_central_crop = int(config["training"].get(
-            "validation_plot_central_crop",
-            config["training"].get("test_plot_central_crop", 64),
-        ))
         requested_object_crop = int(config["training"].get(
             "validation_plot_object_crop",
             config["training"].get("test_plot_object_crop", 180),
         ))
         for plot_index, (object_key, object_loader) in enumerate(validation_plot_objects):
-            pattern_size = min(object_loader.dataset.pattern_shape)
             object_size = min(object_loader.dataset.object_shape)
-            central_crop = requested_central_crop if 2 * requested_central_crop < pattern_size else 0
             object_crop = requested_object_crop if 2 * requested_object_crop < object_size else 0
             print(
                 f"Generating stitched validation object: {object_key} "
@@ -938,7 +932,6 @@ def main() -> None:
                 object_loader,
                 step,
                 f"validation_object_{plot_index}_{label}.png",
-                central_crop=central_crop,
                 object_crop=object_crop,
                 log_key=f"val_object_plot/{plot_index}",
                 artifact_path="validation_object_plots",
@@ -993,7 +986,6 @@ def main() -> None:
                 and not config['training'].get('profile', False)):
             trainer.generate_test_plot(
                 test_loader, progress.iters, f'test_iters{progress.iters}.png',
-                central_crop=config['training'].get('test_plot_central_crop', 64),
                 object_crop=config['training'].get('test_plot_object_crop', 180),
             )
         progress.mark_logged()
@@ -1130,7 +1122,6 @@ def main() -> None:
                     test_loader,
                     epoch,
                     'test_epoch' + str(epoch) + '.png',
-                    central_crop=config['training'].get('test_plot_central_crop', 64),
                     object_crop=config['training'].get('test_plot_object_crop', 180),
                 )
 
